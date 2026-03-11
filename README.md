@@ -3,6 +3,7 @@
 IsaacLab Simulation for the H1_2 robot.
 
 ## Installation
+- Just copy and paste in a terminal:
     ```bash
     cd ~
     git clone https://github.com/correlllab/Humanoid_Simulation.git
