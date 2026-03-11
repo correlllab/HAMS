@@ -21,12 +21,10 @@ RUN sed -i 's|http://archive.ubuntu.com/ubuntu/|http://us.archive.ubuntu.com/ubu
 
 # Install build dependencies + X11 support for GUI rendering
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    gcc-12 g++-12 cmake build-essential curl unzip git-lfs wget \
+    gcc-12 g++-12 cmake build-essential unzip git-lfs wget \
     libglu1-mesa-dev vulkan-tools libvulkan1 \
     libx11-6 libxext6 libxrender1 libxi6 libxrandr2 libxcursor1 libxinerama1 \
     libgl1-mesa-glx libglib2.0-0 libsm6 libxt6 libxkbcommon-x11-0 \
-    libssl-dev libusb-1.0-0-dev libudev-dev pkg-config libgtk-3-dev coreutils\
-    libglfw3-dev libgl1-mesa-dev libglu1-mesa-dev at v4l-utils udev kmod lsb-release \
     && update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-12 100 \
     && update-alternatives --install /usr/bin/g++ g++ /usr/bin/g++-12 100 \
     && rm -rf /var/lib/apt/lists/*
@@ -61,26 +59,6 @@ RUN pip install "isaacsim[all,extscache]==5.0.0" --extra-index-url https://pypi.
 RUN mkdir -p /home/code
 WORKDIR /home/code
 
-RUN apt update && apt install sudo
-
-#installing librealsense drivers early bc it literally takes forever to build
-RUN git clone https://github.com/realsenseai/librealsense.git
-WORKDIR /home/code/librealsense
-RUN mkdir -p /etc/udev/rules.d/
-RUN . scripts/setup_udev_rules.sh
-#subsequent step fails when ran in multi-command 'run' command
-RUN conda run /bin/bash -c bash -c ". scripts/patch-realsense-ubuntu-lts-hwe.sh"
-RUN mkdir build
-RUN cd build
-WORKDIR /home/code/librealsense/build
-RUN cmake ../ -DCMAKE_BUILD_TYPE=Release
-RUN make uninstall
-RUN make clean
-RUN make
-RUN make -j$(($(nproc)-1)) install
-
-WORKDIR /home/code
-
 # Clone and install IsaacLab
 RUN git clone https://github.com/isaac-sim/IsaacLab.git && \
     cd IsaacLab && \
@@ -102,49 +80,31 @@ RUN git clone https://github.com/unitreerobotics/unitree_sdk2_python && \
 # Clone unitree_sim_isaaclab
 RUN git clone https://github.com/correlllab/CL_isaaclab_sim.git /home/code/CL_isaaclab_sim && \
     cd /home/code/CL_isaaclab_sim && pip install -r requirements.txt
+    
+RUN cd /home/code/CL_isaaclab_sim && git clone https://github.com/unitreerobotics/teleimager.git
+
+RUN cd /home/code/CL_isaaclab_sim/teleimager && git reset --hard a1815d0 && sed -i 's/^requires-python = .*/requires-python = ">=3.8,<3.12"/' pyproject.toml
+RUN cd /home/code/CL_isaaclab_sim/teleimager && pip install -e . && pip install aiortc
 
 RUN cd /home/code/CL_isaaclab_sim && . fetch_assets.sh
 
+## Clone models and ROS
+#RUN git clone https://huggingface.co/datasets/unitreerobotics/unitree_model /home/code/unitree_model
+#ENV UNITREE_MODEL_DIR=/home/code/unitree_model
+#
+#RUN git clone https://github.com/unitreerobotics/unitree_ros.git /home/code/unitree_ros
+#ENV UNITREE_ROS_DIR=/home/code/unitree_ros
+#
+#
+#RUN git clone https://github.com/unitreerobotics/unitree_rl_lab.git /home/code/unitree_rl_lab && \
+#    cd /home/code/unitree_rl_lab && \
+#    sed -i 's|UNITREE_MODEL_DIR = "path/to/unitree_model"|UNITREE_MODEL_DIR = os.getenv("UNITREE_MODEL_DIR", "/home/code/unitree_model")|g' \
+#      ./source/unitree_rl_lab/unitree_rl_lab/assets/robots/unitree.py && \
+#    sed -i 's|UNITREE_ROS_DIR = "path/to/unitree_ros"|UNITREE_ROS_DIR = os.getenv("UNITREE_ROS_DIR", "/home/code/unitree_ros")|g' \
+#      ./source/unitree_rl_lab/unitree_rl_lab/assets/robots/unitree.py && \
+#    ./unitree_rl_lab.sh -i
 
-# Clone models and ROS
-RUN git clone https://huggingface.co/datasets/unitreerobotics/unitree_model /home/code/unitree_model
-ENV UNITREE_MODEL_DIR=/home/code/unitree_model
 
-RUN git clone https://github.com/unitreerobotics/unitree_ros.git /home/code/unitree_ros
-ENV UNITREE_ROS_DIR=/home/code/unitree_ros
-
-
-RUN git clone https://github.com/unitreerobotics/unitree_rl_lab.git /home/code/unitree_rl_lab && \
-    cd /home/code/unitree_rl_lab && \
-    sed -i 's|UNITREE_MODEL_DIR = "path/to/unitree_model"|UNITREE_MODEL_DIR = os.getenv("UNITREE_MODEL_DIR", "/home/code/unitree_model")|g' \
-      ./source/unitree_rl_lab/unitree_rl_lab/assets/robots/unitree.py && \
-    sed -i 's|UNITREE_ROS_DIR = "path/to/unitree_ros"|UNITREE_ROS_DIR = os.getenv("UNITREE_ROS_DIR", "/home/code/unitree_ros")|g' \
-      ./source/unitree_rl_lab/unitree_rl_lab/assets/robots/unitree.py && \
-    ./unitree_rl_lab.sh -i
-
-
-# Clone H12 Lab Docs
-RUN git clone https://github.com/correlllab/h12-lab-docs.git /home/code/h12-lab-docs
-
-# Clone H12 Stand
-RUN git clone https://github.com/correlllab/h12_stand.git /home/code/h12_stand
-
-#Setup sources
-RUN set -eux; \
-    ROS_VERSION=$(curl -s https://api.github.com/repos/ros-infrastructure/ros-apt-source/releases/latest | grep -F "tag_name" | awk -F\" '{print $4}'); \
-    curl -L -o /tmp/ros2.deb "https://github.com/ros-infrastructure/ros-apt-source/releases/download/${ROS_VERSION}/ros2-apt-source_${ROS_VERSION}.$(. /etc/os-release && echo $VERSION_CODENAME)_all.deb"; \
-    dpkg -i /tmp/ros2.deb; \
-    rm /tmp/ros2.deb
-
-#Install ros humble desktop and rmw cyclonedds cpp implementation
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    ros-humble-desktop \
-    ros-humble-rmw-cyclonedds-cpp \
-    && rm -rf /var/lib/apt/lists/*
-
-#Set environment variables
-ENV RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
-ENV ROS_DISTRO=humble
 # ==============================
 # Stage 2: Runtime
 # ==============================
@@ -173,21 +133,18 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY --from=builder /home/code /home/code
 COPY --from=builder /cyclonedds /cyclonedds
 COPY --from=builder /opt/conda /opt/conda
-COPY --from=builder /opt/ros/humble /opt/ros/humble
 
-COPY conda_overlay_ros2.sh /home/code/conda_overlay_ros2.sh
 
 # Initialize bashrc (removed OMNI_KIT_DISABLE_STARTUP)
 RUN echo 'source /opt/conda/etc/profile.d/conda.sh' >> ~/.bashrc && \
     echo 'conda activate humanoid_sim_env' >> ~/.bashrc && \
-    echo 'chmod +x /home/code/conda_overlay_ros2.sh && . /home/code/conda_overlay_ros2.sh' >> ~/.bashrc && \
-    echo 'source /opt/ros/humble/setup.sh' >> ~/.bashrc && \ 
     echo 'export OMNI_KIT_ALLOW_ROOT=1' >> ~/.bashrc && \
     echo 'export OMNI_KIT_ACCEPT_EULA=yes' >> ~/.bashrc && \
     echo 'export UNITREE_MODEL_DIR=/home/code/unitree_model' >> ~/.bashrc && \
     echo 'export UNITREE_ROS_DIR=/home/code/unitree_ros' >> ~/.bashrc && \
     echo 'export CYCLONEDDS_HOME=/cyclonedds/install' >> ~/.bashrc && \
-    echo 'export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp' >> ~/.bashrc
+    echo 'export LD_LIBRARY_PATH="/opt/conda/envs/humanoid_sim_env/lib/python3.11/site-packages/isaacsim/exts/isaacsim.ros2.bridge/humble/lib/":$LD_LIBRARY_PATH' >> ~/.bashrc
+
 
 WORKDIR /home/code
 
