@@ -4,9 +4,6 @@ IsaacLab Simulation for the H1_2 robot.
 
 ## Installation
 
-- Clone this repo.
-- Build docker image:
-
     ```bash
     cd ~
     git clone https://github.com/correlllab/Humanoid_Simulation.git
@@ -16,8 +13,7 @@ IsaacLab Simulation for the H1_2 robot.
     ```
 
 ## Usage
-
-- Run launch.sh script within container:
+- Within container:
 
     ```bash
     cd /home/code/h12_sim_scripts
@@ -25,3 +21,10 @@ IsaacLab Simulation for the H1_2 robot.
     ./launch.sh
     ```
 
+- I strongly recommend keeping the same container for as long as possible. IsaacSim shader compilation takes forever. To restart a stopped (exited) container:
+
+    ```bash
+    sudo docker start -ai h12_sim_container
+    #or
+    sudo docker exec -it h12_sim_container bash
+    ```
