@@ -1,5 +1,4 @@
 # Humanoid_Simulation
-# h1_mujoco
 
 IsaacLab Simulation for the H1_2 robot.
 
