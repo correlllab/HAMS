@@ -24,3 +24,6 @@ IsaacLab Simulation for the H1_2 robot.
     #or
     sudo docker exec -it h12_sim_container bash
     ```
+## Mini Demo Video
+https://github.com/user-attachments/assets/61b75083-ebab-4e3e-9ba5-d7bf31474d01
+
