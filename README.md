@@ -26,4 +26,6 @@ IsaacLab Simulation for the H1_2 robot.
     ```
 ## Mini Demo Video
 https://github.com/user-attachments/assets/61b75083-ebab-4e3e-9ba5-d7bf31474d01
+## Important Notes for Use of Yutong's ROS2 Controller in Sim
+If you plan on using Yutong's ROS2 controller for test, it is best to comment out the line that raises the E-Stop exception (which can be found with just a grep). IsaacSim joint states are below the minimum tolerances for E-Stops, so everything will just error out.
 
