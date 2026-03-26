@@ -1,0 +1,37 @@
+type(writer)=<class 'omni.replicator.core.scripts.writers.NodeWriter'>
+vars(writer)={'node_type_id': 'isaacsim.ros2.bridge.ROS2PublishImage', '_annotators': ['LdrColorSDIsaacConvertRGBAToRGB', SyntheticData.NodeConnectionTemplate(node_templ
+ate_id='IsaacReadSimulationTime', render_product_idxs=(0,), attributes_mapping={'outputs:simulationTime': 'inputs:timeStamp'})], '_kwargs': {'frameId': 'Camera_OmniVisio
+n_OV9782_Color', 'nodeNamespace': '/h12_camera', 'queueSize': 10, 'topicName': 'r_rgb'}, '_node': Node("/Render/PostProcess/SDGPipeline/Replicator_04_NodeWriterWriter"),
+ '_attached_annotators': [<omni.replicator.core.scripts.annotators.Annotator object at 0x70d5700cf190>, <omni.replicator.core.scripts.annotators.Annotator object at 0x70
+d5700c38d0>], '_writer_id': 'NodeWriter_637210be-2656-11f1-ad3e-58cdc999dabd'}
+inspect.getmembers(writer)=[('__call__', <bound method NodeWriter.__call__ of <omni.replicator.core.scripts.writers.NodeWriter object at 0x70d5700cded0>>), ('__class__',
+ <class 'omni.replicator.core.scripts.writers.NodeWriter'>), ('__delattr__', <method-wrapper '__delattr__' of NodeWriter object at 0x70d5700cded0>), ('__dict__', {'node_
+type_id': 'isaacsim.ros2.bridge.ROS2PublishImage', '_annotators': ['LdrColorSDIsaacConvertRGBAToRGB', SyntheticData.NodeConnectionTemplate(node_template_id='IsaacReadSim
+ulationTime', render_product_idxs=(0,), attributes_mapping={'outputs:simulationTime': 'inputs:timeStamp'})], '_kwargs': {'frameId': 'Camera_OmniVision_OV9782_Color', 'no
+deNamespace': '/h12_camera', 'queueSize': 10, 'topicName': 'r_rgb'}, '_node': Node("/Render/PostProcess/SDGPipeline/Replicator_04_NodeWriterWriter"), '_attached_annotato
+rs': [<omni.replicator.core.scripts.annotators.Annotator object at 0x70d5700cf190>, <omni.replicator.core.scripts.annotators.Annotator object at 0x70d5700c38d0>], '_writ
+er_id': 'NodeWriter_637210be-2656-11f1-ad3e-58cdc999dabd'}), ('__dir__', <built-in method __dir__ of NodeWriter object at 0x70d5700cded0>), ('__doc__', "Node Writer clas
+s.\n\n    Node writers are writers implemented as OmniGraph nodes. These depend on annotators like python writers, but\n    are implemented as nodes and can be written i
+n C++.\n\n    Args:\n        node_type_id: The node's type identifier (eg. `'my.extension.OgnCustomNode'`)\n        annotators: List of dependent annotators\n        kwa
+rgs: Node Writer input attribute initialization\n    "), ('__eq__', <method-wrapper '__eq__' of NodeWriter object at 0x70d5700cded0>), ('__format__', <built-in method __
+format__ of NodeWriter object at 0x70d5700cded0>), ('__ge__', <method-wrapper '__ge__' of NodeWriter object at 0x70d5700cded0>), ('__getattribute__', <method-wrapper '__
+getattribute__' of NodeWriter object at 0x70d5700cded0>), ('__getstate__', <built-in method __getstate__ of NodeWriter object at 0x70d5700cded0>), ('__gt__', <method-wra
+pper '__gt__' of NodeWriter object at 0x70d5700cded0>), ('__hash__', <method-wrapper '__hash__' of NodeWriter object at 0x70d5700cded0>), ('__init__', <bound method Node
+Writer.__init__ of <omni.replicator.core.scripts.writers.NodeWriter object at 0x70d5700cded0>>), ('__init_subclass__', <built-in method __init_subclass__ of type object
+at 0x2119a9a0>), ('__le__', <method-wrapper '__le__' of NodeWriter object at 0x70d5700cded0>), ('__lt__', <method-wrapper '__lt__' of NodeWriter object at 0x70d5700cded0
+>), ('__module__', 'omni.replicator.core.scripts.writers'), ('__ne__', <method-wrapper '__ne__' of NodeWriter object at 0x70d5700cded0>), ('__new__', <built-in method __
+new__ of type object at 0x868cc0>), ('__reduce__', <built-in method __reduce__ of NodeWriter object at 0x70d5700cded0>), ('__reduce_ex__', <built-in method __reduce_ex__
+ of NodeWriter object at 0x70d5700cded0>), ('__repr__', <method-wrapper '__repr__' of NodeWriter object at 0x70d5700cded0>), ('__setattr__', <method-wrapper '__setattr__
+' of NodeWriter object at 0x70d5700cded0>), ('__sizeof__', <built-in method __sizeof__ of NodeWriter object at 0x70d5700cded0>), ('__str__', <method-wrapper '__str__' of
+ NodeWriter object at 0x70d5700cded0>), ('__subclasshook__', <built-in method __subclasshook__ of type object at 0x2119a9a0>), ('__weakref__', None), ('_annotators', ['L
+drColorSDIsaacConvertRGBAToRGB', SyntheticData.NodeConnectionTemplate(node_template_id='IsaacReadSimulationTime', render_product_idxs=(0,), attributes_mapping={'outputs:
+simulationTime': 'inputs:timeStamp'})]), ('_attached_annotators', [<omni.replicator.core.scripts.annotators.Annotator object at 0x70d5700cf190>, <omni.replicator.core.sc
+ripts.annotators.Annotator object at 0x70d5700c38d0>]), ('_kwargs', {'frameId': 'Camera_OmniVision_OV9782_Color', 'nodeNamespace': '/h12_camera', 'queueSize': 10, 'topic
+Name': 'r_rgb'}), ('_node', Node("/Render/PostProcess/SDGPipeline/Replicator_04_NodeWriterWriter")), ('_writer_id', 'NodeWriter_637210be-2656-11f1-ad3e-58cdc999dabd'), (
+'annotators', ['LdrColorSDIsaacConvertRGBAToRGB', SyntheticData.NodeConnectionTemplate(node_template_id='IsaacReadSimulationTime', render_product_idxs=(0,), attributes_m
+apping={'outputs:simulationTime': 'inputs:timeStamp'})]), ('attach', <bound method NodeWriter.attach of <omni.replicator.core.scripts.writers.NodeWriter object at 0x70d5
+700cded0>>), ('detach', <bound method NodeWriter.detach of <omni.replicator.core.scripts.writers.NodeWriter object at 0x70d5700cded0>>), ('get_node', <bound method NodeW
+riter.get_node of <omni.replicator.core.scripts.writers.NodeWriter object at 0x70d5700cded0>>), ('initialize', <bound method NodeWriter.initialize of <omni.replicator.co
+re.scripts.writers.NodeWriter object at 0x70d5700cded0>>), ('node_type_id', 'isaacsim.ros2.bridge.ROS2PublishImage'), ('on_final_frame', <bound method NodeWriter.on_fina
+l_frame of <omni.replicator.core.scripts.writers.NodeWriter object at 0x70d5700cded0>>), ('reset', <bound method NodeWriter.reset of <omni.replicator.core.scripts.writer
+s.NodeWriter object at 0x70d5700cded0>>)]

@@ -1,122 +1,199 @@
-#realsense camera manager class
-#Written by Mateo Feit, Jan 29 2026
+"""
+hi, this are some of the classes for the realsense simulation
+"""
+
+from dataclasses import dataclass
+from typing import Tuple
+from enum import Enum, auto
+
+import omni.usd
 import omni.graph.core as og
-import numpy as np
 import omni.replicator.core as rep
 from isaacsim.sensors.camera import Camera
 import omni.syntheticdata._syntheticdata as sd
-import logging
-from dataclasses import dataclass
-from typing import Tuple 
-import omni.usd
-logger = logging.getLogger(__name__)
+from isaacsim.ros2.bridge import read_camera_info
+
+
+def log_func(fn: callable):
+    def log(*args, **kwargs):
+        name = fn.__name__
+        print(f"{__file__}: currently calling: {name}...")
+        res = fn(*args, **kwargs)
+        print(f"{__file__}: {name} result: {res}")
+        print(f"{__file__}: returning from {name} call...")
+        return res
+
+    return log
+
+
+def helper_func(fn: callable):
+    def func(*args, **kwargs):
+        return
+
+    return func
+
+
+@log_func
+def make_property(attr, expected_type):
+    # logging setting for gc debudging 2(as well as getting)
+    return property(attr, expected_type)
+
+
+class CamType(Enum):
+    DEPTH = auto()
+    RGB = auto()
+
 
 @dataclass
-class CameraSpecs():
-    name: str = "Camera"
-    cam_path: str = None
-    #depth_path: str = base_path + "rsd455/RSD455/Camera_Pseudo_Depth"
-    #rgb_path: str = base_path + "rsd455/RSD455/Camera_OmniVision_*_Color"
+class Spec:
+    name: str
+    path: str
+    role: CamType
     frequency: int = 30
-    dt: float = 1.0 / frequency
+    dt: float = 0.033
     res_width: int = 1280
     res_height: int = 720
-    _stage = omni.usd.get_context().get_stage()
 
-    assert frequency > 0, f"frequency: {frequency}; must be positive val"
-    assert 0 < res_width <= 1920, f"res_width: {res_width}; res_width must be a positive integer less than or equal to 1920"
-    assert 0 < res_height <= 1080, f"res_height: {res_height}; res_height must be a positive integer less than or equal to 1080"
-    if dt != (1.0 / frequency):
-        logger.warning(f"dt: {dt}; dt is not 1.0 / {frequency=}")
-    #assert _stage.GetPrimAtPath(cam_path), f"prim: {path} doesn't exist on stage"
-    
-    def __repr__(self):
-        attrs = ', '.join(f"{k}={v!r}" for k, v in vars(self).items())
-        return f"{self.__class__.__name__}({attrs})"
+    @log_func
+    def __post_init__(self):
+        # just type checking and making sure lol
+        for key, value in self.__dict__.items():
+            expected_type = self.__annotations__[key]
+            try:
+                assert isinstance(value, expected_type)
+            except AssertionError:
+                return f"key: {key} expected type: {expected_type}, but recieved value: {value} of type: {type(value)}"
+        return
 
-class RealsenseCM:
-    def __init__(self, specs: Tuple[CameraSpecs, CameraSpecs, CameraSpecs, CameraSpecs]):
-        for spec in specs:
-            self.init_camera(spec)
-    def __repr__(self):
-        return f"{specs}"
-
-    def init_camera(self, specs):
-        camera = Camera(specs.cam_path, name=specs.name)
-        camera.frequency = specs.frequency
-        camera.dt = specs.dt
-        camera.resolution = (specs.res_width, specs.res_height)
-        cam_render_product = rep.create.render_product(specs.cam_path, (specs.res_width, specs.res_height))
-        camera.render_product_path = cam_render_product.path
-        prim = specs._stage.GetPrimAtPath(specs.cam_path)
-        camera.position, camera.orientation, camera.translation = RealsenseCM.get_pos_orient(prim)
-        if "Depth" in specs.cam_path.split("/")[-1]:
-            RealsenseCM.publish_pointcloud_from_depth(camera)
-        elif "Color" in specs.cam_path.split("/")[-1]:
-            RealsenseCM.publish_rgb_stream(camera)
+    def __eq__(self, object):
+        return True if self.name == object.name or self.path == object.path else False
 
 
-    @staticmethod
-    def get_pos_orient(prim):
+class CameraObjectFactory:
+
+    def __init__(self, camera_spec_list: list[Spec]):
+
+        self.spec_stash = camera_spec_list
+        self.camera_stash = {}
+        self.stage = omni.usd.get_context().get_stage()
+
+        for spec in self.spec_stash:
+            self.initialize_sim_camera(spec)
+
+        return
+
+    @log_func
+    def initialize_sim_camera(self, spec: Spec):
+        self.camera_stash[spec.name] = Camera(
+            spec.path,
+            name=spec.name,
+            frequency=spec.frequency,
+            dt=spec.dt,
+            resolution=(spec.res_width, spec.res_height),
+            render_product_path=self.create_cam_render_product().path,
+            position, orientation, translation = self.get_prim_translations(self.stage.GetPrimAtPath(spec.path))
+        )
+        return
+
+    def export(self):
+        return self.spec_stash, self.camera_stash
+
+    @helper_func
+    @log_func
+    def create_cam_render_product(self, camera_path, res_width, res_height):
+        return rep.create.render_product(camera_path, (res_width, res_height))
+
+    @helper_func
+    @log_func
+    def assert_no_duplicates(self, camera_spec_list: list[Spec]):
+        temp = []
+        for i in camera_spec_list:
+            assert i not in temp
+            temp.append(i)
+
+    @helper_func
+    @log_func
+    def get_prim_translations(self, prim) -> Tuple:
         global_matrix = omni.usd.get_world_transform_matrix(prim)
         global_translate_pos = global_matrix.ExtractTranslation()
         global_translate_orient = global_matrix.ExtractRotation()
-        local_translate_pos = omni.usd.get_local_transform_SRT(prim)                
+        local_translate_pos = omni.usd.get_local_transform_SRT(prim)
         return (global_translate_pos, global_translate_orient, local_translate_pos)
-    
-    @staticmethod
-    def publish_rgb_stream(camera: Camera, freq = 10):
-        render_product = camera.render_product_path
-        step_size = int(60/freq)
-        topic_name = camera.name
-        queue_size = 10
-        node_namespace = "/h12_camera"
-        frame_id = camera.prim_path.split("/")[-1] 
+
+
+class BaseCameraPublisher:
+    def __init__(self, camera_object, spec):
+
+        self.camera = camera_object
+        self.spec = spec
+
+        self.rp_path = self.camera.render_product_path
+        self.step_size = int(60 / self.spec.frequency)
+        self.topic, self.frame_id = self.camera.name, self.camera.name
+        self.queue_size = 10
+        self.namespace = "/h12_camera"
+
+    def publish_data(self, role):
         rv = omni.syntheticdata.SyntheticData.convert_sensor_type_to_rendervar(
             sd.SensorType.DistanceToImagePlane.name
         )
-        rv = omni.syntheticdata.SyntheticData.convert_sensor_type_to_rendervar(sd.SensorType.Rgb.name)
-        writer = rep.writers.get(rv + "ROS2PublishImage")
-        writer.initialize(
-            frameId=str(frame_id),
-            nodeNamespace=str(node_namespace),
-            queueSize=int(queue_size),
-            topicName=str(topic_name),
-        )
 
-        writer.attach([render_product])
-        gate_path = omni.syntheticdata.SyntheticData._get_node_path(
-            rv + "IsaacSimulationGate", render_product
-        )
-        og.Controller.attribute(gate_path + ".inputs:step").set(step_size)
+        assert role is not None
 
-        return
-    @staticmethod
-    def publish_pointcloud_from_depth(camera: Camera, freq = 10):
-        # The following code will link the camera's render product and publish the data to the specified topic name.
-        render_product = camera.render_product_path
-        step_size = int(60/freq)
-        topic_name = camera.name+"_pointcloud" # Set topic name to the camera's name
-        queue_size = 10
-        node_namespace = "/h12_camera"
-        frame_id = camera.prim_path.split("/")[-1] # This matches what the TF tree is publishing.
-        # Note, this pointcloud publisher will convert the Depth image to a pointcloud using the Camera intrinsics.
-        # This pointcloud generation method does not support semantic labeled objects.
-        rv = omni.syntheticdata.SyntheticData.convert_sensor_type_to_rendervar(
-            sd.SensorType.DistanceToImagePlane.name
-        )
-        writer = rep.writers.get(rv + "ROS2PublishPointCloud")
+        if role == CamType.DEPTH:
+            fetch = "ROS2PublishPointCloud"
+        elif role == CamType.RGB:
+            fetch = "ROS2PublishImage"
+        else:
+            assert isinstance(role, CamType)
+
+        writer = rep.writers.get(rv + fetch)
         writer.initialize(
-            frameId=str(frame_id),
-            nodeNamespace=str(node_namespace),
-            queueSize=int(queue_size),
-            topicName=str(topic_name),
+            frameId=self.frame_id,
+            nodeNamespace=self.namespace,
+            queueSize=self.queue_size,
+            topicName=self.topic,
         )
-        writer.attach([render_product])
+        writer.attach([self.rp_path])
         gate_path = omni.syntheticdata.SyntheticData._get_node_path(
-            rv + "IsaacSimulationGate", render_product
+            rv + "IsaacSimulationGate", self.rp_path
         )
-        og.Controller.attribute(gate_path + ".inputs:step").set(step_size)
-        
+        og.Controller.attribute(gate_path + ".inputs:step").set(self.step_size)
         return
 
+
+class ROS2Camera(BaseCameraPublisher):
+    def __init__(self, cameras: list[Camera], specs: [Spec]):
+        self.cameras = cameras
+        self.specs = specs
+
+        for cam in self.cameras:
+            cam.publish_data()
+
+    def publish_camera_info(self):
+        writer = rep.writers.get("ROS2PublishCameraInfo")
+        camera_info, _ = read_camera_info(self.rp_path)
+        writer.initialize(
+            frameId=self.frame_id,
+            nodeNamespace=self.namespace,
+            queueSize=self.queue_size,
+            topicName=self.topic,
+            width=camera_info.width,
+            height=camera_info.height,
+            projectionType=camera_info.distortion_model,
+            k=camera_info.k.reshape([1, 9]),
+            r=camera_info.r.reshape([1, 9]),
+            p=camera_info.p.reshape([1, 12]),
+            physicalDistortionModel=camera_info.distortion_model,
+            physicalDistortionCoefficients=camera_info.d,
+        )
+        writer.attach([self.rp_path])
+        gate_path = omni.syntheticdata.SyntheticData._get_node_path(
+            "PostProcessDispatch" + "IsaacSimulationGate", self.rp_path
+        )
+        og.Controller.attribute(gate_path + ".inputs:step").set(self.step_size)
+        return
+
+
+class ROS2CameraFactory:
+    pass
