@@ -1,9 +1,8 @@
 """
 hi, this are some of the classes for the realsense simulation
 """
-
+import collections 
 from dataclasses import dataclass
-from typing import Tuple
 from enum import Enum, auto
 
 import omni.usd
@@ -12,6 +11,10 @@ import omni.replicator.core as rep
 from isaacsim.sensors.camera import Camera
 import omni.syntheticdata._syntheticdata as sd
 from isaacsim.ros2.bridge import read_camera_info
+# @log_func
+# def make_property(attr, expected_type):
+    # logging setting for gc debudging 2(as well as getting)
+    # return property(attr, expected_type)
 
 
 def log_func(fn: callable):
@@ -31,12 +34,6 @@ def helper_func(fn: callable):
         return
 
     return func
-
-
-@log_func
-def make_property(attr, expected_type):
-    # logging setting for gc debudging 2(as well as getting)
-    return property(attr, expected_type)
 
 
 class CamType(Enum):
@@ -65,6 +62,7 @@ class Spec:
                 return f"key: {key} expected type: {expected_type}, but recieved value: {value} of type: {type(value)}"
         return
 
+    @log_func
     def __eq__(self, object):
         return True if self.name == object.name or self.path == object.path else False
 
@@ -95,8 +93,9 @@ class CameraObjectFactory:
         )
         return
 
+    @log_func
     def export(self):
-        return self.spec_stash, self.camera_stash
+        return self.spec_stash.sort(key=lambda obj: obj.name), collections.OrderedDict(sorted(self.camera_stash.items())
 
     @helper_func
     @log_func
@@ -110,6 +109,7 @@ class CameraObjectFactory:
         for i in camera_spec_list:
             assert i not in temp
             temp.append(i)
+        return
 
     @helper_func
     @log_func
@@ -122,7 +122,7 @@ class CameraObjectFactory:
 
 
 class BaseCameraPublisher:
-    def __init__(self, camera_object, spec):
+    def __init__(self, camera_object: Camera, spec: Spec):
 
         self.camera = camera_object
         self.spec = spec
@@ -132,8 +132,10 @@ class BaseCameraPublisher:
         self.topic, self.frame_id = self.camera.name, self.camera.name
         self.queue_size = 10
         self.namespace = "/h12_camera"
+        return
 
-    def publish_data(self, role):
+    @log_func
+    def publish_data(self, role: CamType):
         rv = omni.syntheticdata.SyntheticData.convert_sensor_type_to_rendervar(
             sd.SensorType.DistanceToImagePlane.name
         )
@@ -161,15 +163,7 @@ class BaseCameraPublisher:
         og.Controller.attribute(gate_path + ".inputs:step").set(self.step_size)
         return
 
-
-class ROS2Camera(BaseCameraPublisher):
-    def __init__(self, cameras: list[Camera], specs: [Spec]):
-        self.cameras = cameras
-        self.specs = specs
-
-        for cam in self.cameras:
-            cam.publish_data()
-
+    @log_func
     def publish_camera_info(self):
         writer = rep.writers.get("ROS2PublishCameraInfo")
         camera_info, _ = read_camera_info(self.rp_path)
@@ -194,6 +188,22 @@ class ROS2Camera(BaseCameraPublisher):
         og.Controller.attribute(gate_path + ".inputs:step").set(self.step_size)
         return
 
-
 class ROS2CameraFactory:
-    pass
+    def __init__(self, cameras: list[Camera], specs: list[Spec]):
+        self.cameras = cameras
+        self.specs = specs
+        self.ros2_cameras = {}
+
+        for cam, spec in zip(cameras, specs):
+            self.init_ros2_camera(cam, spec)
+        return
+
+    @log_func
+    def init_ros2_camera(self, camera, spec):
+        self.ros2_cameras[spec.name] = (pub := BaseCameraPublisher(camera, spec))
+        pub.publish_data(spec.role)
+        pub.publish_camera_info()
+        return
+
+
+
