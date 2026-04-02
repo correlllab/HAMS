@@ -7,7 +7,7 @@ VIDEO_GID=$(getent group video | cut -d: -f3)
 INPUT_GID=$(getent group input | cut -d: -f3)
 
 docker run --gpus all -it \
-  --name h12_sim_container \
+  --name h12_sim \
   --network host \
   --ipc=host \
   --shm-size=16g \
@@ -24,7 +24,7 @@ docker run --gpus all -it \
   -v /usr/share/vulkan/icd.d:/usr/share/vulkan/icd.d:ro \
   -v /dev/input:/dev/input:ro \
   -v /dev/dri:/dev/dri:rw \
-  -v /home/$USER/Humanoid_Simulation/isaac_exts/:/home/code/exts/ \
+  -v /home/$USER/Humanoid_Simulation/exts/:/home/code/exts/ \
   -v /home/$USER/Humanoid_Simulation/scripts/:/home/code/h12_sim_scripts/ \
   -v /home/$USER/Humanoid_Simulation/assets/:/home/code/cl_assets/ \
   h12-sim:latest0 \

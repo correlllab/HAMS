@@ -82,6 +82,7 @@ class CameraObjectFactory:
 
     @log_func
     def initialize_sim_camera(self, spec: Spec):
+        position, orientation, translation = self.get_prim_translations(self.stage.GetPrimAtPath(spec.path)))
         self.camera_stash[spec.name] = Camera(
             spec.path,
             name=spec.name,
@@ -89,8 +90,9 @@ class CameraObjectFactory:
             dt=spec.dt,
             resolution=(spec.res_width, spec.res_height),
             render_product_path=self.create_cam_render_product().path,
-            position, orientation, translation = self.get_prim_translations(self.stage.GetPrimAtPath(spec.path))
-        )
+            position = position,
+            orientation = orientation,
+            translation = translation)
         return
 
     @log_func

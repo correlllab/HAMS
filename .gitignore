@@ -2,3 +2,41 @@ __pycache__/
 *.pyc
 *.pyo
 *.pyd
+
+# build
+build/
+out/
+bin/
+obj/
+
+# compiled
+*.o
+*.a
+*.so
+*.out
+*.exe
+*.dll
+
+# cmake
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+Makefile
+*.cmake
+
+# debug
+*.dSYM/
+*.pdb
+*.ilk
+
+# editors
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# misc
+.DS_Store
+*.log
+compile_commands.json
