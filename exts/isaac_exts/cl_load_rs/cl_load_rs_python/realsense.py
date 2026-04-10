@@ -2,6 +2,7 @@
 hi, this are some of the classes for the realsense simulation
 """
 import collections 
+
 from dataclasses import dataclass
 from enum import Enum, auto
 
@@ -11,15 +12,11 @@ import omni.replicator.core as rep
 from isaacsim.sensors.camera import Camera
 import omni.syntheticdata._syntheticdata as sd
 from isaacsim.ros2.bridge import read_camera_info
-# @log_func
-# def make_property(attr, expected_type):
-    # logging setting for gc debudging 2(as well as getting)
-    # return property(attr, expected_type)
-
 
 def log_func(fn: callable):
     def log(*args, **kwargs):
         name = fn.__name__
+
         print(f"{__file__}: currently calling: {name}...")
         res = fn(*args, **kwargs)
         print(f"{__file__}: {name} result: {res}")
@@ -28,12 +25,6 @@ def log_func(fn: callable):
 
     return log
 
-
-def helper_func(fn: callable):
-    def func(*args, **kwargs):
-        return
-
-    return func
 
 
 class CamType(Enum):
@@ -75,6 +66,7 @@ class CameraObjectFactory:
         self.camera_stash = {}
         self.stage = omni.usd.get_context().get_stage()
 
+
         for spec in self.spec_stash:
             self.initialize_sim_camera(spec)
 
@@ -99,21 +91,17 @@ class CameraObjectFactory:
     def export(self):
         return self.spec_stash.sort(key=lambda obj: obj.name), collections.OrderedDict(sorted(self.camera_stash.items())
 
-    @helper_func
     @log_func
     def create_cam_render_product(self, camera_path, res_width, res_height):
         return rep.create.render_product(camera_path, (res_width, res_height))
 
-    @helper_func
     @log_func
     def assert_no_duplicates(self, camera_spec_list: list[Spec]):
         temp = []
         for i in camera_spec_list:
             assert i not in temp
             temp.append(i)
-        return
 
-    @helper_func
     @log_func
     def get_prim_translations(self, prim) -> Tuple:
         global_matrix = omni.usd.get_world_transform_matrix(prim)
@@ -131,10 +119,9 @@ class BaseCameraPublisher:
 
         self.rp_path = self.camera.render_product_path
         self.step_size = int(60 / self.spec.frequency)
-        self.topic, self.frame_id = self.camera.name, self.camera.name
+        self.frame_id = self.camera.name
+        self.namespace = self.camera.name
         self.queue_size = 10
-        self.namespace = "/h12_camera"
-        return
 
     @log_func
     def publish_data(self, role: CamType):
@@ -146,8 +133,10 @@ class BaseCameraPublisher:
 
         if role == CamType.DEPTH:
             fetch = "ROS2PublishPointCloud"
+            topic = self.namespace + self.topic + "/depth/image_rect_raw"
         elif role == CamType.RGB:
             fetch = "ROS2PublishImage"
+            topic = self.namespace + self.topic + "/color/image_raw"
         else:
             assert isinstance(role, CamType)
 
@@ -163,7 +152,6 @@ class BaseCameraPublisher:
             rv + "IsaacSimulationGate", self.rp_path
         )
         og.Controller.attribute(gate_path + ".inputs:step").set(self.step_size)
-        return
 
     @log_func
     def publish_camera_info(self):
@@ -188,7 +176,8 @@ class BaseCameraPublisher:
             "PostProcessDispatch" + "IsaacSimulationGate", self.rp_path
         )
         og.Controller.attribute(gate_path + ".inputs:step").set(self.step_size)
-        return
+
+    
 
 class ROS2CameraFactory:
     def __init__(self, cameras: list[Camera], specs: list[Spec]):
@@ -198,14 +187,12 @@ class ROS2CameraFactory:
 
         for cam, spec in zip(cameras, specs):
             self.init_ros2_camera(cam, spec)
-        return
 
     @log_func
     def init_ros2_camera(self, camera, spec):
         self.ros2_cameras[spec.name] = (pub := BaseCameraPublisher(camera, spec))
         pub.publish_data(spec.role)
         pub.publish_camera_info()
-        return
 
 
 

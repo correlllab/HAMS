@@ -58,6 +58,7 @@ RUN pip install "isaacsim[all,extscache]==5.0.0" --extra-index-url https://pypi.
 # Create working directory
 RUN mkdir -p /home/code
 WORKDIR /home/code
+RUN pip install "pip==23" "setuptools==65" flatdict
 
 # Clone and install IsaacLab
 RUN git clone https://github.com/isaac-sim/IsaacLab.git && \
@@ -87,6 +88,7 @@ RUN cd /home/code/CL_isaaclab_sim/teleimager && git reset --hard a1815d0 && sed 
 RUN cd /home/code/CL_isaaclab_sim/teleimager && pip install -e . && pip install aiortc
 
 RUN cd /home/code/CL_isaaclab_sim && . fetch_assets.sh
+
 
 ## Clone models and ROS
 #RUN git clone https://huggingface.co/datasets/unitreerobotics/unitree_model /home/code/unitree_model
@@ -150,3 +152,4 @@ WORKDIR /home/code
 
 # Default to Conda environment bash
 CMD ["conda", "run", "-n", "humanoid_sim_env", "/bin/bash"]
+
