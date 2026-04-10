@@ -2,6 +2,9 @@
 
 IsaacLab Simulation for the H1_2 robot.
 
+##Important!
+Nvidia driver version 595 is not super stable, sometimes it just doesn't work. I recommend using 570.x.
+
 ## Installation
 - Just copy and paste in a terminal:
     ```bash
