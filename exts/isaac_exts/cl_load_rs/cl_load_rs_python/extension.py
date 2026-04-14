@@ -20,7 +20,7 @@ import omni.usd
 
 from .global_variables import EXTENSION_DESCRIPTION, EXTENSION_TITLE
 
-from .realsense import CameraSpecs, RealsenseCM 
+from .realsense import Spec, CamType, CameraObjectFactory, ROS2CameraFactory 
 
 """
 This file serves as a basic template for the standard boilerplate operations
@@ -55,23 +55,32 @@ class Extension(omni.ext.IExt):
         #self._timeline = omni.timeline.get_timeline_interface()
 
         #publish realsense rgb and depth data
-        l_depth = CameraSpecs(
+        l_depth = Spec(
                 name = "l_depth",
-                cam_path = "/World/envs/env_0/Robot/h1_2_26dof_with_inspire_rev_1_0_with_CL_realsense/L_hand_base_link/CL_L_realsense/rsd455/RSD455/Camera_Pseudo_Depth",
+                path = "/World/envs/env_0/Robot/h1_2_26dof_with_inspire_rev_1_0_with_CL_realsense/L_hand_base_link/CL_L_realsense/rsd455/RSD455/Camera_Pseudo_Depth",
+		role = CamType.DEPTH
                 )
-        l_rgb = CameraSpecs(
+        l_rgb = Spec(
                 name = "l_rgb",
-                cam_path = "/World/envs/env_0/Robot/h1_2_26dof_with_inspire_rev_1_0_with_CL_realsense/L_hand_base_link/CL_L_realsense/rsd455/RSD455/Camera_OmniVision_OV9782_Color",
+                path = "/World/envs/env_0/Robot/h1_2_26dof_with_inspire_rev_1_0_with_CL_realsense/L_hand_base_link/CL_L_realsense/rsd455/RSD455/Camera_OmniVision_OV9782_Color",
+		role = CamType.RGB
                 )
-        r_depth = CameraSpecs(
+        r_depth = Spec(
                 name = "r_depth",
-                cam_path = "/World/envs/env_0/Robot/h1_2_26dof_with_inspire_rev_1_0_with_CL_realsense/R_hand_base_link/CL_R_realsense/rsd455/RSD455/Camera_Pseudo_Depth",
+                path = "/World/envs/env_0/Robot/h1_2_26dof_with_inspire_rev_1_0_with_CL_realsense/R_hand_base_link/CL_R_realsense/rsd455/RSD455/Camera_Pseudo_Depth",
+		role = CamType.DEPTH
                 )
-        r_rgb = CameraSpecs(
+        r_rgb = Spec(
                 name = "r_rgb",
-                cam_path = "/World/envs/env_0/Robot/h1_2_26dof_with_inspire_rev_1_0_with_CL_realsense/R_hand_base_link/CL_R_realsense/rsd455/RSD455/Camera_OmniVision_OV9782_Color",
+                path = "/World/envs/env_0/Robot/h1_2_26dof_with_inspire_rev_1_0_with_CL_realsense/R_hand_base_link/CL_R_realsense/rsd455/RSD455/Camera_OmniVision_OV9782_Color",
+		role = CamType.RGB
                 )
-        _ = RealsenseCM((l_depth, l_rgb, r_depth, r_rgb))
+        specs = [l_depth, l_rgb, r_depth, r_rgb]
+        pkg_specs, camera_objects = CameraObjectFactory(specs).export()
+        print(f"{camera_objects=}")
+        print(f"{pkg_specs=}")
+        ros2_cameras = ROS2CameraFactory(camera_objects, pkg_specs)
+	
 
     def on_shutdown(self):
         gc.collect()

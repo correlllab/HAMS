@@ -24,8 +24,8 @@ docker run --gpus all -it \
   -v /usr/share/vulkan/icd.d:/usr/share/vulkan/icd.d:ro \
   -v /dev/input:/dev/input:ro \
   -v /dev/dri:/dev/dri:rw \
-  -v /home/mateo/code/correll_ws/Humanoid_Simulation/exts/:/home/code/exts/ \
-  -v /home/mateo/code/correll_ws/Humanoid_Simulation/scripts/:/home/code/h12_sim_scripts/ \
-  -v /home/mateo/code/correll_ws/Humanoid_Simulation/assets/:/home/code/cl_assets/ \
-  h12-sim:latest0 \
+  -v /home/mateo/correll/Humanoid_Simulation/exts/:/home/code/exts/ \
+  -v /home/mateo/correll/Humanoid_Simulation/scripts/:/home/code/h12_sim_scripts/ \
+  -v /home/mateo/correll/Humanoid_Simulation/assets/:/home/code/cl_assets/ \
+  humanoid_sim:latest0 \
   /bin/bash

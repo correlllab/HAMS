@@ -3,15 +3,17 @@ hi, this are some of the classes for the realsense simulation
 """
 import collections 
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum, auto
 
+import numpy as np
 import omni.usd
 import omni.graph.core as og
 import omni.replicator.core as rep
 from isaacsim.sensors.camera import Camera
 import omni.syntheticdata._syntheticdata as sd
 from isaacsim.ros2.bridge import read_camera_info
+import isaacsim.core.utils.numpy.rotations as rot_utils
 
 def log_func(fn: callable):
     def log(*args, **kwargs):
@@ -31,15 +33,18 @@ class CamType(Enum):
     DEPTH = auto()
     RGB = auto()
 
+#def get_spec_defaults(key):
+#    defaults = {"frequency": 30, "dt": 0.033, "res_width": 1280, "res_height": 720}
+#    return defaults[key]
 
 @dataclass
 class Spec:
     name: str
     path: str
     role: CamType
-    frequency: int = 30
+    frequency: int = 20
     dt: float = 0.033
-    res_width: int = 1280
+    res_width: int =1280
     res_height: int = 720
 
     @log_func
@@ -74,22 +79,25 @@ class CameraObjectFactory:
 
     @log_func
     def initialize_sim_camera(self, spec: Spec):
-        position, orientation, translation = self.get_prim_translations(self.stage.GetPrimAtPath(spec.path)))
+        position, orientation, translation = self.get_prim_translations(self.stage.GetPrimAtPath(spec.path))
+        print(f"{position=}")
+        print(f"{orientation=}")
+        print(f"{translation=}")
         self.camera_stash[spec.name] = Camera(
             spec.path,
             name=spec.name,
             frequency=spec.frequency,
-            dt=spec.dt,
+            #dt=spec.dt,
             resolution=(spec.res_width, spec.res_height),
-            render_product_path=self.create_cam_render_product().path,
+            render_product_path=self.create_cam_render_product(spec.path, spec.res_width, spec.res_height).path,
             position = position,
-            orientation = orientation,
-            translation = translation)
+            orientation = orientation)
+            #translation = translation)
         return
 
     @log_func
     def export(self):
-        return self.spec_stash.sort(key=lambda obj: obj.name), collections.OrderedDict(sorted(self.camera_stash.items())
+        return (sorted(self.spec_stash, key=lambda obj: obj.name), collections.OrderedDict(sorted(self.camera_stash.items())))
 
     @log_func
     def create_cam_render_product(self, camera_path, res_width, res_height):
@@ -103,13 +111,27 @@ class CameraObjectFactory:
             temp.append(i)
 
     @log_func
-    def get_prim_translations(self, prim) -> Tuple:
+    def get_prim_translations(self, prim):
         global_matrix = omni.usd.get_world_transform_matrix(prim)
         global_translate_pos = global_matrix.ExtractTranslation()
-        global_translate_orient = global_matrix.ExtractRotation()
-        local_translate_pos = omni.usd.get_local_transform_SRT(prim)
+        tmp = global_matrix.ExtractRotationQuat()
+        w = tmp.GetReal()
+        x, y, z = tmp.GetImaginary()
+        try:
+            global_translate_orient = np.array([w, x, y, z])
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            print(e)
+            assert 0 > 1
+        try:
+            local_translate_pos = omni.usd.get_local_transform_SRT(prim)
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            print(e)
+            assert 0 > 1
         return (global_translate_pos, global_translate_orient, local_translate_pos)
-
 
 class BaseCameraPublisher:
     def __init__(self, camera_object: Camera, spec: Spec):
@@ -117,7 +139,10 @@ class BaseCameraPublisher:
         self.camera = camera_object
         self.spec = spec
 
-        self.rp_path = self.camera.render_product_path
+        try:
+            self.rp_path = self.camera._render_product_path
+        except AttibuteError:
+            self.rp_path = self.camera.render_product_path
         self.step_size = int(60 / self.spec.frequency)
         self.frame_id = self.camera.name
         self.namespace = self.camera.name
@@ -133,10 +158,10 @@ class BaseCameraPublisher:
 
         if role == CamType.DEPTH:
             fetch = "ROS2PublishPointCloud"
-            topic = self.namespace + self.topic + "/depth/image_rect_raw"
+            topic = "/aligned_depth_to_color/image_raw/compressedDepth"
         elif role == CamType.RGB:
             fetch = "ROS2PublishImage"
-            topic = self.namespace + self.topic + "/color/image_raw"
+            topic = "/color/image_raw/compressed"
         else:
             assert isinstance(role, CamType)
 
@@ -145,7 +170,7 @@ class BaseCameraPublisher:
             frameId=self.frame_id,
             nodeNamespace=self.namespace,
             queueSize=self.queue_size,
-            topicName=self.topic,
+            topicName=topic,
         )
         writer.attach([self.rp_path])
         gate_path = omni.syntheticdata.SyntheticData._get_node_path(
@@ -154,14 +179,25 @@ class BaseCameraPublisher:
         og.Controller.attribute(gate_path + ".inputs:step").set(self.step_size)
 
     @log_func
-    def publish_camera_info(self):
+    def publish_camera_info(self, role):
+        assert isinstance(role, CamType)
+
+        if role == CamType.DEPTH:
+            fetch = "ROS2PublishPointCloud"
+            topic = "/aligned_depth_to_color/camera_info"
+        elif role == CamType.RGB:
+            fetch = "ROS2PublishImage"
+            topic = "/color/camera_info"
+        else:
+            assert isinstance(role, CamType)
+
         writer = rep.writers.get("ROS2PublishCameraInfo")
         camera_info, _ = read_camera_info(self.rp_path)
         writer.initialize(
             frameId=self.frame_id,
             nodeNamespace=self.namespace,
             queueSize=self.queue_size,
-            topicName=self.topic,
+            topicName=topic,
             width=camera_info.width,
             height=camera_info.height,
             projectionType=camera_info.distortion_model,
@@ -184,15 +220,18 @@ class ROS2CameraFactory:
         self.cameras = cameras
         self.specs = specs
         self.ros2_cameras = {}
+        print(f"{cameras=}")
 
-        for cam, spec in zip(cameras, specs):
+        print(zip(cameras, specs))
+        for spec in specs:
+            cam = cameras[spec.name]
             self.init_ros2_camera(cam, spec)
 
     @log_func
     def init_ros2_camera(self, camera, spec):
         self.ros2_cameras[spec.name] = (pub := BaseCameraPublisher(camera, spec))
         pub.publish_data(spec.role)
-        pub.publish_camera_info()
+        pub.publish_camera_info(spec.role)
 
 
 
