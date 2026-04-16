@@ -2,16 +2,18 @@
 
 IsaacLab Simulation for the H1_2 robot.
 
-##Important!
-Nvidia driver version 595 is not super stable, sometimes it just doesn't work. I recommend using 570.x.
+## Important!!!
+The IsaacLab component was tested on NVIDIA driver version 580.x, Ubuntu 24.04, a NVIDIA GeForce RTX 4060, AMD Ryzen 9 8945HS w/ Radeon 78. In testing, it did not work with 595 drivers.
 
 ## Installation
 - Just copy and paste in a terminal:
     ```bash
     cd ~
+    #Or wherever you want, just make sure to change paths in docker_run.sh
     git clone https://github.com/correlllab/Humanoid_Simulation.git
     cd Humanoid_Simulation/scripts
     ./docker_build.sh
+    #Change paths in docker_run to the ones on your system.
     ./docker_run.sh
     ```
 ## Usage
