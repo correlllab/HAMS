@@ -1,7 +1,5 @@
 # Humanoid_Simulation
 
-IsaacLab Simulation for the H1_2 robot.
-
 ## Important!!!
 The IsaacLab component was tested on NVIDIA driver version 580.x, Ubuntu 24.04, a NVIDIA GeForce RTX 4060, AMD Ryzen 9 8945HS w/ Radeon 78. In testing, it did not work with 595 drivers.
 
@@ -29,7 +27,7 @@ The IsaacLab component was tested on NVIDIA driver version 580.x, Ubuntu 24.04, 
     #or
     sudo docker exec -it h12_sim_container bash
     ```
-## Mini Demo Video
+## Mini Demo Video(Will be updated soon)
 https://github.com/user-attachments/assets/61b75083-ebab-4e3e-9ba5-d7bf31474d01
 ## Important Notes for Use of Yutong's ROS2 Controller in Sim
 If you plan on using Yutong's ROS2 controller for test, it is best to comment out the line that raises the E-Stop exception (which can be found with just a grep). IsaacSim joint states are below the minimum tolerances for E-Stops, so everything will just error out.
