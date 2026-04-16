@@ -34,7 +34,7 @@ The IsaacLab component was tested on NVIDIA driver version 580.x, Ubuntu 24.04, 
 https://github.com/user-attachments/assets/61b75083-ebab-4e3e-9ba5-d7bf31474d01
 
 ## Expected IsaacLab Realsense Topics
-![topics](images/realsense_topics.png)
+![topics](images/rs_topics.png)
 
 ## Important Notes for Use of Yutong's ROS2 Controller in Sim
 If you plan on using Yutong's ROS2 controller for test, it is best to comment out the line that raises the E-Stop exception (which can be found with just a grep). IsaacSim joint states are below the minimum tolerances for E-Stops, so everything will just error out.
