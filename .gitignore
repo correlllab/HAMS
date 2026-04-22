@@ -40,3 +40,18 @@ Makefile
 .DS_Store
 *.log
 compile_commands.json
+
+# Isaac Sim / Omniverse caches
+.cache/
+ov/
+shadercache/
+texturecache/
+kit/
+*.kit.log
+.isaac_cache/
+
+# runtime artefacts
+outputs/
+logs/
+wandb/
+*.usd.bak

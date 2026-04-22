@@ -1,0 +1,136 @@
+# ==============================
+# Stage 1: Builder
+# ==============================
+FROM humanoid_sim_base:latest AS builder
+
+ENV OMNI_KIT_ACCEPT_EULA=yes
+
+ARG http_proxy
+ARG https_proxy
+ENV http_proxy=${http_proxy}
+ENV https_proxy=${https_proxy}
+
+SHELL ["conda", "run", "-n", "humanoid_sim_env", "/bin/bash", "-c"]
+
+# Install Isaac Sim first (multi-GB, rarely changes). Order matters: Isaac Sim pulls in
+# its own torch, which we override with cu130 below for RTX 50-series support.
+# Bumped from 5.0.0 -> 5.1.0 so the bundled omni.warp.core exposes
+# wp.transform_compose, which IsaacLab HEAD's fabric.py now requires.
+RUN pip install "isaacsim[all,extscache]==5.1.0" --extra-index-url https://pypi.nvidia.com
+
+# Downgrade pip/setuptools for IsaacLab compatibility
+RUN pip install "pip==23" "setuptools==65" flatdict
+
+# PyTorch (cu130) last so it doesn't invalidate the isaacsim layer above.
+# Overrides whatever torch isaacsim pulled in.
+RUN pip install --upgrade torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu130
+
+# Install IsaacLab
+# Pin cmake<4 to work around egl_probe's outdated CMakeLists.txt
+# (cmake 4.0 rejects cmake_minimum_required < 3.5).
+RUN pip install "cmake<4" && \
+    git clone --depth 1 https://github.com/isaac-sim/IsaacLab /home/code/IsaacLab && \
+    cd /home/code/IsaacLab && ./isaaclab.sh --install
+
+# Install CL_isaaclab_sim requirements only. The full tree is bind-mounted at runtime
+# (docker-compose.yml -> /home/code/CL_isaaclab_sim), so baking the source in would just
+# be shadowed — and would invalidate this pip layer on every source edit. Copy just
+# requirements.txt so edits to task code don't trigger a rebuild.
+COPY CL_isaaclab_sim/requirements.txt /tmp/cl_requirements.txt
+RUN pip install -r /tmp/cl_requirements.txt && rm /tmp/cl_requirements.txt
+
+# Force-reinstall numpy to fix version mismatch between compiled C extensions
+# and Python code caused by conflicting pip installs (torch cu130 vs IsaacLab).
+RUN pip install --force-reinstall numpy
+
+# Downgrade ros-humble-rmw-cyclonedds-cpp + ros-humble-cyclonedds from the
+# default RoboStack build (np126py311hbc2a38a_13) to build #7
+# (np126py311h2c3b307_7). Build #13 ships a librmw_cyclonedds_cpp.so that
+# references `shm_set_data_state`, a symbol that doesn't exist in any paired
+# libddsc (0.10.5) in the stack — packaging bug. Build #7 dlopens cleanly.
+# empy is pulled from conda-forge because build #7's transitive deps need it
+# and it isn't in robostack-staging.
+#
+# Do NOT copy env libddsc over /cyclonedds/install/lib — when we did that,
+# rmw_create_node failed with "Precondition Not Met" and every rclpy-published
+# topic (cameras/lidar/TF) disappeared. Leaving the source-built libddsc at
+# /cyclonedds/install intact lets the PyPI cyclonedds wheel (compiled against
+# that source tree's headers) keep working, while the dynamic linker
+# sonames-dedupes libddsc.so.0 across the two dlopen paths at runtime.
+#
+# Do NOT add `conda tos accept`: BaseDockerfile already accepted the anaconda
+# main/r ToS, and that acceptance persists. RoboStack's env-activate script
+# sets PYTHONPATH to the env's python3.11 site-packages, so when `conda tos`
+# (Python 3.13 in base) loads its pydantic plugin it picks up the env's 3.11
+# pydantic_core and can't load the 3.11-ABI .so under a 3.13 interpreter,
+# crashing the plugin. `conda install` is fine — it doesn't go through that
+# plugin path.
+#
+# The np126py311 build tag pulls numpy 1.26 as a conda-declared dep, which
+# downgrades the numpy 2.x just pinned above. scipy (1.15, built against
+# numpy 2.x) then can't find `numpy._core.multiarray` at runtime and every
+# isaacsim extension that uses scipy.spatial fails to load. cyclonedds itself
+# is pure C/C++ and doesn't actually use numpy, so re-bump numpy at the end.
+RUN conda install -y -c robostack-staging -c conda-forge empy && \
+    conda install -y -c robostack-staging -c conda-forge \
+        "ros-humble-rmw-cyclonedds-cpp=1.3.4=np126py311h2c3b307_7" \
+        "ros-humble-cyclonedds=0.10.5=np126py311h2c3b307_7" && \
+    pip install --force-reinstall numpy
+
+# Install teleimager. Installed outside CL_isaaclab_sim so the runtime bind-mount
+# of CL_isaaclab_sim doesn't hide the install source tree.
+RUN git clone --depth 1 https://github.com/unitreerobotics/teleimager /home/code/teleimager && \
+    cd /home/code/teleimager && \
+    sed -i 's/^requires-python = .*/requires-python = ">=3.8,<3.12"/' pyproject.toml && \
+    find src/teleimager -name '*.py' -exec sed -i \
+           -e 's/logging_mp\.basicConfig/logging_mp.basic_config/g' \
+           -e 's/logging_mp\.getLogger/logging_mp.get_logger/g' {} + && \
+    pip install . && pip install aiortc && \
+    SP=$(python -c "import site; print(site.getsitepackages()[0])") && \
+    cp cam_config_server.yaml "$(dirname "$SP")/" && \
+    rm -rf /home/code/teleimager
+
+# Assets live on the host and are mounted at runtime via docker-compose (not baked in)
+
+
+# ==============================
+# Stage 2: Runtime
+# ==============================
+FROM nvidia/cuda:12.2.0-runtime-ubuntu22.04 AS runtime
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV TZ=America/Denver
+ENV CONDA_DIR=/opt/conda
+ENV PATH=$CONDA_DIR/bin:$PATH
+ENV OMNI_KIT_ALLOW_ROOT=1
+ENV OMNI_KIT_ACCEPT_EULA=yes
+ENV CYCLONEDDS_HOME=/cyclonedds/install
+ENV ROS_DOMAIN_ID=1
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libglu1-mesa git-lfs zenity unzip \
+    libvulkan1 vulkan-tools \
+    libx11-6 libxext6 libxrender1 libxi6 libxrandr2 libxcursor1 libxinerama1 \
+    libgl1-mesa-glx libglib2.0-0 libsm6 libxt6 libxkbcommon-x11-0 \
+    libgomp1 \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=builder /home/code /home/code
+COPY --from=builder /cyclonedds /cyclonedds
+COPY --from=builder /opt/conda /opt/conda
+
+RUN echo 'source /opt/conda/etc/profile.d/conda.sh' >> ~/.bashrc && \
+    echo 'conda activate humanoid_sim_env' >> ~/.bashrc && \
+    echo 'export OMNI_KIT_ALLOW_ROOT=1' >> ~/.bashrc && \
+    echo 'export OMNI_KIT_ACCEPT_EULA=yes' >> ~/.bashrc && \
+    echo 'export CYCLONEDDS_HOME=/cyclonedds/install' >> ~/.bashrc
+# NOTE: deliberately NOT prepending isaacsim.ros2.bridge/humble/lib to
+# LD_LIBRARY_PATH. That bundled dir contains an older librmw_cyclonedds_cpp.so
+# that references `shm_set_data_state` (missing from every libddsc 0.10.5 in
+# the stack). When it was first on LD_LIBRARY_PATH, rcl's dlopen resolved the
+# soname against the bundled (broken) rmw instead of the downgraded conda one,
+# causing "undefined symbol: shm_set_data_state" and blocking cl_load_rs.
+
+WORKDIR /home/code
+
+CMD ["conda", "run", "-n", "humanoid_sim_env", "/bin/bash"]

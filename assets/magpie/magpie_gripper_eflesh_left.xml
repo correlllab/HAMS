@@ -1,0 +1,47 @@
+<!-- Left-side namespaced Magpie e-flesh gripper body hierarchy for bimanual include use -->
+<body name="leftg_mount">
+  <site name="leftg_eeff" pos="-0.004 0 0.193" group="3"/>
+  <geom type="mesh" class="visual" mesh="magpie_mount" xyaxes="0 -1 0 1 0 0"/>
+  <geom type="mesh" class="collision" mesh="magpie_mount" xyaxes="0 -1 0 1 0 0"/>
+  <body name="leftg_base_bot">
+    <geom type="mesh" class="visual" mesh="magpie_base_bot" xyaxes="0 -1 0 1 0 0"/>
+    <geom type="mesh" class="collision" mesh="magpie_base_bot" xyaxes="0 -1 0 1 0 0"/>
+    <body name="leftg_base_top">
+      <geom type="mesh" class="visual" mesh="magpie_base_top" xyaxes="0 -1 0 1 0 0"/>
+      <geom type="mesh" class="collision" mesh="magpie_base_top" xyaxes="0 -1 0 1 0 0"/>
+
+      <body name="leftg_left_crank" pos="0.00175 0.038 0.069">
+        <joint name="leftg_left_hinge_1" pos="0 0 0" axis="1 0 0" range="-0.035 2.05"/>
+        <geom type="mesh" class="visual" mesh="magpie_left_crank" pos="-0.00175 -0.038 -0.069" xyaxes="0 -1 0 1 0 0"/>
+        <geom type="mesh" class="collision" mesh="magpie_left_crank" pos="-0.00175 -0.038 -0.069" xyaxes="0 -1 0 1 0 0"/>
+        <body name="leftg_left_finger_combined" pos="-0.0085 0.039824 0.020953">
+          <joint name="leftg_left_hinge_2" pos="0 0 0" axis="1 0 0"/>
+          <geom type="mesh" class="visual" mesh="magpie_left_finger" pos="0.00675 -0.077824 -0.089953" xyaxes="0 -1 0 1 0 0"/>
+          <geom type="mesh" class="collision" mesh="magpie_left_finger" pos="0.00675 -0.077824 -0.089953" xyaxes="0 -1 0 1 0 0"/>
+          <body name="leftg_left_rocker" pos="0 0.022 -0.003999">
+            <joint name="leftg_left_hinge_3" pos="0 0 0" axis="1 0 0"/>
+            <geom type="mesh" class="visual" mesh="magpie_left_rocker" pos="0.00675 -0.099824 -0.085954" xyaxes="0 -1 0 1 0 0"/>
+            <geom type="mesh" class="collision" mesh="magpie_left_rocker" pos="0.00675 -0.099824 -0.085954" xyaxes="0 -1 0 1 0 0"/>
+          </body>
+        </body>
+      </body>
+
+      <body name="leftg_right_crank" pos="0.00175 -0.038 0.069">
+        <joint name="leftg_right_hinge_1" pos="0 0 0" axis="1 0 0" range="-2.05 0.035"/>
+        <geom type="mesh" class="visual" mesh="magpie_right_crank" pos="-0.00175 0.038 -0.069" xyaxes="0 -1 0 1 0 0"/>
+        <geom type="mesh" class="collision" mesh="magpie_right_crank" pos="-0.00175 0.038 -0.069" xyaxes="0 -1 0 1 0 0"/>
+        <body name="leftg_right_finger_combined" pos="-0.0085 -0.039824 0.020953">
+          <joint name="leftg_right_hinge_2" pos="0 0 0" axis="1 0 0"/>
+          <geom type="mesh" class="visual" mesh="magpie_right_finger" pos="0.00675 0.077824 -0.089953" xyaxes="0 -1 0 1 0 0"/>
+          <geom type="mesh" class="collision" mesh="magpie_right_finger" pos="0.00675 0.077824 -0.089953" xyaxes="0 -1 0 1 0 0"/>
+          <body name="leftg_right_rocker" pos="0 -0.022 -0.003999">
+            <joint name="leftg_right_hinge_3" pos="0 0 0" axis="1 0 0"/>
+            <geom type="mesh" class="visual" mesh="magpie_right_rocker" pos="0.00675 0.099824 -0.085954" xyaxes="0 -1 0 1 0 0"/>
+            <geom type="mesh" class="collision" mesh="magpie_right_rocker" pos="0.00675 0.099824 -0.085954" xyaxes="0 -1 0 1 0 0"/>
+          </body>
+        </body>
+      </body>
+
+    </body>
+  </body>
+</body>

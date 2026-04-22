@@ -1,0 +1,73 @@
+<!-- Magpie gripper body hierarchy - designed to be included in other models -->
+<!-- This file contains just the body tree, no <mujoco> or <worldbody> wrapper -->
+<!-- Include this inside a parent body to attach the gripper -->
+<!-- Requires mesh assets: magpie_mount, magpie_base_bot, magpie_base_top, -->
+<!--   magpie_left_crank, magpie_right_crank, magpie_left_finger, magpie_right_finger, -->
+<!--   magpie_left_rocker, magpie_right_rocker -->
+
+<body name="mount" gravcomp="1">
+  <site name="eeff" pos="-0.004 0 0.193" group="3"/>
+  <geom type="mesh" class="visual" mesh="magpie_mount" xyaxes="0 -1 0 1 0 0"/>
+  <geom type="mesh" class="collision" mesh="magpie_mount" xyaxes="0 -1 0 1 0 0"/>
+  <body name="base_bot" gravcomp="1">
+    <geom type="mesh" class="visual" mesh="magpie_base_bot" xyaxes="0 -1 0 1 0 0"/>
+    <geom type="mesh" class="collision" mesh="magpie_base_bot" xyaxes="0 -1 0 1 0 0"/>
+    <body name="base_top" gravcomp="1">
+      <geom type="mesh" class="visual" mesh="magpie_base_top" xyaxes="0 -1 0 1 0 0"/>
+      <geom type="mesh" class="collision" mesh="magpie_base_top" xyaxes="0 -1 0 1 0 0"/>
+
+      <!-- Left 4-bar mechanism: base_top -> crank -> finger -> rocker -->
+      <!-- Pivots: 1=crank-base(0.00175,0.038,0.069), 2=finger-inner(-0.00675,0.077824,0.089953) -->
+      <!--         3=finger-outer(-0.00675,0.099824,0.085954), 4=rocker-base(-0.00075,0.060,0.065) -->
+      <body name="left_crank" gravcomp="1" pos="0.00175 0.038 0.069">
+        <joint name="left_hinge_1" pos="0 0 0" axis="1 0 0" range="-0.035 2.05"/>
+        <geom type="mesh" class="visual" mesh="magpie_left_crank" pos="-0.00175 -0.038 -0.069" xyaxes="0 -1 0 1 0 0"/>
+        <geom type="mesh" class="collision" mesh="magpie_left_crank" pos="-0.00175 -0.038 -0.069" xyaxes="0 -1 0 1 0 0"/>
+        <body name="left_finger_combined" gravcomp="1" pos="-0.0085 0.039824 0.020953">
+          <joint name="left_hinge_2" pos="0 0 0" axis="1 0 0"/>
+          <geom type="mesh" class="visual" mesh="magpie_left_finger" pos="0.00675 -0.077824 -0.089953" xyaxes="0 -1 0 1 0 0"/>
+          <geom type="mesh" class="collision" mesh="magpie_left_finger" pos="0.00675 -0.077824 -0.089953" xyaxes="0 -1 0 1 0 0"/>
+            <geom class="pad_box1" name="left_pad1"/>
+            <geom class="pad_box2" name="left_pad2"/>
+            <geom class="pad_box3" name="left_pad3"/>
+            <geom class="pad_box4" name="left_pad4"/>
+            <site name="touch_left" type="box" pos="0.003 -0.02227 0.0413" size="0.008 0.0016 0.04" rgba="1 0 0 0.5" group="4" />
+            <site name="tip_left" type="box" pos="0.003 -0.02027 0.0763" size="0.008 0.0026 0.005" rgba="1 0 0 0.5" group="4" />
+
+          <body name="left_rocker" gravcomp="1" pos="0 0.022 -0.003999">
+            <joint name="left_hinge_3" pos="0 0 0" axis="1 0 0"/>
+            <geom type="mesh" class="visual" mesh="magpie_left_rocker" pos="0.00675 -0.099824 -0.085954" xyaxes="0 -1 0 1 0 0"/>
+            <geom type="mesh" class="collision" mesh="magpie_left_rocker" pos="0.00675 -0.099824 -0.085954" xyaxes="0 -1 0 1 0 0"/>
+          </body>
+        </body>
+      </body>
+
+      <!-- Right 4-bar mechanism: base_top -> crank -> finger -> rocker -->
+      <!-- Pivots: 1=crank-base(0.00175,-0.038,0.069), 2=finger-inner(-0.00675,-0.077824,0.089953) -->
+      <!--         3=finger-outer(-0.00675,-0.099824,0.085954), 4=rocker-base(-0.00075,-0.060,0.065) -->
+      <body name="right_crank" gravcomp="1" pos="0.00175 -0.038 0.069">
+        <joint name="right_hinge_1" pos="0 0 0" axis="1 0 0" range="-2.05 0.035"/>
+        <geom type="mesh" class="visual" mesh="magpie_right_crank" pos="-0.00175 0.038 -0.069" xyaxes="0 -1 0 1 0 0"/>
+        <geom type="mesh" class="collision" mesh="magpie_right_crank" pos="-0.00175 0.038 -0.069" xyaxes="0 -1 0 1 0 0"/>
+        <body name="right_finger_combined" gravcomp="1" pos="-0.0085 -0.039824 0.020953">
+          <joint name="right_hinge_2" pos="0 0 0" axis="1 0 0"/>
+          <geom type="mesh" class="visual" mesh="magpie_right_finger" pos="0.00675 0.077824 -0.089953" xyaxes="0 -1 0 1 0 0"/>
+          <geom type="mesh" class="collision" mesh="magpie_right_finger" pos="0.00675 0.077824 -0.089953" xyaxes="0 -1 0 1 0 0"/>
+          <geom class="pad_box5" name="right_pad1"/>
+          <geom class="pad_box6" name="right_pad2"/>
+          <geom class="pad_box7" name="right_pad3"/>
+          <geom class="pad_box8" name="right_pad4"/>
+          <site name="touch_right" type="box" pos="0.003 0.02227 0.0413" size="0.008 0.0016 0.04" rgba="0 1 0 0.5" group="4" />
+          <site name="tip_right" type="box" pos="0.003 0.02027 0.0763" size="0.008 0.0026 0.005" rgba="0 1 0 0.5" group="4" />
+
+          <body name="right_rocker" gravcomp="1" pos="0 -0.022 -0.003999">
+            <joint name="right_hinge_3" pos="0 0 0" axis="1 0 0"/>
+            <geom type="mesh" class="visual" mesh="magpie_right_rocker" pos="0.00675 0.099824 -0.085954" xyaxes="0 -1 0 1 0 0"/>
+            <geom type="mesh" class="collision" mesh="magpie_right_rocker" pos="0.00675 0.099824 -0.085954" xyaxes="0 -1 0 1 0 0"/>
+          </body>
+        </body>
+      </body>
+
+    </body>
+  </body>
+</body>

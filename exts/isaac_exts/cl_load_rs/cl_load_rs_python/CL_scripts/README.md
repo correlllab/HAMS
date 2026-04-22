@@ -1,1 +1,0 @@
-These are scripts that I ran in my development of simulating the full stack. Scripts were ran in the Isaac Sim native script editor; scripts in the *test* subdirectories are deprecated/useless/used-for-one-specific thing.

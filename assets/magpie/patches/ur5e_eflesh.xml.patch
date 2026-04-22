@@ -1,0 +1,105 @@
+--- ur5e.xml	2026-01-27 12:12:19.159736311 -0700
++++ ur5_magpie_eflesh.xml	2026-01-27 12:50:45.737996567 -0700
+@@ -1,9 +1,10 @@
+-<mujoco model="ur5e">
++<mujoco model="ur5e_magpie">
+   <compiler angle="radian" meshdir="assets" autolimits="true"/>
+ 
+   <option integrator="implicitfast"/>
+ 
+   <default>
++    <!-- UR5E defaults -->
+     <default class="ur5e">
+       <material specular="0.5" shininess="0.25"/>
+       <joint axis="0 1 0" range="-6.28319 6.28319" armature="0.1"/>
+@@ -29,14 +30,24 @@
+       </default>
+       <site size="0.001" rgba="0.5 0.5 0.5 0.3" group="4"/>
+     </default>
++
++    <!-- Magpie gripper defaults -->
++    <default class="magpie">
++      <joint axis="1 0 0" armature="0.001" damping="0.01"/>
++      <default class="magpie_crank">
++        <joint armature="0.005" damping="0.1"/>
++      </default>
++    </default>
+   </default>
+ 
+   <asset>
++    <!-- UR5E materials -->
+     <material class="ur5e" name="black" rgba="0.033 0.033 0.033 1"/>
+     <material class="ur5e" name="jointgray" rgba="0.278 0.278 0.278 1"/>
+     <material class="ur5e" name="linkgray" rgba="0.82 0.82 0.82 1"/>
+     <material class="ur5e" name="urblue" rgba="0.49 0.678 0.8 1"/>
+ 
++    <!-- UR5E meshes -->
+     <mesh file="base_0.obj"/>
+     <mesh file="base_1.obj"/>
+     <mesh file="shoulder_0.obj"/>
+@@ -57,6 +68,17 @@
+     <mesh file="wrist2_1.obj"/>
+     <mesh file="wrist2_2.obj"/>
+     <mesh file="wrist3.obj"/>
++
++    <!-- Magpie gripper meshes (prefixed to avoid name conflicts) -->
++    <mesh name="magpie_mount" file="mount.stl" scale="0.001 0.001 0.001"/>
++    <mesh name="magpie_base_bot" file="base_bot.stl" scale="0.001 0.001 0.001"/>
++    <mesh name="magpie_base_top" file="base_top.stl" scale="0.001 0.001 0.001"/>
++    <mesh name="magpie_left_crank" file="left_crank.stl" scale="0.001 0.001 0.001"/>
++    <mesh name="magpie_right_crank" file="right_crank.stl" scale="0.001 0.001 0.001"/>
++    <mesh name="magpie_left_finger" file="left_finger_eflesh.stl" scale="0.001 0.001 0.001"/>
++    <mesh name="magpie_right_finger" file="right_finger_eflesh.stl" scale="0.001 0.001 0.001"/>
++    <mesh name="magpie_left_rocker" file="left_rocker.stl" scale="0.001 0.001 0.001"/>
++    <mesh name="magpie_right_rocker" file="right_rocker.stl" scale="0.001 0.001 0.001"/>
+   </asset>
+ 
+   <worldbody>
+@@ -111,7 +133,14 @@
+                   <joint name="wrist_3_joint" class="size1"/>
+                   <geom material="linkgray" mesh="wrist3" class="visual"/>
+                   <geom class="eef_collision" pos="0 0.08 0" quat="1 1 0 0" size="0.04 0.02"/>
+-                  <site name="attachment_site" pos="0 0.1 0" quat="-1 1 0 0"/>
++
++                  <!-- Magpie gripper attached to UR5E wrist -->
++                  <!-- Attachment frame: UR5E Y-axis out, Magpie Z-axis out -->
++                  <!-- quat rotates gripper so its Z aligns with UR5E +Y (-90° about X) -->
++                  <body name="gripper_attachment" pos="0 0.1 0" quat="0.7071068 -0.7071068 0 0">
++                    <include file="magpie_gripper_eflesh.xml"/>
++                  </body>
++
+                 </body>
+               </body>
+             </body>
+@@ -121,6 +150,15 @@
+     </body>
+   </worldbody>
+ 
++  <!-- Equality constraints for magpie 4-bar loop closure -->
++  <equality>
++    <connect name="left_4bar_close" body1="base_top" body2="left_rocker"
++             anchor="-0.00075 0.060 0.065" solimp="0.95 0.99 0.001" solref="0.005 1"/>
++    <connect name="right_4bar_close" body1="base_top" body2="right_rocker"
++             anchor="-0.00075 -0.060 0.065" solimp="0.95 0.99 0.001" solref="0.005 1"/>
++  </equality>
++
++  <!-- UR5E arm actuators -->
+   <actuator>
+     <general class="size3" name="shoulder_pan" joint="shoulder_pan_joint"/>
+     <general class="size3" name="shoulder_lift" joint="shoulder_lift_joint"/>
+@@ -128,9 +166,14 @@
+     <general class="size1" name="wrist_1" joint="wrist_1_joint"/>
+     <general class="size1" name="wrist_2" joint="wrist_2_joint"/>
+     <general class="size1" name="wrist_3" joint="wrist_3_joint"/>
++
++    <!-- Magpie gripper actuators -->
++    <position name="left_finger_actuator" joint="left_hinge_1" ctrlrange="-0.035 2.70" kp="10"/>
++    <position name="right_finger_actuator" joint="right_hinge_1" ctrlrange="-2.70 0.035" kp="10"/>
+   </actuator>
+ 
+   <keyframe>
+-    <key name="home" qpos="-1.5708 -1.5708 1.5708 -1.5708 -1.5708 0" ctrl="-1.5708 -1.5708 1.5708 -1.5708 -1.5708 0"/>
++    <key name="home" qpos="-1.5708 -1.5708 1.5708 -1.5708 -1.5708 0 0 0 0 0 0 0"
++         ctrl="-1.5708 -1.5708 1.5708 -1.5708 -1.5708 0 0 0"/>
+   </keyframe>
+ </mujoco>

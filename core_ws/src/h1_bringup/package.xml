@@ -1,0 +1,29 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>h1_bringup</name>
+  <version>0.0.0</version>
+  <description>Launch files to bring up the H1 simulation visualization.</description>
+  <maintainer email="maxlconway@gmail.com">max</maintainer>
+  <license>MIT</license>
+
+  <exec_depend>rviz2</exec_depend>
+  <exec_depend>launch</exec_depend>
+  <exec_depend>launch_ros</exec_depend>
+  <exec_depend>h12_ros2_controller</exec_depend>
+  <exec_depend>h12_safety_layer</exec_depend>
+  <exec_depend>vision_pipeline</exec_depend>
+  <exec_depend>custom_ros_messages</exec_depend>
+  <exec_depend>python3-opencv</exec_depend>
+  <exec_depend>python3-numpy</exec_depend>
+  <exec_depend>python3-scipy</exec_depend>
+
+  <test_depend>ament_copyright</test_depend>
+  <test_depend>ament_flake8</test_depend>
+  <test_depend>ament_pep257</test_depend>
+  <test_depend>python3-pytest</test_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>

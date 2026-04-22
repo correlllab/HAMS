@@ -1,0 +1,9 @@
+.git
+CL_isaaclab_sim/.isaac_cache
+.claude
+__pycache__
+*.pyc
+scripts/sim_*.log
+core_ws/build
+core_ws/install
+core_ws/log

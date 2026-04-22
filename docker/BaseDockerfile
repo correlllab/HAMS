@@ -1,0 +1,98 @@
+# ==============================
+# Shared base for Isaac and MuJoCo simulation environments
+#
+# Contains: CUDA/Ubuntu base, Miniconda, Python 3.11, CycloneDDS, unitree_sdk2_python
+# Build: docker compose build base
+# ==============================
+FROM nvidia/cuda:12.2.0-devel-ubuntu22.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV TZ=America/Denver
+ENV CONDA_DIR=/opt/conda
+ENV PATH=$CONDA_DIR/bin:$PATH
+
+ARG http_proxy
+ARG https_proxy
+ENV http_proxy=${http_proxy}
+ENV https_proxy=${https_proxy}
+
+# Use US mirror for faster downloads
+RUN sed -i 's|http://archive.ubuntu.com/ubuntu/|http://us.archive.ubuntu.com/ubuntu/|g' /etc/apt/sources.list && \
+    sed -i 's|http://security.ubuntu.com/ubuntu/|http://security.ubuntu.com/ubuntu/|g' /etc/apt/sources.list
+
+# Superset of packages needed by both simulators
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    gcc-12 g++-12 cmake build-essential git git-lfs wget unzip \
+    libglu1-mesa-dev vulkan-tools libvulkan1 \
+    libx11-6 libxext6 libxrender1 libxi6 libxrandr2 libxcursor1 libxinerama1 \
+    libgl1-mesa-glx libglib2.0-0 libsm6 libxt6 libxkbcommon-x11-0 \
+    libegl1-mesa-dev libosmesa6-dev \
+    && update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-12 100 \
+    && update-alternatives --install /usr/bin/g++ g++ /usr/bin/g++-12 100 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Miniconda
+RUN wget https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh -O miniconda.sh && \
+    bash miniconda.sh -b -p $CONDA_DIR && \
+    rm miniconda.sh && \
+    $CONDA_DIR/bin/conda clean -afy
+
+# Accept Conda TOS and create shared environment
+RUN conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/main && \
+    conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/r && \
+    conda create -n humanoid_sim_env python=3.11 -y && \
+    conda clean -afy
+
+SHELL ["conda", "run", "-n", "humanoid_sim_env", "/bin/bash", "-c"]
+
+# C++17 runtime support
+RUN conda install -y -c conda-forge "libgcc-ng>=12" "libstdcxx-ng>=12" && \
+    conda clean -afy
+
+# Build CycloneDDS. Pinned to 0.10.x because the PyPI `cyclonedds` python binding
+# (transitively required by unitree_sdk2_python) includes a C source file that
+# references `dds/ddsi/q_radmin.h`, which was removed post-0.10.
+RUN git clone --depth 1 --branch releases/0.10.x https://github.com/eclipse-cyclonedds/cyclonedds /cyclonedds && \
+    cd /cyclonedds && mkdir build install && cd build && \
+    cmake .. -DCMAKE_INSTALL_PREFIX=../install && \
+    cmake --build . --target install && \
+    rm -rf /cyclonedds/build
+
+ENV CYCLONEDDS_HOME=/cyclonedds/install
+# All simulators publish/subscribe on ROS 2 domain 1 by default.
+ENV ROS_DOMAIN_ID=1
+
+# Install unitree_sdk2_python. Upstream setup.py only declares the top-level
+# package, so sub-packages like `b2` are dropped on install while `__init__.py`
+# still imports them — causing ImportError at runtime. Copy the full source
+# tree into site-packages after pip install to ensure every sub-module is present.
+RUN git clone --depth 1 https://github.com/unitreerobotics/unitree_sdk2_python /tmp/unitree_sdk2_python && \
+    pip install --upgrade pip && \
+    pip install /tmp/unitree_sdk2_python && \
+    SP=$(python -c "import site, sys; print(site.getsitepackages()[0])") && \
+    cp -r /tmp/unitree_sdk2_python/unitree_sdk2py/* "$SP/unitree_sdk2py/" && \
+    rm -rf /tmp/unitree_sdk2_python
+
+# ROS 2 Humble via RoboStack (conda-forge-compatible builds for Python 3.11).
+# Shared by both simulators — Isaac and MuJoCo both publish sensor topics + TF.
+# Activation of humanoid_sim_env auto-sources the ROS setup.
+RUN conda install -y -c conda-forge -c robostack-staging \
+        ros-humble-rclpy \
+        ros-humble-sensor-msgs-py \
+        ros-humble-tf2-ros \
+        ros-humble-tf2-ros-py \
+        ros-humble-geometry-msgs \
+        ros-humble-rosgraph-msgs \
+    && conda clean -afy
+
+# PyTorch with CUDA 13.0 (supports sm_120 / Blackwell, e.g. RTX 5070 Ti).
+# Bundled CUDA runtime is self-contained — no host toolkit version dependency.
+RUN pip install --no-cache-dir \
+        torch torchvision \
+        --index-url https://download.pytorch.org/whl/cu130
+
+# Clear build-time proxy vars so they don't leak into the image or child images.
+ENV http_proxy=
+ENV https_proxy=
+
+WORKDIR /home/code

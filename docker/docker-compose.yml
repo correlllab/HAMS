@@ -1,0 +1,87 @@
+services:
+  isaac:
+    profiles: [isaac]
+    build:
+      context: ..
+      dockerfile: docker/IsaacDockerfile
+    image: humanoid_sim_isaac:latest
+    runtime: nvidia
+    privileged: true
+    shm_size: 16g
+    network_mode: host
+    stdin_open: true
+    tty: true
+    environment:
+      - DISPLAY=${DISPLAY}
+      - HEADLESS=${HEADLESS:-0}
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=all
+      - QT_X11_NO_MITSHM=1
+      - LIBGL_ALWAYS_INDIRECT=0
+    volumes:
+      - /tmp/.X11-unix:/tmp/.X11-unix:rw
+      - ${XAUTHORITY:-$HOME/.Xauthority}:/root/.Xauthority:ro
+      - /dev/input:/dev/input:ro
+      - /dev/dri:/dev/dri:rw
+      - ../assets/env_assets:/home/code/cl_assets
+      - ./scripts:/home/code/h12_sim_scripts
+      - ../CL_isaaclab_sim:/home/code/CL_isaaclab_sim
+      - ../CL_isaaclab_sim/.isaac_cache/ov:/root/.cache/ov
+      - ../CL_isaaclab_sim/.isaac_cache/nvidia:/root/.nv
+    command: /home/code/h12_sim_scripts/launch_isaac.sh
+
+  mujoco:
+    profiles: [mujoco]
+    build:
+      context: ..
+      dockerfile: docker/MujocoDockerfile
+    image: humanoid_sim_mujoco:latest
+    runtime: nvidia
+    privileged: true
+    shm_size: 16g
+    network_mode: host
+    stdin_open: true
+    tty: true
+    environment:
+      - DISPLAY=${DISPLAY}
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=all
+      - QT_X11_NO_MITSHM=1
+      - LIBGL_ALWAYS_INDIRECT=0
+      # Default to EGL (works headless and on servers). Export MUJOCO_GL=glfw on
+      # the host to get the native viewer when you have a display.
+      - MUJOCO_GL=${MUJOCO_GL:-egl}
+    volumes:
+      - /tmp/.X11-unix:/tmp/.X11-unix:rw
+      - ${XAUTHORITY:-$HOME/.Xauthority}:/root/.Xauthority:ro
+      - /dev/input:/dev/input:ro
+      - /dev/dri:/dev/dri:rw
+      - ../h1_mujoco:/home/code/h1_mujoco
+      - ../assets:/home/code/assets:ro
+      - ./scripts:/home/code/h12_sim_scripts
+    command: /home/code/h12_sim_scripts/launch_mujoco.sh
+
+  ros:
+    profiles: [ros]
+    build:
+      context: ..
+      dockerfile: docker/RosDockerfile
+    image: humanoid_sim_ros:latest
+    runtime: nvidia
+    privileged: true
+    shm_size: 4g
+    network_mode: host
+    stdin_open: true
+    tty: true
+    environment:
+      - DISPLAY=${DISPLAY}
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=all
+      - QT_X11_NO_MITSHM=1
+    volumes:
+      - /tmp/.X11-unix:/tmp/.X11-unix:rw
+      - ${XAUTHORITY:-$HOME/.Xauthority}:/root/.Xauthority:ro
+      - ../core_ws:/home/code/core_ws
+      - ../assets:/home/code/assets:ro
+      - ./scripts:/home/code/h12_sim_scripts
+    command: /home/code/h12_sim_scripts/launch_ros.sh
