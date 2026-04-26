@@ -23,27 +23,26 @@ fi
 if [ "$NEEDS_BUILD" = "1" ]; then
     # livox_ros_driver2 ships a build.sh that picks the ROS 2 file variants
     # (package_ROS2.xml → package.xml, launch_ROS2 → launch) and drives colcon
-    # from the workspace root. Use it verbatim — reimplementing drifts.
+    # from the workspace root. Upstream invokes `colcon build --cmake-args ...`
+    # without --symlink-install; inject the flag so vision_pipeline's
+    # ModelWeights/*.pt are reachable via the install symlink instead of
+    # needing a manual post-build copy. Idempotent — won't re-patch if already
+    # present (e.g. after a previous run on the same bind-mounted clone).
     LIVOX_DIR="$WS/src/livox_ros_driver2"
     if [ -x "$LIVOX_DIR/build.sh" ]; then
+        if ! grep -q -- '--symlink-install' "$LIVOX_DIR/build.sh"; then
+            echo "[launch_ros] patching livox_ros_driver2/build.sh to add --symlink-install"
+            sed -i 's|colcon build --cmake-args|colcon build --symlink-install --cmake-args|' \
+                "$LIVOX_DIR/build.sh"
+        fi
         echo "[launch_ros] livox_ros_driver2/build.sh humble"
         (cd "$LIVOX_DIR" && ./build.sh humble)
     else
         echo "[launch_ros] colcon build"
-        colcon build
+        colcon build --symlink-install
     fi
 else
-    echo "[launch_ros] install/ is up to date — skipping build (run 'colcon build' to force)"
-fi
-
-# vision_pipeline's setup.py doesn't declare ModelWeights as package_data, so
-# colcon doesn't copy the .pt files into install/. We can't patch the upstream
-# submodule, so copy them after the build.
-VP_SRC="$WS/src/vision_pipeline/vision_pipeline/core/ModelWeights"
-VP_DST="$WS/install/vision_pipeline/lib/python3.10/site-packages/vision_pipeline/core/ModelWeights"
-if [ -d "$VP_SRC" ] && [ -d "$WS/install/vision_pipeline" ]; then
-    mkdir -p "$VP_DST"
-    cp -u "$VP_SRC"/*.pt "$VP_DST/" 2>/dev/null || true
+    echo "[launch_ros] install/ is up to date — skipping build (run 'colcon build --symlink-install' to force)"
 fi
 
 source install/setup.bash 2>/dev/null || true

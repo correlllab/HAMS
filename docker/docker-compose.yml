@@ -13,11 +13,11 @@ services:
     tty: true
     environment:
       - DISPLAY=${DISPLAY}
-      - HEADLESS=${HEADLESS:-0}
       - NVIDIA_VISIBLE_DEVICES=all
       - NVIDIA_DRIVER_CAPABILITIES=all
       - QT_X11_NO_MITSHM=1
       - LIBGL_ALWAYS_INDIRECT=0
+      - ROS_DOMAIN_ID=${ROS_DOMAIN_ID:-1}
     volumes:
       - /tmp/.X11-unix:/tmp/.X11-unix:rw
       - ${XAUTHORITY:-$HOME/.Xauthority}:/root/.Xauthority:ro
@@ -28,6 +28,8 @@ services:
       - ../CL_isaaclab_sim:/home/code/CL_isaaclab_sim
       - ../CL_isaaclab_sim/.isaac_cache/ov:/root/.cache/ov
       - ../CL_isaaclab_sim/.isaac_cache/nvidia:/root/.nv
+      - ../CL_isaaclab_sim/.isaac_cache/local_share_ov:/root/.local/share/ov
+      - ../CL_isaaclab_sim/.isaac_cache/isaacsim:/root/.isaacsim
     command: /home/code/h12_sim_scripts/launch_isaac.sh
 
   mujoco:
@@ -48,9 +50,10 @@ services:
       - NVIDIA_DRIVER_CAPABILITIES=all
       - QT_X11_NO_MITSHM=1
       - LIBGL_ALWAYS_INDIRECT=0
-      # Default to EGL (works headless and on servers). Export MUJOCO_GL=glfw on
-      # the host to get the native viewer when you have a display.
-      - MUJOCO_GL=${MUJOCO_GL:-egl}
+      # Default to GLFW (native passive viewer). Export MUJOCO_GL=egl on the
+      # host (or pass --headless to launch_mujoco.sh) for offscreen rendering.
+      - MUJOCO_GL=${MUJOCO_GL:-glfw}
+      - ROS_DOMAIN_ID=${ROS_DOMAIN_ID:-1}
     volumes:
       - /tmp/.X11-unix:/tmp/.X11-unix:rw
       - ${XAUTHORITY:-$HOME/.Xauthority}:/root/.Xauthority:ro
@@ -78,6 +81,7 @@ services:
       - NVIDIA_VISIBLE_DEVICES=all
       - NVIDIA_DRIVER_CAPABILITIES=all
       - QT_X11_NO_MITSHM=1
+      - ROS_DOMAIN_ID=${ROS_DOMAIN_ID:-1}
     volumes:
       - /tmp/.X11-unix:/tmp/.X11-unix:rw
       - ${XAUTHORITY:-$HOME/.Xauthority}:/root/.Xauthority:ro

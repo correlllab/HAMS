@@ -5,8 +5,8 @@ set -euo pipefail
 cd "$(dirname "$0")/../.."
 
 # Profiles to build. Add/remove as needed: isaac, mujoco, ros
-# PROFILES=(isaac)
-PROFILES=(isaac mujoco ros)   # ← uncomment to build all
+PROFILES=(ros)
+# PROFILES=(isaac mujoco ros)   # ← uncomment to build all
 
 echo "Building base..."
 docker build -t humanoid_sim_base:latest -f docker/BaseDockerfile .

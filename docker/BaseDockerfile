@@ -1,15 +1,19 @@
 # ==============================
 # Shared base for Isaac and MuJoCo simulation environments
 #
-# Contains: CUDA/Ubuntu base, Miniconda, Python 3.11, CycloneDDS, unitree_sdk2_python
-# Build: docker compose build base
+# Contains: CUDA/Ubuntu base, Python 3.10 via apt, ROS 2 Humble via apt,
+#           CycloneDDS 0.10.x (from source, for PyPI cyclonedds compat),
+#           uv for Python installs, unitree_sdk2_python, PyTorch cu130,
+#           and shared kinematics libs (pin/pink/mink).
+# Build:   docker compose build base
 # ==============================
 FROM nvidia/cuda:12.2.0-devel-ubuntu22.04
 
 ENV DEBIAN_FRONTEND=noninteractive
 ENV TZ=America/Denver
-ENV CONDA_DIR=/opt/conda
-ENV PATH=$CONDA_DIR/bin:$PATH
+ENV LANG=C.UTF-8
+ENV ROS_DISTRO=humble
+ENV RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
 
 ARG http_proxy
 ARG https_proxy
@@ -17,41 +21,51 @@ ENV http_proxy=${http_proxy}
 ENV https_proxy=${https_proxy}
 
 # Use US mirror for faster downloads
-RUN sed -i 's|http://archive.ubuntu.com/ubuntu/|http://us.archive.ubuntu.com/ubuntu/|g' /etc/apt/sources.list && \
-    sed -i 's|http://security.ubuntu.com/ubuntu/|http://security.ubuntu.com/ubuntu/|g' /etc/apt/sources.list
+RUN sed -i 's|http://archive.ubuntu.com/ubuntu/|http://us.archive.ubuntu.com/ubuntu/|g' /etc/apt/sources.list
 
-# Superset of packages needed by both simulators
+# Superset of packages needed by both simulators: compilers, graphics, Python 3.10,
+# locale setup, ROS repo prerequisites.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    gcc-12 g++-12 cmake build-essential git git-lfs wget unzip \
-    libglu1-mesa-dev vulkan-tools libvulkan1 \
-    libx11-6 libxext6 libxrender1 libxi6 libxrandr2 libxcursor1 libxinerama1 \
-    libgl1-mesa-glx libglib2.0-0 libsm6 libxt6 libxkbcommon-x11-0 \
-    libegl1-mesa-dev libosmesa6-dev \
+        ca-certificates curl gnupg locales software-properties-common \
+        gcc-12 g++-12 cmake build-essential git git-lfs wget unzip \
+        python3 python3-dev python3-pip python-is-python3 \
+        libglu1-mesa-dev vulkan-tools libvulkan1 \
+        libx11-6 libxext6 libxrender1 libxi6 libxrandr2 libxcursor1 libxinerama1 \
+        libgl1-mesa-glx libglib2.0-0 libsm6 libxt6 libxkbcommon-x11-0 \
+        libegl1-mesa-dev libosmesa6-dev \
+    && locale-gen en_US en_US.UTF-8 && update-locale LC_ALL=C.UTF-8 LANG=C.UTF-8 \
+    && add-apt-repository universe \
     && update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-12 100 \
     && update-alternatives --install /usr/bin/g++ g++ /usr/bin/g++-12 100 \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Miniconda
-RUN wget https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh -O miniconda.sh && \
-    bash miniconda.sh -b -p $CONDA_DIR && \
-    rm miniconda.sh && \
-    $CONDA_DIR/bin/conda clean -afy
+# ROS 2 Humble apt repository.
+RUN curl -sSL https://raw.githubusercontent.com/ros/rosdistro/master/ros.key \
+        -o /usr/share/keyrings/ros-archive-keyring.gpg \
+    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/ros-archive-keyring.gpg] http://packages.ros.org/ros2/ubuntu jammy main" \
+        > /etc/apt/sources.list.d/ros2.list
 
-# Accept Conda TOS and create shared environment
-RUN conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/main && \
-    conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/r && \
-    conda create -n humanoid_sim_env python=3.11 -y && \
-    conda clean -afy
+# ROS 2 Humble packages needed by the sim processes (rclpy + sensor/TF publishers).
+# ros-humble-ros-base brings rclpy, rclcpp, rmw, launch, ament.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ros-humble-ros-base \
+        ros-humble-rmw-cyclonedds-cpp \
+        ros-humble-sensor-msgs-py \
+        ros-humble-tf2-ros \
+        ros-humble-tf2-ros-py \
+        ros-humble-geometry-msgs \
+        ros-humble-rosgraph-msgs \
+        ros-humble-cv-bridge \
+    && rm -rf /var/lib/apt/lists/*
 
-SHELL ["conda", "run", "-n", "humanoid_sim_env", "/bin/bash", "-c"]
+# Install uv for fast, deterministic pip-compatible installs.
+# UV_INSTALL_DIR overrides the default ~/.local/bin location.
+RUN curl -LsSf https://astral.sh/uv/install.sh | env UV_INSTALL_DIR=/usr/local/bin sh \
+    && uv --version
 
-# C++17 runtime support
-RUN conda install -y -c conda-forge "libgcc-ng>=12" "libstdcxx-ng>=12" && \
-    conda clean -afy
-
-# Build CycloneDDS. Pinned to 0.10.x because the PyPI `cyclonedds` python binding
-# (transitively required by unitree_sdk2_python) includes a C source file that
-# references `dds/ddsi/q_radmin.h`, which was removed post-0.10.
+# Build CycloneDDS 0.10.x. Pinned because the PyPI `cyclonedds` wheel (transitive
+# dep of unitree_sdk2_python) references `dds/ddsi/q_radmin.h`, removed post-0.10.
+# CYCLONEDDS_HOME points the PyPI wheel at this install at pip-build time.
 RUN git clone --depth 1 --branch releases/0.10.x https://github.com/eclipse-cyclonedds/cyclonedds /cyclonedds && \
     cd /cyclonedds && mkdir build install && cd build && \
     cmake .. -DCMAKE_INSTALL_PREFIX=../install && \
@@ -59,37 +73,33 @@ RUN git clone --depth 1 --branch releases/0.10.x https://github.com/eclipse-cycl
     rm -rf /cyclonedds/build
 
 ENV CYCLONEDDS_HOME=/cyclonedds/install
-# All simulators publish/subscribe on ROS 2 domain 1 by default.
-ENV ROS_DOMAIN_ID=1
 
 # Install unitree_sdk2_python. Upstream setup.py only declares the top-level
 # package, so sub-packages like `b2` are dropped on install while `__init__.py`
 # still imports them — causing ImportError at runtime. Copy the full source
-# tree into site-packages after pip install to ensure every sub-module is present.
+# tree into site-packages after install to ensure every sub-module is present.
 RUN git clone --depth 1 https://github.com/unitreerobotics/unitree_sdk2_python /tmp/unitree_sdk2_python && \
-    pip install --upgrade pip && \
-    pip install /tmp/unitree_sdk2_python && \
-    SP=$(python -c "import site, sys; print(site.getsitepackages()[0])") && \
+    uv pip install --system /tmp/unitree_sdk2_python && \
+    SP=$(python3 -c "import site; print(site.getsitepackages()[0])") && \
     cp -r /tmp/unitree_sdk2_python/unitree_sdk2py/* "$SP/unitree_sdk2py/" && \
     rm -rf /tmp/unitree_sdk2_python
 
-# ROS 2 Humble via RoboStack (conda-forge-compatible builds for Python 3.11).
-# Shared by both simulators — Isaac and MuJoCo both publish sensor topics + TF.
-# Activation of humanoid_sim_env auto-sources the ROS setup.
-RUN conda install -y -c conda-forge -c robostack-staging \
-        ros-humble-rclpy \
-        ros-humble-sensor-msgs-py \
-        ros-humble-tf2-ros \
-        ros-humble-tf2-ros-py \
-        ros-humble-geometry-msgs \
-        ros-humble-rosgraph-msgs \
-    && conda clean -afy
-
 # PyTorch with CUDA 13.0 (supports sm_120 / Blackwell, e.g. RTX 5070 Ti).
 # Bundled CUDA runtime is self-contained — no host toolkit version dependency.
-RUN pip install --no-cache-dir \
+# UV_HTTP_TIMEOUT raised from default 30s because multi-hundred-MB NVIDIA wheels
+# from pypi.nvidia.com can stall past the default on slow links.
+RUN UV_HTTP_TIMEOUT=600 uv pip install --system --no-cache \
         torch torchvision \
         --index-url https://download.pytorch.org/whl/cu130
+
+# Shared kinematics / IK libs used by sim code across Isaac and MuJoCo.
+# PyPI `pin` provides the `pinocchio` module. `pink` / `mink` are Pythonic IK
+# wrappers built on pinocchio. Kept in base so per-sim Dockerfiles don't
+# duplicate them; ROS container is standalone and installs its own pinocchio.
+RUN uv pip install --system --no-cache pin pink mink
+
+# Source ROS 2 on every interactive shell.
+RUN echo 'source /opt/ros/humble/setup.bash' >> /root/.bashrc
 
 # Clear build-time proxy vars so they don't leak into the image or child images.
 ENV http_proxy=

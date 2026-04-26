@@ -1,83 +1,96 @@
 # ==============================
-# ROS 2 Humble (apt-based) workspace image
-# ==============================
-# Deliberately does NOT derive from humanoid_sim_base: robostack-conda's
-# libstdc++ ABI mismatched the system gcc when building core_ws. apt ROS 2
-# uses the same toolchain the packages were compiled against, so colcon
-# builds of FAST_LIO / livox_ros_driver2 link cleanly.
+# ROS 2 Humble workspace image on humanoid_sim_base.
 #
-# Cross-container DDS: this image uses apt ros-humble-rmw-cyclonedds-cpp;
-# the other containers use /cyclonedds from base. Both speak the CycloneDDS
-# wire protocol on ROS_DOMAIN_ID=1, so they interop without sharing binaries.
-FROM nvidia/cuda:12.2.0-runtime-ubuntu22.04
-
-ENV DEBIAN_FRONTEND=noninteractive
-ENV TZ=America/Denver
-ENV LANG=C.UTF-8
-ENV ROS_DISTRO=humble
-ENV ROS_DOMAIN_ID=1
-ENV RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
+# Inherits base's CUDA, Python 3.10, ROS 2 Humble, CycloneDDS 0.10.x (from
+# source), uv, unitree_sdk2_python, torch cu130, and pin/pink/mink, then
+# layers on the ROS workspace extras: colcon, rviz2, apt pinocchio (for C++
+# packages in core_ws), FAST_LIO / livox_ros_driver2 deps, and the
+# vision_pipeline ML stack. numpy is pinned to <2 at the end for
+# scipy/pinocchio ABI compatibility.
+#
+# Cross-container DDS: base installs CycloneDDS 0.10.x from source with
+# ros-humble-rmw-cyclonedds-cpp on top. All containers (sim + ROS) share this
+# stack and interop on ROS_DOMAIN_ID=1.
+#
+# Layer order is most-stable → least-stable so iterating on pip pins does not
+# bust the apt and Livox-SDK2 cmake layers above. Within pip, the controller /
+# IK stack comes before the volatile vision ML stack for the same reason.
+# ==============================
+FROM humanoid_sim_base:latest
 
 ARG http_proxy
 ARG https_proxy
 ENV http_proxy=${http_proxy}
 ENV https_proxy=${https_proxy}
 
-# ROS 2 Humble apt repo + base tooling.
+# -----------------------------------------------------------------------------
+# 1. apt: build tooling, system Python C-extensions, ROS workspace deps
+# -----------------------------------------------------------------------------
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        ca-certificates curl gnupg locales software-properties-common \
-    && locale-gen en_US en_US.UTF-8 && update-locale LC_ALL=C.UTF-8 LANG=C.UTF-8 \
-    && add-apt-repository universe \
-    && curl -sSL https://raw.githubusercontent.com/ros/rosdistro/master/ros.key \
-           -o /usr/share/keyrings/ros-archive-keyring.gpg \
-    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/ros-archive-keyring.gpg] http://packages.ros.org/ros2/ubuntu jammy main" \
-           > /etc/apt/sources.list.d/ros2.list \
-    && rm -rf /var/lib/apt/lists/*
-
-# Build + ROS 2 packages core_ws needs.
-# Livox-SDK2 is built from source below; everything else is apt.
-RUN apt-get update && apt-get install -y --no-install-recommends \
-        build-essential cmake git git-lfs pkg-config \
-        python3-pip python3-colcon-common-extensions python3-rosdep \
-        python3-vcstool python3-numpy python3-scipy python3-yaml \
-        python3-transforms3d \
+        # build / packaging tooling
+        pkg-config \
+        python3-colcon-common-extensions \
+        python3-rosdep \
+        python3-vcstool \
+        # apt-built Python deps with C extensions (must match system ABIs)
+        python3-numpy python3-scipy python3-yaml python3-transforms3d \
+        # C++ libs core_ws packages link against
         libpcl-dev libeigen3-dev libyaml-cpp-dev libopencv-dev \
-        ros-humble-ros-base \
+        # ament / rosidl build system
         ros-humble-ament-cmake \
         ros-humble-ament-cmake-auto \
         ros-humble-ament-cmake-python \
         ros-humble-ament-lint-auto \
         ros-humble-rosidl-default-generators \
-        ros-humble-cv-bridge \
+        # Foxy-era DDS IDL generator. Not pulled in by ros-base or
+        # rosidl-default-generators on Humble, but unitree_ros2 packages
+        # (unitree_api/go/hg) still find_package(rosidl_generator_dds_idl REQUIRED).
+        ros-humble-rosidl-generator-dds-idl \
+        # ROS message types referenced across the workspace
         ros-humble-image-transport \
         ros-humble-vision-msgs \
+        ros-humble-nav-msgs \
+        ros-humble-std-msgs \
+        ros-humble-std-srvs \
+        ros-humble-visualization-msgs \
+        # robot description + launch
         ros-humble-xacro \
         ros-humble-robot-state-publisher \
         ros-humble-joint-state-publisher \
         ros-humble-launch-ros \
         ros-humble-launch-xml \
+        # PCL / TF integration
         ros-humble-pcl-ros \
         ros-humble-pcl-conversions \
         ros-humble-tf2-eigen \
-        ros-humble-nav-msgs \
-        ros-humble-std-msgs \
-        ros-humble-std-srvs \
-        ros-humble-visualization-msgs \
+        ros-humble-tf2-tools \
+        # rclcpp + visualization
         ros-humble-rclcpp \
         ros-humble-rclcpp-components \
-        ros-humble-rmw-cyclonedds-cpp \
         ros-humble-rviz2 \
-        ros-humble-tf2-tools \
+        # apt pinocchio (C++ symbols) for core_ws packages — coexists with base's pip `pin`
         ros-humble-pinocchio \
     && rm -rf /var/lib/apt/lists/*
 
-# Python deps for h12_ros2_controller (Pink differential IK + QP solvers) and
-# vision_pipeline (open3d). numpy<2 pin is required because system scipy 1.8
-# was built against numpy 1.x ABI and crashes on import under numpy 2.
-# Note: do NOT upgrade pip/setuptools here. Ubuntu 22.04 ships setuptools 59.6
-# which returns python_requires as a string in setup.py --dry-run output.
-# Newer setuptools (69+) returns SpecifierSet(...) which chokes colcon's
-# python_setup_py literal_eval and fails the core_ws build.
+# -----------------------------------------------------------------------------
+# 2. Livox-SDK2 from source — required by livox_ros_driver2 in core_ws.
+#    Placed before the Python layers so iterating on pip pins does not bust
+#    the cmake build. CMAKE_POLICY_VERSION_MINIMUM works around upstream's
+#    outdated cmake_minimum_required.
+# -----------------------------------------------------------------------------
+RUN git clone --depth 1 https://github.com/Livox-SDK/Livox-SDK2.git /tmp/Livox-SDK2 && \
+    cd /tmp/Livox-SDK2 && mkdir build && cd build && \
+    cmake .. -DCMAKE_POLICY_VERSION_MINIMUM=3.5 && make -j"$(nproc)" && make install && \
+    ldconfig && \
+    rm -rf /tmp/Livox-SDK2
+
+# -----------------------------------------------------------------------------
+# 3. Python: controller / IK stack (Pink differential IK + QP backends, viz).
+#    numpy<2 is forced first so transitive C-extension installs bind to the
+#    numpy 1.x ABI matching apt scipy 1.8 / pinocchio.
+#    `--ignore-installed blinker` works around apt's old python3-blinker that
+#    pip cannot cleanly uninstall.
+# -----------------------------------------------------------------------------
 RUN pip install --no-cache-dir --ignore-installed blinker \
         "numpy<2" \
         "scikit-learn>=1.4" \
@@ -89,23 +102,15 @@ RUN pip install --no-cache-dir --ignore-installed blinker \
         meshcat-shapes \
         pyquaternion \
         tqdm \
-        open3d \
-    && pip install --no-cache-dir --force-reinstall "setuptools==59.6.0"
+        open3d
 
-# unitree_sdk2_python — see BaseDockerfile for the site-packages copy
-# rationale (upstream setup.py drops sub-packages like `b2`).
-RUN git clone --depth 1 https://github.com/unitreerobotics/unitree_sdk2_python /tmp/unitree_sdk2_python && \
-    pip install /tmp/unitree_sdk2_python && \
-    SP=$(python3 -c "import site; print(site.getsitepackages()[0])") && \
-    cp -r /tmp/unitree_sdk2_python/unitree_sdk2py/* "$SP/unitree_sdk2py/" && \
-    rm -rf /tmp/unitree_sdk2_python && \
-    pip install --no-cache-dir --force-reinstall "numpy<2"
-
-# vision_pipeline ML stack. PyTorch with CUDA 13.0 for sm_120 (Blackwell) support.
-# Model weights are already checked in under vision_pipeline/core/ModelWeights.
+# -----------------------------------------------------------------------------
+# 4. Python: vision_pipeline ML stack.
+#    All versions exact-pinned for reproducibility; CLIP is fetched at a SHA
+#    because it is not on PyPI. Model weights ship under
+#    vision_pipeline/core/ModelWeights and are bind-mounted via core_ws.
+# -----------------------------------------------------------------------------
 RUN pip install --no-cache-dir \
-        torch torchvision --index-url https://download.pytorch.org/whl/cu130 \
-    && pip install --no-cache-dir \
         "transformers==4.47.1" \
         "google-genai==1.1.0" \
         "opencv-python==4.10.0.84" \
@@ -121,36 +126,77 @@ RUN pip install --no-cache-dir \
         "ultralytics==8.3.52" \
     && pip install --no-cache-dir git+https://github.com/openai/CLIP.git@a1d0717
 
-# SAM2 — installed editable from GitHub (config YAMLs only resolve via package path).
-# Pinned to a known-good commit for reproducibility.
+# -----------------------------------------------------------------------------
+# 5. SAM2 / SAM3 — vendored from git.
+#    SAM2 needs editable install so its config YAMLs resolve via package path.
+#    SAM3's setup.py produces UNKNOWN-0.0.0; bypass with PYTHONPATH instead.
+# -----------------------------------------------------------------------------
 RUN git clone https://github.com/facebookresearch/sam2.git /opt/sam2 && \
     cd /opt/sam2 && git checkout c2ec8e14 && pip install --no-cache-dir -e .
 
-# SAM3 — upstream setup.py produces an UNKNOWN-0.0.0 wheel; vendor via PYTHONPATH.
-# Pinned to a known-good commit for reproducibility.
 RUN git clone --depth 1 https://github.com/facebookresearch/sam3.git /opt/sam3
 ENV PYTHONPATH=/opt/sam3:${PYTHONPATH}
 
-# BBBackBones.py unconditionally imports API_KEYS even when Gemini backbone is
-# unused. Provide an empty stub so the yoloworld/owlv2 paths can import.
-# Override the key by bind-mounting or exporting GEMINI_KEY=... as needed.
+# -----------------------------------------------------------------------------
+# 6. API_KEYS stub for vision_pipeline/BBBackBones.py — module-level import is
+#    unconditional even when the Gemini backbone is unused. Override at
+#    runtime via `-e GEMINI_KEY=...` or a bind mount.
+# -----------------------------------------------------------------------------
 RUN echo 'import os; GEMINI_KEY = os.environ.get("GEMINI_KEY", "")' \
         > /usr/local/lib/python3.10/dist-packages/API_KEYS.py
 
-# Repin numpy<2 / setuptools==59.6 — torch and the ML stack above silently pull
-# in newer versions that break pinocchio's numpy ABI and colcon's setup.py
-# literal_eval for ament_python packages.
-RUN pip install --no-cache-dir --force-reinstall "numpy<2" "setuptools==59.6.0"
+# -----------------------------------------------------------------------------
+# 7. Final version clamp — restore numpy<2, setuptools 59.6, wheel<0.44 after
+#    earlier pip steps inevitably bumped them.
+#
+#    numpy>=2:       breaks pinocchio + apt scipy 1.8 ABI.
+#    setuptools>=70: colcon's python_setup_py literal_eval chokes on the
+#                    SpecifierSet object setuptools 69+ returns instead of a
+#                    string, so ament_python builds fail at runtime.
+#    wheel>=0.44:    its bdist_wheel entry point references
+#                    setuptools.command.bdist_wheel, which is a stub-only
+#                    module in setuptools 70.x and breaks pkg_resources.
+#
+#    The rm -rf is required because base-image `uv pip` and this file's `pip`
+#    upgrades layered multiple setuptools versions and left stale .dist-info
+#    directories behind. importlib.metadata enumerates all of them, so even a
+#    fresh install cannot fix the broken entry point without first removing
+#    the ghosts. --no-deps prevents pip's resolver from substituting these
+#    explicit pins.
+#
+#    pkg_resources / _distutils_hack must also be wiped: setuptools 70+ split
+#    pkg_resources into a sibling top-level package whose __init__.py imports
+#    `jaraco.text`. Without --no-deps installing jaraco, leaving the 70+
+#    pkg_resources in place causes ModuleNotFoundError at colcon build time.
+# -----------------------------------------------------------------------------
+RUN rm -rf /usr/local/lib/python3.10/dist-packages/setuptools \
+           /usr/local/lib/python3.10/dist-packages/setuptools-*.dist-info \
+           /usr/local/lib/python3.10/dist-packages/pkg_resources \
+           /usr/local/lib/python3.10/dist-packages/pkg_resources-*.dist-info \
+           /usr/local/lib/python3.10/dist-packages/_distutils_hack \
+           /usr/local/lib/python3.10/dist-packages/wheel \
+           /usr/local/lib/python3.10/dist-packages/wheel-*.dist-info \
+    && pip install --no-cache-dir --no-deps "numpy<2" "setuptools==59.6.0" "wheel<0.44"
 
-# Livox-SDK2 — required by livox_ros_driver2.
-RUN git clone --depth 1 https://github.com/Livox-SDK/Livox-SDK2.git /tmp/Livox-SDK2 && \
-    cd /tmp/Livox-SDK2 && mkdir build && cd build && \
-    cmake .. -DCMAKE_POLICY_VERSION_MINIMUM=3.5 && make -j"$(nproc)" && make install && \
-    ldconfig && \
-    rm -rf /tmp/Livox-SDK2
+# -----------------------------------------------------------------------------
+# 8. Workspace integration. Base already sources /opt/ros/humble in bashrc;
+#    overlay core_ws/install if it exists (it does not until launch_ros.sh
+#    runs colcon build at first launch).
+# -----------------------------------------------------------------------------
+RUN echo '[ -f /home/code/core_ws/install/setup.bash ] && source /home/code/core_ws/install/setup.bash' >> /root/.bashrc
 
-RUN echo 'source /opt/ros/humble/setup.bash' >> /root/.bashrc && \
-    echo '[ -f /home/code/core_ws/install/setup.bash ] && source /home/code/core_ws/install/setup.bash' >> /root/.bashrc
+# -----------------------------------------------------------------------------
+# 9. Drop setuptools-70+ leftover .pth file. The step-7 clamp removed
+#    _distutils_hack/, but distutils-precedence.pth remained because pip saw
+#    apt's setuptools 59.6.0 already satisfied the pin and didn't reinstall —
+#    so the .pth from the earlier setuptools 82 install was never overwritten.
+#    Result: every Python invocation prints
+#    `ModuleNotFoundError: No module named '_distutils_hack'` from site.py
+#    before falling through. Apt's 59.6.0 doesn't need the precedence hack,
+#    so deleting the .pth silences the warning. Placed last so re-running this
+#    fix does not invalidate any heavy layers above.
+# -----------------------------------------------------------------------------
+RUN rm -f /usr/local/lib/python3.10/dist-packages/distutils-precedence.pth
 
 WORKDIR /home/code/core_ws
 

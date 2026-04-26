@@ -36,3 +36,6 @@
 [submodule "core_ws/src/h12_realsense"]
 	path = core_ws/src/h12_realsense
 	url = https://github.com/correlllab/h12_realsense.git
+[submodule "core_ws/src/unitree_ros2"]
+	path = core_ws/src/unitree_ros2
+	url = https://github.com/unitreerobotics/unitree_ros2.git

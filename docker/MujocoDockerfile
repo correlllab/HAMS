@@ -1,51 +1,31 @@
 # ==============================
-# Stage 1: Builder
+# MuJoCo 3.6.0 sim on humanoid_sim_base.
+# Single-stage: base image already has ROS + Python + torch + unitree_sdk2py.
+# Source tree bind-mounted at runtime (docker-compose.yml -> /home/code/h1_mujoco).
 # ==============================
-FROM humanoid_sim_base:latest AS builder
+FROM humanoid_sim_base:latest
 
 ARG http_proxy
 ARG https_proxy
 ENV http_proxy=${http_proxy}
 ENV https_proxy=${https_proxy}
 
-SHELL ["conda", "run", "-n", "humanoid_sim_env", "/bin/bash", "-c"]
-
-# Install mujoco pip deps. unitree-sdk2py and ROS 2 are already in the base image.
-# The source tree is bind-mounted at runtime (docker-compose.yml -> /home/code/h1_mujoco),
-# so we don't copy the source here.
-RUN pip install "mujoco==3.6.0" "numpy>=2.2.6" "Pillow>=10.0"
-
-
-# ==============================
-# Stage 2: Runtime
-# ==============================
-FROM nvidia/cuda:12.2.0-runtime-ubuntu22.04 AS runtime
-
-ENV DEBIAN_FRONTEND=noninteractive
-ENV TZ=America/Denver
-ENV CONDA_DIR=/opt/conda
-ENV PATH=$CONDA_DIR/bin:$PATH
-ENV CYCLONEDDS_HOME=/cyclonedds/install
-ENV ROS_DOMAIN_ID=1
-# Use EGL for headless GPU rendering; override with -e MUJOCO_GL=glfw for X11 display
+# Default backend baked into the image. Operational default is GLFW: docker-compose
+# exports MUJOCO_GL=${MUJOCO_GL:-glfw} and launch_mujoco.sh forces glfw unless
+# --headless (in which case it switches to egl for offscreen GPU rendering).
 ENV MUJOCO_GL=egl
 
+# MuJoCo runtime graphics libs (EGL + OSMesa for headless rendering).
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    libglu1-mesa git-lfs \
-    libx11-6 libxext6 libxrender1 libxi6 libxrandr2 libxcursor1 libxinerama1 \
-    libgl1-mesa-glx libglib2.0-0 libsm6 libxt6 libxkbcommon-x11-0 \
-    libegl1-mesa libosmesa6 \
-    libgomp1 \
+        libegl1-mesa libosmesa6 \
     && rm -rf /var/lib/apt/lists/*
 
-COPY --from=builder /home/code /home/code
-COPY --from=builder /cyclonedds /cyclonedds
-COPY --from=builder /opt/conda /opt/conda
-
-RUN echo 'source /opt/conda/etc/profile.d/conda.sh' >> ~/.bashrc && \
-    echo 'conda activate humanoid_sim_env' >> ~/.bashrc && \
-    echo 'export CYCLONEDDS_HOME=/cyclonedds/install' >> ~/.bashrc
+# MuJoCo Python binding + Pillow for image encoding.
+RUN uv pip install --system --no-cache \
+        "mujoco==3.6.0" \
+        "numpy>=2.2.6" \
+        "Pillow>=10.0"
 
 WORKDIR /home/code/h1_mujoco
 
-CMD ["conda", "run", "-n", "humanoid_sim_env", "/bin/bash"]
+CMD ["/bin/bash"]
