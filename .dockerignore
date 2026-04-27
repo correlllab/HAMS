@@ -1,9 +1,8 @@
-.git
-CL_isaaclab_sim/.isaac_cache
-.claude
-__pycache__
-*.pyc
-scripts/sim_*.log
-core_ws/build
-core_ws/install
-core_ws/log
+# Deny-all build context. Only one file is referenced from any Dockerfile
+# (IsaacDockerfile: COPY CL_isaaclab_sim/requirements.txt). Everything else
+# is bind-mounted at runtime via docker-compose.yml, so sending it to the
+# daemon is wasted bandwidth (~11 GB on full builds otherwise).
+*
+!CL_isaaclab_sim
+CL_isaaclab_sim/*
+!CL_isaaclab_sim/requirements.txt

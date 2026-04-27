@@ -2,9 +2,11 @@
 # Usage: ./launch_isaac.sh [--reset-cache] [--headless] [task_name]
 # Default task: Isaac-Stack-RgyBlock-H12-27dof-Inspire-Joint
 # Set HEADLESS=1 in the environment (or pass --headless) to run without a viewport.
+#
+# ROS publishing uses Isaac-Sim's bundled isaacsim.ros2.bridge extension
+# (loaded by Kit at app startup); there is no /opt/ros/humble in this image
+# and rclpy is not installed.
 set -e
-
-source /opt/ros/humble/setup.bash
 
 TASK="Isaac-Stack-RgyBlock-H12-27dof-Inspire-Joint"
 HEADLESS_FLAG=""
@@ -25,7 +27,12 @@ for arg in "$@"; do
 done
 
 export PYTHONUNBUFFERED=1
-python -u /home/code/CL_isaaclab_sim/sim_main.py \
+# Use the conda env's interpreter directly. Compose runs this script
+# non-interactively, so ~/.bashrc (which `conda activate`s the env) is not
+# sourced — bare `python` would resolve to the base conda Python without
+# isaacsim/isaaclab installed.
+exec /opt/conda/envs/unitree_sim_env/bin/python -u \
+    /home/code/CL_isaaclab_sim/sim_main.py \
     --device cuda \
     --enable_cameras \
     $HEADLESS_FLAG \

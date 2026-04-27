@@ -1,6 +1,6 @@
 [submodule "CL_isaaclab_sim"]
 	path = CL_isaaclab_sim
-	url = https://github.com/correlllab/CL_isaaclab_sim
+	url = git@github.com:correlllab/CL_isaaclab_sim.git
 [submodule "h1_mujoco"]
 	path = h1_mujoco
 	url = https://github.com/correlllab/h1_mujoco.git

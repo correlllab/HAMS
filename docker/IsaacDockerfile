@@ -1,102 +1,193 @@
 # ==============================
-# Isaac Sim 4.5.0 + IsaacLab + teleimager on humanoid_sim_base.
-# Single-stage: base image already has ROS + Python + torch + unitree_sdk2py.
+# Isaac Sim 5.1.0 + IsaacLab v2.3.2 + CL_isaaclab_sim runtime.
+# Self-contained image — does NOT inherit from humanoid_sim_base, because Sim 5.x
+# requires Python 3.11 while humanoid_sim_base pins 3.10 for ROS 2 Humble apt
+# packages. ROS publishing in this container is done via OmniGraph using the
+# bundled isaacsim.ros2.bridge extension; rclpy is NOT installed and not used.
 #
-# Isaac Sim version note: pinned to 4.5.0.0, the latest release with Python 3.10
-# wheels on pypi.nvidia.com. Isaac Sim 5.x requires Python 3.11 and 6.x requires
-# 3.12 — both incompatible with the apt-ROS Python 3.10 base. IsaacLab is pinned
-# correspondingly to a tag that does not require `wp.transform_compose`
-# (introduced in Isaac Sim 5.1+'s bundled omni.warp.core).
+# Mujoco/Ros containers continue to inherit from humanoid_sim_base unchanged.
+#
+# Structure: two-stage build (builder → runtime) modeled on upstream
+# correlllab/CL_isaaclab_sim. Python lives in a conda env (Miniconda) instead
+# of system Python + uv, which avoids the /usr/local/bin pip-shim problem
+# (the pip `cmake` shim was breaking egl_probe under PEP 517 build isolation).
 # ==============================
-FROM humanoid_sim_base:latest
 
+# ==============================
+# Stage 1: Builder
+# ==============================
+FROM nvidia/cuda:12.2.0-runtime-ubuntu22.04 AS builder
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV TZ=America/Denver
+ENV LANG=C.UTF-8
+ENV CONDA_DIR=/opt/conda
+ENV PATH=$CONDA_DIR/bin:$PATH
 ENV OMNI_KIT_ACCEPT_EULA=yes
-ENV OMNI_KIT_ALLOW_ROOT=1
 
 ARG http_proxy
 ARG https_proxy
 ENV http_proxy=${http_proxy}
 ENV https_proxy=${https_proxy}
 
-# Install Isaac Sim 4.5.0.0. Multi-GB, rarely changes — keep early in layer order.
-# Order matters: Isaac Sim pulls its own torch, which we override below.
-# UV_HTTP_TIMEOUT raised from the 30s default because the NVIDIA PyPI index
-# serves multi-hundred-MB wheels that can stall past default.
-RUN UV_HTTP_TIMEOUT=600 uv pip install --system --no-cache \
-        "isaacsim[all,extscache]==4.5.0.0" \
-        --extra-index-url https://pypi.nvidia.com
+# US mirror for faster apt downloads.
+RUN sed -i 's|http://archive.ubuntu.com/ubuntu/|http://us.archive.ubuntu.com/ubuntu/|g' /etc/apt/sources.list
 
-# Downgrade pip/setuptools for IsaacLab compatibility. IsaacLab's install script
-# breaks on newer versions. uv does not replace pip entirely — IsaacLab's
-# ./isaaclab.sh invokes pip internally, so the pinned pip is still needed.
-RUN uv pip install --system "pip==23" "setuptools==65" flatdict
+# Build deps + the X11/EGL/OSMesa libs Kit dlopens at runtime. Superset of
+# upstream's apt list — keep the X11/EGL stack here so isaaclab.sh can compile
+# native extensions (egl_probe etc.) against the right headers.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates curl gnupg locales \
+        gcc-12 g++-12 cmake build-essential git git-lfs wget unzip \
+        libglu1-mesa-dev vulkan-tools libvulkan1 \
+        libx11-6 libxext6 libxrender1 libxi6 libxrandr2 libxcursor1 libxinerama1 \
+        libgl1-mesa-glx libglib2.0-0 libsm6 libxt6 libxkbcommon-x11-0 \
+        libegl1-mesa-dev libosmesa6-dev \
+    && locale-gen en_US en_US.UTF-8 && update-locale LC_ALL=C.UTF-8 LANG=C.UTF-8 \
+    && update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-12 100 \
+    && update-alternatives --install /usr/bin/g++ g++ /usr/bin/g++-12 100 \
+    && rm -rf /var/lib/apt/lists/*
 
-# Install torch cu130 up front so IsaacLab's install step below has a torch
-# present when it resolves its `torch==2.5.1` pin (it will still downgrade to
-# the PyPI cu124 wheel — we re-install cu130 after IsaacLab runs).
-RUN UV_HTTP_TIMEOUT=600 uv pip install --system --no-cache \
-        torch torchvision torchaudio \
-        --index-url https://download.pytorch.org/whl/cu130
+# Miniconda + Python 3.11 env. Sim 5.x requires 3.11; Sim 6.x will require 3.12.
+RUN wget -q https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh -O /tmp/miniconda.sh && \
+    bash /tmp/miniconda.sh -b -p $CONDA_DIR && \
+    rm /tmp/miniconda.sh && \
+    $CONDA_DIR/bin/conda clean -afy
 
-# Install IsaacLab pinned to a tag compatible with Isaac Sim 4.5.0.
-# ISAACLAB_REF can be overridden at build time if v2.0.2 is not the right tag.
-# Pin cmake<4 to work around egl_probe's outdated CMakeLists.txt (cmake 4.0
-# rejects cmake_minimum_required < 3.5).
-# TERM needs a real terminfo entry because isaaclab.sh uses tput for colored
-# output; Docker build leaves TERM unset, which makes tput emit
-# "'ansi+tabs': unknown terminal type" and fail the step.
-ARG ISAACLAB_REF=v2.0.2
-RUN TERM=xterm-256color uv pip install --system "cmake<4" && \
-    git clone --branch ${ISAACLAB_REF} --depth 1 \
-        https://github.com/isaac-sim/IsaacLab /home/code/IsaacLab && \
-    cd /home/code/IsaacLab && TERM=xterm-256color ./isaaclab.sh --install
+RUN conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/main && \
+    conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/r && \
+    conda create -n unitree_sim_env python=3.11 -y && \
+    conda clean -afy
 
-# Install CL_isaaclab_sim requirements only. The full tree is bind-mounted at
-# runtime (docker-compose.yml -> /home/code/CL_isaaclab_sim), so baking the
-# source in would be shadowed. Copy just requirements.txt so edits don't
-# invalidate this layer.
-COPY CL_isaaclab_sim/requirements.txt /tmp/cl_requirements.txt
-RUN uv pip install --system -r /tmp/cl_requirements.txt && rm /tmp/cl_requirements.txt
+# All subsequent RUNs execute inside the conda env.
+SHELL ["conda", "run", "-n", "unitree_sim_env", "/bin/bash", "-c"]
 
-# Re-install torch cu130 AFTER IsaacLab. IsaacLab's isaaclab_*/setup.py pin
-# `torch==2.5.1`, whose PyPI wheel is cu124 and ships no sm_120 (Blackwell)
-# kernels — so at runtime an RTX 50-series GPU fails with "no kernel image is
-# available for execution on the device". Force-reinstalling the cu130 wheel
-# here provides sm_120 support. pip will warn that IsaacLab asked for 2.5.1;
-# ignore — the IsaacLab APIs we exercise are compatible with torch 2.11+cu130.
-RUN UV_HTTP_TIMEOUT=600 uv pip install --system --no-cache --force-reinstall \
-        torch torchvision torchaudio \
-        --index-url https://download.pytorch.org/whl/cu130
+# Conda-forge libstdc++/libgcc keeps the C++ ABI consistent with anything
+# Isaac Sim's wheels were built against. Mirrors upstream.
+RUN conda install -y -c conda-forge "libgcc-ng>=12" "libstdcxx-ng>=12" && \
+    conda clean -afy
 
-# Register the cu130 CUDA shared library dir with ldconfig. The torch cu130
-# wheel's own `torch/lib` is empty — CUDA libs live under the `nvidia-cu13`
-# namespace package at `.../nvidia/cu13/lib`. `import torch` loads its core
-# `.so` files via `ctypes.CDLL` with full paths, so normal CUDA ops work even
-# without the dir on the loader path — but torch's C++ NVRTC JIT calls plain
-# `dlopen("libnvrtc-builtins.so.13.0", ...)` with the bare soname, which goes
-# through the system loader and fails ("failed to open libnvrtc-builtins.so.13.0")
-# unless the dir is in ldconfig's cache. Add it.
-RUN echo '/usr/local/lib/python3.10/dist-packages/nvidia/cu13/lib' \
-        > /etc/ld.so.conf.d/nvidia-cu13.conf && \
-    ldconfig
+# PyTorch 2.7.0+cu128. cu128 has native sm_120 (Blackwell / RTX 5070 Ti)
+# support; upstream uses cu126 which does not.
+RUN pip install --upgrade pip && \
+    pip install --no-cache-dir \
+        torch==2.7.0 torchvision==0.22.0 torchaudio==2.7.0 \
+        --index-url https://download.pytorch.org/whl/cu128
 
-# Force-reinstall numpy to fix any version mismatch between compiled C extensions
-# and Python code caused by conflicting pip installs (torch cu130 vs IsaacLab).
-# Pin to 1.x: Isaac Sim 4.5.0's bundled numpy under omni.kit.pip_archive's
-# pip_prebundle does `from numpy.lib.stride_tricks import broadcast_to`, which
-# numpy 2.0 removed from that submodule. Must run AFTER the torch cu130 pin
-# above, because torch 2.11+cu130 transitively pulls numpy 2.x.
-RUN uv pip install --system --force-reinstall "numpy<2"
+# Build CycloneDDS 0.10.x. The PyPI `cyclonedds` wheel (transitive dep of
+# unitree_sdk2_python) references `dds/ddsi/q_radmin.h`, removed post-0.10.
+# CYCLONEDDS_HOME points the PyPI wheel at this install at pip-build time.
+# Required because the controller talks to sim over Unitree DDS on domain 1.
+RUN git clone --depth 1 --branch releases/0.10.x https://github.com/eclipse-cyclonedds/cyclonedds /cyclonedds && \
+    cd /cyclonedds && mkdir build install && cd build && \
+    cmake .. -DCMAKE_INSTALL_PREFIX=../install && \
+    cmake --build . --target install
 
-# Assets live on the host and are mounted at runtime via docker-compose (not baked in).
-
-# NOTE: deliberately NOT prepending isaacsim.ros2.bridge/humble/lib to
-# LD_LIBRARY_PATH. That bundled dir contains an older librmw_cyclonedds_cpp.so
-# that references `shm_set_data_state` (missing from every libddsc 0.10.5 in
-# the stack). When it was on LD_LIBRARY_PATH, rcl's dlopen resolved the soname
-# against the bundled (broken) rmw, causing "undefined symbol: shm_set_data_state"
-# and blocking cl_load_rs.
+ENV CYCLONEDDS_HOME=/cyclonedds/install
 
 WORKDIR /home/code
 
-CMD ["/bin/bash"]
+# Install unitree_sdk2_python. Upstream setup.py only declares the top-level
+# package — that drops sub-packages like `b2` on a *non-editable* install and
+# causes ImportError at runtime. Editable install (`pip install -e .`) sidesteps
+# that: pip drops a .pth/egg-link pointing at the source tree, so all
+# sub-packages remain importable via the on-disk layout.
+RUN git clone --depth 1 https://github.com/unitreerobotics/unitree_sdk2_python /home/code/unitree_sdk2_python && \
+    cd /home/code/unitree_sdk2_python && pip install -e .
+
+# Isaac Sim 5.1.0.0 (multi-GB, rarely changes — keep early in layer order).
+RUN pip install --no-cache-dir "isaacsim[all,extscache]==5.1.0.0" \
+        --extra-index-url https://pypi.nvidia.com
+
+# Install IsaacLab v2.3.2. The arg to `--install` is the RL-framework name
+# (sb3 / skrl / rl-games / rsl-rl / all); default is `all`, which is what we
+# want. pin-pink (the IK lib) is an unconditional install_requires of the
+# `isaaclab` package as of v2.3.2, so it gets pulled in automatically.
+# TERM is set because isaaclab.sh uses tput; without a real terminfo entry it
+# fails the install with "'ansi+tabs': unknown terminal type".
+#
+# PIP_CONSTRAINT pins setuptools<80 in pip's PEP 517 build-isolation envs.
+# isaaclab core depends on flatdict==4.0.1, whose setup.py imports
+# pkg_resources; setuptools 80+ no longer ships pkg_resources, so the wheel
+# build crashes. isaaclab.sh installs each source/* package via
+# `find -exec bash -c '...'`, so a single failure is silently swallowed and
+# only the satellite packages (isaaclab_assets, isaaclab_tasks, isaaclab_rl,
+# isaaclab_mimic, isaaclab_contrib) end up installed — `import isaaclab`
+# then fails at runtime.
+ARG ISAACLAB_REF=v2.3.2
+RUN echo "setuptools<80" > /tmp/build-constraints.txt && \
+    TERM=xterm-256color git clone --branch ${ISAACLAB_REF} --depth 1 \
+        https://github.com/isaac-sim/IsaacLab /home/code/IsaacLab && \
+    cd /home/code/IsaacLab && \
+    PIP_CONSTRAINT=/tmp/build-constraints.txt \
+        TERM=xterm-256color ./isaaclab.sh --install && \
+    rm /tmp/build-constraints.txt
+
+# Install CL_isaaclab_sim runtime requirements only. The full source tree is
+# bind-mounted at runtime (docker-compose.yml -> /home/code/CL_isaaclab_sim),
+# so baking it in would be shadowed. Copy just requirements.txt so source edits
+# don't invalidate this layer.
+COPY CL_isaaclab_sim/requirements.txt /tmp/cl_requirements.txt
+RUN pip install --no-cache-dir -r /tmp/cl_requirements.txt && rm /tmp/cl_requirements.txt
+
+
+# ==============================
+# Stage 2: Runtime
+# ==============================
+FROM nvidia/cuda:12.2.0-runtime-ubuntu22.04 AS runtime
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV TZ=America/Denver
+ENV LANG=C.UTF-8
+ENV CONDA_DIR=/opt/conda
+ENV PATH=$CONDA_DIR/bin:$PATH
+
+ENV OMNI_KIT_ACCEPT_EULA=yes
+ENV OMNI_KIT_ALLOW_ROOT=1
+# OmniGraph ROS publishing uses the Isaac-Sim-bundled ROS Humble + CycloneDDS.
+ENV RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
+
+# US mirror so apt-update inside the runtime image is also fast.
+RUN sed -i 's|http://archive.ubuntu.com/ubuntu/|http://us.archive.ubuntu.com/ubuntu/|g' /etc/apt/sources.list
+
+# Runtime-only system deps. Kit dlopens the X11/EGL libs at runtime; the
+# `-dev` headers are only needed in the builder.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates locales git-lfs zenity unzip \
+        libglu1-mesa libvulkan1 vulkan-tools \
+        libx11-6 libxext6 libxrender1 libxi6 libxrandr2 libxcursor1 libxinerama1 \
+        libgl1-mesa-glx libglib2.0-0 libsm6 libxt6 libxkbcommon-x11-0 \
+        libegl1 libosmesa6 \
+    && locale-gen en_US en_US.UTF-8 && update-locale LC_ALL=C.UTF-8 LANG=C.UTF-8 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Bring over the populated conda env, IsaacLab/SDK trees, and CycloneDDS install.
+COPY --from=builder /opt/conda /opt/conda
+COPY --from=builder /cyclonedds /cyclonedds
+COPY --from=builder /home/code/IsaacLab /home/code/IsaacLab
+COPY --from=builder /home/code/unitree_sdk2_python /home/code/unitree_sdk2_python
+
+ENV CYCLONEDDS_HOME=/cyclonedds/install
+
+# Auto-activate the conda env in interactive shells.
+RUN echo 'source /opt/conda/etc/profile.d/conda.sh' >> /root/.bashrc && \
+    echo 'conda activate unitree_sim_env' >> /root/.bashrc && \
+    echo 'export OMNI_KIT_ACCEPT_EULA=yes' >> /root/.bashrc && \
+    echo 'export OMNI_KIT_ALLOW_ROOT=1' >> /root/.bashrc
+
+# Assets and the CL_isaaclab_sim source tree live on the host and are
+# mounted at runtime via docker-compose.
+
+# NOTE: deliberately NOT prepending isaacsim.ros2.bridge/humble/lib to
+# LD_LIBRARY_PATH from outside Kit. The bundled librmw_cyclonedds_cpp.so /
+# libddsc combination only works correctly when loaded by Kit's own dlopen
+# chain. Putting it on the global LD_LIBRARY_PATH at the host process level
+# caused "undefined symbol: shm_set_data_state" failures in the previous setup.
+# OmniGraph nodes are C++ inside Kit so they pick up the bundled libs through
+# Kit's loader and work fine.
+
+WORKDIR /home/code
+
+# Default entrypoint runs inside the conda env. --no-capture-output keeps
+# stdout/stderr flowing live (without it, `docker run -it ... bash` is unusable).
+CMD ["conda", "run", "--no-capture-output", "-n", "unitree_sim_env", "/bin/bash"]

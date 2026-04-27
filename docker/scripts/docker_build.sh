@@ -1,15 +1,50 @@
 #!/usr/bin/env bash
-# Build Docker images. The base image must be built first (Isaac/MuJoCo inherit from it).
-# Uncomment/comment profiles below to select which images to build.
+# Build Docker images.
+#
+# Usage: docker_build.sh [profile ...]
+#   Profiles: isaac, mujoco, ros
+#   With no args, all three are built.
+#   Examples:
+#     docker_build.sh                  # build all
+#     docker_build.sh isaac            # build isaac only
+#     docker_build.sh mujoco ros       # build mujoco + ros
+#
+# Mujoco and Ros inherit from humanoid_sim_base; the base image is built first
+# whenever either of those profiles is selected. Isaac is self-contained
+# (Sim 5.1 / Lab v2.3.2 / Python 3.11) and does not use humanoid_sim_base.
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 
-# Profiles to build. Add/remove as needed: isaac, mujoco, ros
-PROFILES=(ros)
-# PROFILES=(isaac mujoco ros)   # ← uncomment to build all
+VALID_PROFILES=(isaac mujoco ros)
 
-echo "Building base..."
-docker build -t humanoid_sim_base:latest -f docker/BaseDockerfile .
+if [ "$#" -eq 0 ]; then
+    PROFILES=("${VALID_PROFILES[@]}")
+else
+    PROFILES=("$@")
+    for p in "${PROFILES[@]}"; do
+        ok=0
+        for v in "${VALID_PROFILES[@]}"; do
+            if [ "$p" = "$v" ]; then ok=1; break; fi
+        done
+        if [ "$ok" -ne 1 ]; then
+            echo "error: unknown profile '$p' (valid: ${VALID_PROFILES[*]})" >&2
+            exit 2
+        fi
+    done
+fi
+
+needs_base=0
+for p in "${PROFILES[@]}"; do
+    if [ "$p" = "mujoco" ] || [ "$p" = "ros" ]; then
+        needs_base=1
+        break
+    fi
+done
+
+if [ "$needs_base" -eq 1 ]; then
+    echo "Building base..."
+    docker build -t humanoid_sim_base:latest -f docker/BaseDockerfile .
+fi
 
 PROFILE_ARGS=()
 for p in "${PROFILES[@]}"; do

@@ -26,4 +26,9 @@ if [ $# -gt 0 ] && [ "${1#-}" != "$1" ]; then
     set -- "/home/code/h12_sim_scripts/launch_${SIM}.sh" "$@"
 fi
 
-docker compose -f docker/docker-compose.yml --profile "$SIM" run --rm --remove-orphans "$SIM" "$@"
+# Stable container name per sim profile so `docker exec`/`docker logs` work
+# without copy-pasting a generated UUID. --rm cleans it up on exit; if a
+# previous run was killed without cleanup, force-remove the stale name first.
+NAME="humanoid_sim_${SIM}"
+docker rm -f "$NAME" >/dev/null 2>&1 || true
+docker compose -f docker/docker-compose.yml --profile "$SIM" run --rm --remove-orphans --name "$NAME" "$SIM" "$@"
