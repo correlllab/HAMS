@@ -8,7 +8,7 @@
 # and rclpy is not installed.
 set -e
 
-TASK="Isaac-Stack-RgyBlock-H12-27dof-Inspire-Joint"
+TASK="Isaac-PickPlace-Cylinder-H12-27dof-Inspire-Joint"
 HEADLESS_FLAG=""
 [ "${HEADLESS:-0}" = "1" ] && HEADLESS_FLAG="--headless"
 # Auto-headless if no display is reachable (SSH without X11, cloud VM, CI).
@@ -31,6 +31,7 @@ export PYTHONUNBUFFERED=1
 # non-interactively, so ~/.bashrc (which `conda activate`s the env) is not
 # sourced — bare `python` would resolve to the base conda Python without
 # isaacsim/isaaclab installed.
+python /home/code/h12_sim_scripts/dds_bridge.py < /dev/tty > /dev/tty 2>&1 & disown
 exec /opt/conda/envs/unitree_sim_env/bin/python -u \
     /home/code/CL_isaaclab_sim/sim_main.py \
     --device cuda \
