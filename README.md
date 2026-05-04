@@ -24,10 +24,10 @@ cd Humanoid_Simulation
 ./docker/scripts/docker_run.sh mujoco
 ```
 
-You should see the MuJoCo passive viewer with the H1-2 robot suspended on a
-pelvis-fixed scene (table + colored blocks). The container also publishes
-`rt/lowstate` on CycloneDDS domain 1 plus camera, lidar, IMU and `/clock` on
-ROS 2 — see *Testing → Smoke Test* to verify.
+You should see the MuJoCo passive viewer with the H1-2 robot suspended in a
+Robocasa kitchen via an elastic band on `torso_link`. The container also
+publishes `rt/lowstate` on CycloneDDS domain 1 plus camera, lidar, IMU and
+`/clock` on ROS 2 — see *Testing → Smoke Test* to verify.
 
 For Isaac Lab GPU sim, the ROS 2 control stack, training, or troubleshooting,
 see below.
@@ -125,8 +125,9 @@ is pinned to 3.10 for ROS 2 Humble apt packages).
   carry its own Python 3.11.
 - **Headless support** — both backends auto-switch to `--headless` when no
   `DISPLAY` is reachable (CI / SSH / cloud).
-- **Force injection** in MuJoCo: keyboard-driven external force / torque per
-  link, plus an upright "elastic band" tether for free-standing scenes.
+- **Elastic band tether** in MuJoCo — keeps the H1-2 upright in the kitchen
+  scene; `SPACE` toggles, arrow keys move the anchor, `,` / `.` adjust rest
+  length.
 - **Shader cache persistence** for Isaac Sim — first-boot ~20–40 min compile
   is bind-mounted from `./CL_isaaclab_sim/.isaac_cache/` so subsequent boots
   are fast.
@@ -143,7 +144,7 @@ is pinned to 3.10 for ROS 2 Humble apt packages).
 
 | Backend | Engine version | OS | GPU | Parallel envs | Determinism | Status | Notable limitations |
 |---------|----------------|----|-----|---------------|-------------|--------|---------------------|
-| MuJoCo | `mujoco==3.6.0` | Ubuntu 22.04 (Docker) | Optional (EGL); CPU works | `num_envs=1` (single process) | `mj_step` is deterministic on a given build; no domain randomization | First-class | Free-standing scene has known QACC NaN at startup; pelvis-fixed scene is the default. Depth is published as `16UC1` (mm) and additionally as `compressedDepth`/`compressed`. |
+| MuJoCo | `mujoco==3.6.0` | Ubuntu 22.04 (Docker) | Optional (EGL); CPU works | `num_envs=1` (single process) | `mj_step` is deterministic on a given build; no domain randomization | First-class | Robocasa kitchen scene assembled at launch; H1-2 held upright by an elastic band on `torso_link`. Depth is published as `16UC1` (mm) and additionally as `compressedDepth`/`compressed`. |
 | Isaac Lab | Isaac Sim `5.1.0.0` + IsaacLab `v2.3.2` | Ubuntu 22.04 (Docker) | **Required** (PhysX GPU); cu128 wheels include `sm_120` so RTX 30 / 40 / 50 (Blackwell) all work | `num_envs=1` configured, framework supports more | PhysX is GPU-deterministic per seed within same hardware; not bit-exact across GPUs / driver versions | First-class | First boot compiles Kit shaders for 20–40 min. Only one task currently registered (`Isaac-Stack-RgyBlock-H12-27dof-Inspire-Joint`). `sim_main.py` argparse default is the not-registered `Isaac-PickPlace-Cylinder-...`; `launch_isaac.sh` overrides this — don't pass `--task` without setting it. Depth is `32FC1` (metres); no `compressed` variants. Hand cameras (`cl_load_rs` Kit ext) are defined but not loaded by `sim_main.py`. |
 | ROS 2 control stack | ROS 2 Humble | Ubuntu 22.04 (Docker) | Required for vision pipeline (CUDA Torch + SAM2/SAM3) | n/a (control side) | n/a | First-class | Bringup expects a sim already running on DDS domain 1; vision pipeline needs `GEMINI_KEY` env var for Gemini-based perception (defaults to `""` stub if unset). |
 
@@ -213,7 +214,7 @@ DDS wire format and the same ROS 2 topic set:
 | ROS 2 sensor bridge | `CL_isaaclab_sim/isaac_omnigraph_ros_bridge.py` (no `rclpy`) | `h1_mujoco/mujoco_ros_bridge.py` (`rclpy.Node`) |
 | Action provider | `action_provider/h12_dds_action_provider.py` (subclasses `ActionProvider` ABC in `action_provider/action_base.py`) | none — DDS handler writes `data.ctrl` directly |
 | Physics step | `RobotController.step()` calls `env.step(action)` at `--step_hz` (default 100 Hz) | Main thread calls `mujoco.mj_step` at `model.opt.timestep` (5 ms = 200 Hz) |
-| Scene format | USD (`assets/env_assets/h1_2_*.usd`) | MJCF (`assets/scene_handless*.xml`) |
+| Scene format | USD (`assets/env_assets/h1_2_*.usd`) | MJCF (`assets/h1_2_handless.xml` + Robocasa kitchen assembled at launch by `h1_mujoco/scene_builder.py`) |
 | Joint count | 47 articulated joints (26 body + 21 finger; waist absent in DDS map) | 27 actuators driven by DDS |
 | Watchdog | 100 ms timeout → stiff PD pose-hold | 100 ms timeout → stiff PD pose-hold |
 
@@ -353,8 +354,6 @@ so code edits take effect without rebuilding.
 | `--no_render` | off | Isaac (`sim_main.py`) | Disables rendering entirely (sets `render_interval=1_000_000`) |
 | `--seed <int>` | `42` | Isaac (`sim_main.py`) | RNG seed for env / scene resets |
 | `--device cuda` / `--enable_cameras` | always set by `launch_isaac.sh` | Isaac | Forwarded to `AppLauncher` |
-| `--fixed` | implicit when no other args are passed | MuJoCo (`launch_mujoco.sh`) | Pelvis pinned to world (`scene_handless_pelvis_fixed.xml`) |
-| `--force <link...>` | none | MuJoCo (`h12_mujoco.py`) | Enable external-force keyboard interface on listed body names |
 | (no `--headless`) | viewer on | MuJoCo | GLFW passive viewer (requires X11) |
 
 **ROS 2 bringup args** — `ros2 launch h1_bringup h1_sim_bringup.launch.py`:
@@ -372,8 +371,8 @@ so code edits take effect without rebuilding.
 ### Run a demo
 
 ```bash
-# MuJoCo (default scene is pelvis-fixed because the free-standing scene has
-# known startup transients that trip the safety estop):
+# MuJoCo (loads the Robocasa kitchen scene; H1-2 held upright by the elastic
+# band tether on torso_link):
 ./docker/scripts/docker_run.sh mujoco
 
 # Isaac Lab (first boot compiles shaders for 20-40 min; cached afterward):
@@ -428,13 +427,6 @@ This brings up:
 (`Isaac-Stack-RgyBlock-H12-27dof-Inspire-Joint` is currently the only
 registered task — see *Tasks / Environments*.)
 
-### Run MuJoCo with custom args
-
-```bash
-./docker/scripts/docker_run.sh mujoco \
-    /home/code/h12_sim_scripts/launch_mujoco.sh --fixed --force torso_link
-```
-
 ### Drop to a shell
 
 ```bash
@@ -454,8 +446,8 @@ a learned policy. To train, point an external Isaac Lab training script at
 ### Visualize / record video
 
 - **MuJoCo viewer** (default): launches the passive GLFW viewer; press P to
-  pause, arrow keys to move the elastic-band anchor (free-standing scene),
-  F to toggle external force, +/- to scale magnitude, page up/down for ±Z.
+  pause, SPACE to toggle the elastic band, arrow keys to move its anchor,
+  `,` / `.` to adjust rest length.
 - **Headless + RViz / Foxglove Studio**: omit `DISPLAY` (or pass
   `--headless`); subscribe externally to `/realsense/head/color/image_raw`,
   `/livox/lidar`, `/livox/imu`, `/tf`, `/clock` on `ROS_DOMAIN_ID=1`.
@@ -471,7 +463,7 @@ Both backends auto-detect when no `DISPLAY` is set and switch to headless
 
 ```bash
 HEADLESS=1 ./docker/scripts/docker_run.sh isaac
-./docker/scripts/docker_run.sh mujoco /home/code/h12_sim_scripts/launch_mujoco.sh --fixed --headless
+./docker/scripts/docker_run.sh mujoco /home/code/h12_sim_scripts/launch_mujoco.sh --headless
 ```
 
 ---
@@ -482,9 +474,7 @@ HEADLESS=1 ./docker/scripts/docker_run.sh isaac
 |--------------------|---------|---------|
 | `h1_2.urdf` / `h1_2_ros.urdf` | ROS / MuJoCo | Full H1-2 with Inspire hands |
 | `h1_2_handless.urdf` / `h1_2_handless_ros.urdf` | ROS / MuJoCo | H1-2 without hands; `_ros.urdf` adds `camera_link` and `lidar_link` joints |
-| `h1_2_handless.xml` | MuJoCo | MJCF body for the handless robot |
-| `scene_handless.xml` | MuJoCo | Free-standing scene with elastic-band tether and a wide table + red box |
-| `scene_handless_pelvis_fixed.xml` | MuJoCo | Pelvis welded to world, narrower table, free-jointed red box (default — avoids the QACC-NaN startup transient) |
+| `h1_2_handless.xml` | MuJoCo | MJCF body for the handless robot — merged into the Robocasa kitchen at launch |
 | `h1_2_*_collision.srdf` / `h1_2_*sphere*.urdf` | Both (via h12_ros2_controller) | Sphere-swept collision proxies |
 | `meshes/*.STL` | Both | STL meshes referenced by URDF/MJCF |
 | `magpie/*.xml` | MuJoCo (in progress) | UR5e + Magpie eflesh gripper scenes — partial port from upstream Magpie |
@@ -526,10 +516,11 @@ Isaac Lab tasks are registered via `gym.register` under
 | Sim | `dt=0.005`, `decimation=2`, `episode_length_s=20.0`, PhysX CCD on, 16 position-iters, 4 substeps |
 | Resets | Per-block uniform pose perturbation in `[-0.05, +0.05]` m on x/y; `reset_object_self` + `reset_all_self` events registered on a custom `SimpleEventManager` |
 
-**MuJoCo "tasks"** are just MJCF scenes — there is no manager-based env layer.
-The two scenes (`scene_handless.xml`, `scene_handless_pelvis_fixed.xml`) are
-both passive arenas; "task" semantics live in whatever controller you connect
-to `rt/lowcmd`.
+**MuJoCo "task"** is a single passive arena: the H1-2 (`h1_2_handless.xml`)
+is merged into a Robocasa kitchen at launch by `h1_mujoco/scene_builder.py`
+and held upright by an elastic-band tether. There is no manager-based env
+layer — "task" semantics live in whatever controller you connect to
+`rt/lowcmd`.
 
 ---
 
@@ -647,8 +638,7 @@ Humanoid_Simulation/
 │       └── launch_ros.sh          # colcon build (idempotent) + drop to bash
 │
 ├── assets/                        # Robot URDFs/MJCFs, meshes, scenes (bind-mounted ro)
-│   ├── h1_2*.urdf, *.xml
-│   ├── scene_handless*.xml        # MuJoCo scenes (free + pelvis-fixed)
+│   ├── h1_2*.urdf, *.xml          # H1-2 URDF/MJCF (kitchen scene assembled at launch)
 │   ├── meshes/                    # STL meshes
 │   ├── magpie/                    # UR5e + Magpie gripper assets (in-progress port)
 │   ├── Payload/                   # USD payload layers
@@ -679,7 +669,8 @@ Humanoid_Simulation/
 │
 ├── h1_mujoco/                     # MuJoCo H1-2 simulator (submodule)
 │   ├── h12_mujoco.py              # Entry: scene load + sim loop + viewer
-│   ├── mujoco_env.py              # MujocoEnv class, ElasticBand, EndEffectorForce
+│   ├── scene_builder.py           # Assembles Robocasa kitchen + H1-2 into one MJCF
+│   ├── mujoco_env.py              # MujocoEnv class, ElasticBand
 │   ├── unitree_interface.py       # DDS interface, watchdog pose-hold
 │   └── mujoco_ros_bridge.py       # rclpy-based ROS 2 sensor publishers
 │
@@ -864,12 +855,12 @@ registered in this checkout — `tasks/__init__.py` blacklists `pick_place`
 `Isaac-Stack-RgyBlock-H12-27dof-Inspire-Joint`, which is what
 `launch_isaac.sh` defaults to (overriding `sim_main.py`'s argparse default).
 
-**`MUJOCO WARNING: Nan, Inf or huge value in QACC at DOF 0`.** Free-standing
-scene (`scene_handless.xml`) has known startup velocity transients on
-`shoulder_pitch` that explode QACC. The pelvis-fixed scene
-(`scene_handless_pelvis_fixed.xml`) is the default for this reason. If you
-need the free scene, send a stable `rt/lowcmd` stream within 100 ms of sim
-start so the watchdog pose-hold doesn't kick in mid-explosion.
+**`MUJOCO WARNING: Nan, Inf or huge value in QACC ...`.** The robot is
+penetrating kitchen geometry at startup. Retune the spawn pose in
+`h1_mujoco/scene_builder.py` (`SPAWN_POSES[(layout_id, style_id)]`) to a
+clear aisle. The elastic-band tether on `torso_link` keeps the robot upright
+during the first sim steps, so a stable `rt/lowcmd` stream is not strictly
+required, but sending one within 100 ms still avoids the watchdog kicking in.
 
 **`module 'numpy.lib.stride_tricks' has no attribute 'broadcast_to'` in Isaac.**
 A transitive dep bumped past `numpy 2.0`. The Isaac stack should resolve to

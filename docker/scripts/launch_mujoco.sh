@@ -1,5 +1,5 @@
 #!/bin/bash
-# Usage: ./launch_mujoco.sh [--fixed] [--force link1 link2 ...] [--headless]
+# Usage: ./launch_mujoco.sh [--headless]
 # Windowed MuJoCo sim by default; pass --headless to disable the passive viewer
 # (auto-applied when no DISPLAY is reachable, e.g. SSH without X11 / CI).
 # Sim publishes:
@@ -11,13 +11,6 @@ set -e
 source /opt/ros/humble/setup.bash
 
 export ROS_DOMAIN_ID="${ROS_DOMAIN_ID:-1}"
-
-# Default to the pelvis-fixed scene: the free-standing elastic-band scene has
-# startup velocity transients on shoulder_pitch that trip h12_ros2_controller's
-# estop before any control input runs. Pass args explicitly to override.
-if [ "$#" -eq 0 ]; then
-    set -- --fixed
-fi
 
 # Auto-add --headless if no display is reachable (SSH without X11, cloud VM, CI).
 case " $* " in

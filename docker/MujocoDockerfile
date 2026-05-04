@@ -1,7 +1,8 @@
 # ==============================
-# MuJoCo 3.6.0 sim on humanoid_sim_base.
+# MuJoCo 3.3.1 sim on humanoid_sim_base.
 # Single-stage: base image already has ROS + Python + torch + unitree_sdk2py.
 # Source tree bind-mounted at runtime (docker-compose.yml -> /home/code/h1_mujoco).
+# Robocasa (kitchen scenes) is installed from git; pins MuJoCo to 3.3.1.
 # ==============================
 FROM humanoid_sim_base:latest
 
@@ -21,10 +22,62 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # MuJoCo Python binding + Pillow for image encoding.
+# NOTE: pinned to 3.3.1 to match Robocasa's hard pin (see below). Earlier
+# this image used 3.6.0; downgraded so that `pip install robocasa` doesn't
+# silently swap the version mid-install.
 RUN uv pip install --system --no-cache \
-        "mujoco==3.6.0" \
+        "mujoco==3.3.1" \
         "numpy>=2.2.6" \
         "Pillow>=10.0"
+
+# Robocasa kitchen scenes (used by `h12_mujoco.py --scene kitchen`).
+# Both packages are git-only — robocasa is not on PyPI, and Robocasa pins
+# the *master* branch of robosuite (per robocasa.ai install docs). robosuite
+# is required because Robocasa's KitchenArena inherits from
+# robosuite.models.arenas.Arena.
+#
+# Side effect: lerobot (a Robocasa transitive) pins torch==2.7.1, which
+# downgrades the cu130 torch in the base image to a CPU/cu121 build for
+# this image only. Acceptable for the mujoco sim container; the Isaac
+# container retains cu130 because it builds from base independently.
+RUN git clone --depth 1 https://github.com/ARISE-Initiative/robosuite /opt/robosuite && \
+    uv pip install --system --no-cache -e /opt/robosuite
+
+RUN git clone --depth 1 https://github.com/robocasa/robocasa /opt/robocasa && \
+    uv pip install --system --no-cache -e /opt/robocasa
+
+# Robocasa & robosuite both warn on first import about a missing private
+# macro file. Run their setup scripts once at build time to suppress the
+# warnings and create the macros file in-image.
+RUN python /opt/robosuite/robosuite/scripts/setup_macros.py && \
+    python /opt/robocasa/robocasa/scripts/setup_macros.py
+
+# Optional robosuite/robocasa deps that print "WARNING: not installed" on
+# every import otherwise:
+#   - robosuite_models: extra robot meshes (git-only — not on PyPI).
+#   - mink: whole-body IK; robosuite hard-codes the 0.0.5 pin in its warning.
+#   - mimicgen: demonstration-generation environments (git-only).
+# We don't *use* any of these — installation is purely to silence the
+# import-time warnings.
+RUN git clone --depth 1 https://github.com/ARISE-Initiative/robosuite_models /opt/robosuite_models && \
+    uv pip install --system --no-cache -e /opt/robosuite_models && \
+    git clone --depth 1 https://github.com/NVlabs/mimicgen /opt/mimicgen && \
+    uv pip install --system --no-cache -e /opt/mimicgen && \
+    uv pip install --system --no-cache --no-deps "mink==0.0.5"
+
+# Robocasa's textures, fixtures, and objects (~10 GB) — required for any
+# `--scene kitchen` run; KitchenArena fails immediately without them.
+# Baked into the image so `docker compose build` produces a ready-to-run
+# container. Tradeoff: image is ~10 GB larger; pushes/pulls take longer.
+# To skip and download manually instead, comment out this RUN step and
+# run inside the container:
+#     echo y | python -m robocasa.scripts.download_kitchen_assets --type all
+#
+# `echo y` answers the script's interactive ~10 Gb confirmation prompt
+# (the script has no --no-input/--yes flag). Per-folder overwrite prompts
+# are suppressed because every entry in DOWNLOAD_ASSET_REGISTRY sets
+# check_folder_exists=False.
+RUN echo y | python -m robocasa.scripts.download_kitchen_assets --type all
 
 WORKDIR /home/code/h1_mujoco
 

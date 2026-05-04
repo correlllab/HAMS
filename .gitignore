@@ -50,6 +50,10 @@ kit/
 *.kit.log
 .isaac_cache/
 
+
+#MUJOCO
+MUJOCO_LOG.TXT
+
 # runtime artefacts
 outputs/
 logs/

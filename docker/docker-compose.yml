@@ -68,11 +68,11 @@ services:
 
   ros:
     profiles: [ros]
-    container_name: humanoid_sim_ros
+    container_name: humanoid_ros
     build:
       context: ..
       dockerfile: docker/RosDockerfile
-    image: humanoid_sim_ros:latest
+    image: humanoid_ros:latest
     runtime: nvidia
     privileged: true
     shm_size: 4g
