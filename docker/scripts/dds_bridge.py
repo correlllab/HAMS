@@ -45,6 +45,5 @@ async def main():
                 writers[name].write(readers[name].read()[0])
             except Exception as e:
                 pass
-                #print(f"{ts}: No data from {name}: {e}")
         await asyncio.sleep(1)
 asyncio.run(main())
