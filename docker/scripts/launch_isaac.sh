@@ -31,7 +31,7 @@ export PYTHONUNBUFFERED=1
 # non-interactively, so ~/.bashrc (which `conda activate`s the env) is not
 # sourced — bare `python` would resolve to the base conda Python without
 # isaacsim/isaaclab installed.
-python /home/code/h12_sim_scripts/dds_bridge.py < /dev/tty > /dev/tty 2>&1 & disown
+/opt/conda/envs/unitree_sim_env/bin/python -u /home/code/h12_sim_scripts/dds_bridge.py < /dev/tty > /dev/tty 2>&1 & disown
 exec /opt/conda/envs/unitree_sim_env/bin/python -u \
     /home/code/CL_isaaclab_sim/sim_main.py \
     --device cuda \
