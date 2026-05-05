@@ -8,6 +8,9 @@
 # and rclpy is not installed.
 set -e
 
+export LD_LIBRARY_PATH=/opt/conda/envs/unitree_sim_env/lib/python3.11/site-packages/isaacsim/exts/isaacsim.ros2.bridge/humble/lib/:$LD_LIBRARY_PATH
+
+
 TASK="Isaac-PickPlace-Cylinder-H12-27dof-Inspire-Joint"
 HEADLESS_FLAG=""
 [ "${HEADLESS:-0}" = "1" ] && HEADLESS_FLAG="--headless"
@@ -31,21 +34,15 @@ export PYTHONUNBUFFERED=1
 # non-interactively, so ~/.bashrc (which `conda activate`s the env) is not
 # sourced — bare `python` would resolve to the base conda Python without
 # isaacsim/isaaclab installed.
+
+unset ROS_DOMAIN_ID  # ensure no ROS_DOMAIN_ID is set, so that DDSManager defaults to channel 1 for simulation
 /opt/conda/envs/unitree_sim_env/bin/python -u /home/code/h12_sim_scripts/dds_bridge.py < /dev/tty > /dev/tty 2>&1 & disown
 exec /opt/conda/envs/unitree_sim_env/bin/python -u \
     /home/code/CL_isaaclab_sim/sim_main.py \
     --device cuda \
+    --task Isaac-PickPlace-Cylinder-H12-27dof-Inspire-Joint \
+    --enable_inspire_dds \
     --enable_cameras \
-    $HEADLESS_FLAG \
-    --task "$TASK"
-#/bin/bash
-if [ "$1" == "--reset-cache" ]; then 
-  rm -rf ~/.cache/ov/texturecache
-fi
-python /home/code/h12_sim_scripts/dds_bridge.py < /dev/tty > /dev/tty 2>&1 & disown
-python3  /home/code/CL_isaaclab_sim/sim_main.py \
-  --device cuda \
-  --task Isaac-PickPlace-Cylinder-H12-27dof-Inspire-Joint \
-  --enable_inspire_dds \
-  --enable_cameras \
-  --robot_type h1_2  < /dev/tty > /dev/tty 2>&1
+    --robot_type h1_2  < /dev/tty > /dev/tty 2>&1
+
+  
