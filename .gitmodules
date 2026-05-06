@@ -3,39 +3,39 @@
 	url = git@github.com:correlllab/CL_isaaclab_sim.git
 [submodule "h1_mujoco"]
 	path = h1_mujoco
-	url = https://github.com/correlllab/h1_mujoco.git
+	url = git@github.com:correlllab/h1_mujoco.git
 	branch = unified_sim
 [submodule "core_ws/src/h12_ros2_controller"]
 	path = core_ws/src/h12_ros2_controller
-	url = https://github.com/correlllab/h12_ros2_controller.git
+	url = git@github.com:correlllab/h12_ros2_controller.git
 [submodule "core_ws/src/h12_ros2_model"]
 	path = core_ws/src/h12_ros2_model
-	url = https://github.com/correlllab/h12_ros2_model.git
+	url = git@github.com:correlllab/h12_ros2_model.git
 [submodule "core_ws/src/h12_safety_layer"]
 	path = core_ws/src/h12_safety_layer
-	url = https://github.com/correlllab/h12_safety_layer.git
+	url = git@github.com:correlllab/h12_safety_layer.git
 [submodule "core_ws/src/vision_pipeline"]
 	path = core_ws/src/vision_pipeline
-	url = https://github.com/correlllab/vision_pipeline.git
+	url = git@github.com:correlllab/vision_pipeline.git
 [submodule "core_ws/src/custom_ros_messages"]
 	path = core_ws/src/custom_ros_messages
-	url = https://github.com/correlllab/custom_ros_messages.git
+	url = git@github.com:correlllab/custom_ros_messages.git
 [submodule "core_ws/src/magpie_control"]
 	path = core_ws/src/magpie_control
-	url = https://github.com/correlllab/magpie_control.git
+	url = git@github.com:correlllab/magpie_control.git
 [submodule "core_ws/src/magpie_msgs"]
 	path = core_ws/src/magpie_msgs
-	url = https://github.com/correlllab/magpie_msgs.git
+	url = git@github.com:correlllab/magpie_msgs.git
 [submodule "core_ws/src/FAST_LIO"]
 	path = core_ws/src/FAST_LIO
-	url = https://github.com/hku-mars/FAST_LIO.git
+	url = git@github.com:hku-mars/FAST_LIO.git
 	branch = ROS2
 [submodule "core_ws/src/livox_ros_driver2"]
 	path = core_ws/src/livox_ros_driver2
-	url = https://github.com/Livox-SDK/livox_ros_driver2.git
+	url = git@github.com:Livox-SDK/livox_ros_driver2.git
 [submodule "core_ws/src/h12_realsense"]
 	path = core_ws/src/h12_realsense
-	url = https://github.com/correlllab/h12_realsense.git
+	url = git@github.com:correlllab/h12_realsense.git
 [submodule "core_ws/src/unitree_ros2"]
 	path = core_ws/src/unitree_ros2
-	url = https://github.com/unitreerobotics/unitree_ros2.git
+	url = git@github.com:unitreerobotics/unitree_ros2.git
