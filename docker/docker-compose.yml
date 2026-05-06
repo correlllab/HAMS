@@ -24,7 +24,7 @@ services:
       - ${XAUTHORITY:-$HOME/.Xauthority}:/root/.Xauthority:ro
       - /dev/input:/dev/input:ro
       - /dev/dri:/dev/dri:rw
-      - ../assets/env_assets:/home/code/cl_assets
+      - ../assets/isaac_assets:/home/code/cl_assets
       - ./scripts:/home/code/h12_sim_scripts
       - ../CL_isaaclab_sim:/home/code/CL_isaaclab_sim
       - ../CL_isaaclab_sim/.isaac_cache/ov:/root/.cache/ov
