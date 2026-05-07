@@ -214,7 +214,7 @@ DDS wire format and the same ROS 2 topic set:
 | ROS 2 sensor bridge | `CL_isaaclab_sim/isaac_omnigraph_ros_bridge.py` (no `rclpy`) | `h1_mujoco/mujoco_ros_bridge.py` (`rclpy.Node`) |
 | Action provider | `action_provider/h12_dds_action_provider.py` (subclasses `ActionProvider` ABC in `action_provider/action_base.py`) | none — DDS handler writes `data.ctrl` directly |
 | Physics step | `RobotController.step()` calls `env.step(action)` at `--step_hz` (default 100 Hz) | Main thread calls `mujoco.mj_step` at `model.opt.timestep` (5 ms = 200 Hz) |
-| Scene format | USD (`assets/env_assets/h1_2_*.usd`) | MJCF (`assets/h1_2_handless.xml` + Robocasa kitchen assembled at launch by `h1_mujoco/scene_builder.py`) |
+| Scene format | USD (`assets/env_assets/h1_2_*.usd`) | MJCF (`assets/mujoco_assets/h1_2_magpie_eflesh.xml` + Robocasa kitchen assembled at launch by `h1_mujoco/scene_builder.py`) |
 | Joint count | 47 articulated joints (26 body + 21 finger; waist absent in DDS map) | 27 actuators driven by DDS |
 | Watchdog | 100 ms timeout → stiff PD pose-hold | 100 ms timeout → stiff PD pose-hold |
 
@@ -474,10 +474,10 @@ HEADLESS=1 ./docker/scripts/docker_run.sh isaac
 |--------------------|---------|---------|
 | `h1_2.urdf` / `h1_2_ros.urdf` | ROS / MuJoCo | Full H1-2 with Inspire hands |
 | `h1_2_handless.urdf` / `h1_2_handless_ros.urdf` | ROS / MuJoCo | H1-2 without hands; `_ros.urdf` adds `camera_link` and `lidar_link` joints |
-| `h1_2_handless.xml` | MuJoCo | MJCF body for the handless robot — merged into the Robocasa kitchen at launch |
+| `mujoco_assets/h1_2_magpie_eflesh.xml` | MuJoCo | MJCF body for H1-2 with the Magpie eflesh gripper — merged into the Robocasa kitchen at launch |
 | `h1_2_*_collision.srdf` / `h1_2_*sphere*.urdf` | Both (via h12_ros2_controller) | Sphere-swept collision proxies |
 | `meshes/*.STL` | Both | STL meshes referenced by URDF/MJCF |
-| `magpie/*.xml` | MuJoCo (in progress) | UR5e + Magpie eflesh gripper scenes — partial port from upstream Magpie |
+| `mujoco_assets/magpie_gripper_eflesh{,_left}.xml` | MuJoCo | Magpie eflesh gripper subassemblies included by `h1_2_magpie_eflesh.xml` |
 | `Payload/` | Isaac (USD) | Misc. payload meshes (USD-format Geometry/Materials/Physics layers) |
 | `env_assets/h1_2_26dof_with_inspire_rev_1_0_with_CL_realsense.usd` | Isaac | H1-2 USD with attached RealSense D455 head camera |
 | `env_assets/rsd455.usd` | Isaac | Standalone RealSense D455 USD |
@@ -516,7 +516,7 @@ Isaac Lab tasks are registered via `gym.register` under
 | Sim | `dt=0.005`, `decimation=2`, `episode_length_s=20.0`, PhysX CCD on, 16 position-iters, 4 substeps |
 | Resets | Per-block uniform pose perturbation in `[-0.05, +0.05]` m on x/y; `reset_object_self` + `reset_all_self` events registered on a custom `SimpleEventManager` |
 
-**MuJoCo "task"** is a single passive arena: the H1-2 (`h1_2_handless.xml`)
+**MuJoCo "task"** is a single passive arena: the H1-2 (`h1_2_magpie_eflesh.xml`)
 is merged into a Robocasa kitchen at launch by `h1_mujoco/scene_builder.py`
 and held upright by an elastic-band tether. There is no manager-based env
 layer — "task" semantics live in whatever controller you connect to
@@ -640,7 +640,7 @@ Humanoid_Simulation/
 ├── assets/                        # Robot URDFs/MJCFs, meshes, scenes (bind-mounted ro)
 │   ├── h1_2*.urdf, *.xml          # H1-2 URDF/MJCF (kitchen scene assembled at launch)
 │   ├── meshes/                    # STL meshes
-│   ├── magpie/                    # UR5e + Magpie gripper assets (in-progress port)
+│   ├── mujoco_assets/             # MJCF for H1-2 + Magpie eflesh gripper (h1_2_magpie_eflesh.xml + subassemblies)
 │   ├── Payload/                   # USD payload layers
 │   └── env_assets/                # Isaac USDs (H1-2+RealSense, IKEA table, rsd455)
 │

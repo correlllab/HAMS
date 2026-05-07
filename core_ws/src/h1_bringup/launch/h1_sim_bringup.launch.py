@@ -18,7 +18,7 @@ def generate_launch_description():
     default_rviz = os.path.join(bringup_share, 'rviz', 'sim.rviz')
     default_config = os.path.join(bringup_share, 'config', 'sim_network.yaml')
 
-    with open(os.path.join(ASSETS_DIR, 'ros_assets', 'h1_2_handless_ros.urdf'), 'r') as urdf_file:
+    with open(os.path.join(ASSETS_DIR, 'ros_assets', 'h1_2_magpie_ros.urdf'), 'r') as urdf_file:
         robot_description = urdf_file.read()
 
     config = LaunchConfiguration('config')
