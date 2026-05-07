@@ -8,24 +8,31 @@
 [submodule "core_ws/src/h12_ros2_controller"]
 	path = core_ws/src/h12_ros2_controller
 	url = git@github.com:correlllab/h12_ros2_controller.git
+	branch = unified_sim
 [submodule "core_ws/src/h12_ros2_model"]
 	path = core_ws/src/h12_ros2_model
 	url = git@github.com:correlllab/h12_ros2_model.git
+	branch = unified_sim
 [submodule "core_ws/src/h12_safety_layer"]
 	path = core_ws/src/h12_safety_layer
 	url = git@github.com:correlllab/h12_safety_layer.git
+	branch = unified_sim
 [submodule "core_ws/src/vision_pipeline"]
 	path = core_ws/src/vision_pipeline
 	url = git@github.com:correlllab/vision_pipeline.git
+	branch = unified_sim
 [submodule "core_ws/src/custom_ros_messages"]
 	path = core_ws/src/custom_ros_messages
 	url = git@github.com:correlllab/custom_ros_messages.git
+	branch = unified_sim
 [submodule "core_ws/src/magpie_control"]
 	path = core_ws/src/magpie_control
 	url = git@github.com:correlllab/magpie_control.git
+	branch = unified_sim
 [submodule "core_ws/src/magpie_msgs"]
 	path = core_ws/src/magpie_msgs
 	url = git@github.com:correlllab/magpie_msgs.git
+	branch = unified_sim
 [submodule "core_ws/src/FAST_LIO"]
 	path = core_ws/src/FAST_LIO
 	url = git@github.com:hku-mars/FAST_LIO.git
@@ -36,6 +43,7 @@
 [submodule "core_ws/src/h12_realsense"]
 	path = core_ws/src/h12_realsense
 	url = git@github.com:correlllab/h12_realsense.git
+	branch = unified_sim
 [submodule "core_ws/src/unitree_ros2"]
 	path = core_ws/src/unitree_ros2
 	url = git@github.com:unitreerobotics/unitree_ros2.git
