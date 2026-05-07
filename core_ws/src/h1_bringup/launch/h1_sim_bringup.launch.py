@@ -28,11 +28,16 @@ def generate_launch_description():
     sim_time_param = {'use_sim_time': True}
 
     return LaunchDescription([
-        SetEnvironmentVariable('ROS_DOMAIN_ID', '1'),
-
         DeclareLaunchArgument('use_rviz', default_value='true'),
         DeclareLaunchArgument('rviz_config', default_value=default_rviz),
         DeclareLaunchArgument('config', default_value=default_config),
+
+        Node(
+            package="h12_ros2_controller",
+            executable='joint_state_publisher',
+            name='joint_state_publisher',
+            output='screen'
+        ),
 
         # h12_ros2_controller (from full_launch.py, minus rviz)
         Node(
@@ -43,34 +48,22 @@ def generate_launch_description():
             output='screen',
         ),
         Node(
-            package='h1_bringup',
-            executable='sim_joint_state_publisher',
-            name='joint_state_publisher',
+            package='h12_ros2_controller',
+            executable='frame_task_server',
+            name='frame_task_server',
+            arguments=['--config', config],
             parameters=[sim_time_param],
             output='screen',
         ),
-        TimerAction(
-            period=2.0,
-            actions=[
-                Node(
-                    package='h12_ros2_controller',
-                    executable='frame_task_server',
-                    name='frame_task_server',
-                    arguments=['--config', config],
-                    parameters=[sim_time_param],
-                    output='screen',
-                ),
-            ],
-        ),
-
+        
         # vision_pipeline (from vp.launch.py, minus rviz)
-        Node(
-            package='vision_pipeline',
-            executable='vp',
-            name='vp_node',
-            parameters=[sim_time_param],
-            output='screen',
-        ),
+        # Node(
+        #     package='vision_pipeline',
+        #     executable='vp',
+        #     name='vp_node',
+        #     parameters=[sim_time_param],
+        #     output='screen',
+        # ),
 
         Node(
             package='h12_safety_layer',
@@ -88,21 +81,5 @@ def generate_launch_description():
             parameters=[sim_time_param],
             output='screen',
             condition=IfCondition(LaunchConfiguration('use_rviz')),
-        ),
-
-        # cv2 bundles its own Qt plugins that can clobber rviz2's Qt when both
-        # load in the same launch. Delay the slider GUI so rviz2 has already
-        # initialised Qt from the system libs before cv2 imports.
-        TimerAction(
-            period=3.0,
-            actions=[
-                Node(
-                    package='h1_bringup',
-                    executable='wrist_slider_gui',
-                    name='wrist_slider_gui',
-                    parameters=[sim_time_param],
-                    output='screen',
-                ),
-            ],
         ),
     ])

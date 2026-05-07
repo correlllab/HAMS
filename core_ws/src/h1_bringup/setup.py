@@ -30,9 +30,7 @@ setup(
     },
     entry_points={
         'console_scripts': [
-            'wrist_slider_gui = h1_bringup.wrist_slider_gui:main',
             'push_red_cube = h1_bringup.push_red_cube:main',
-            'sim_joint_state_publisher = h1_bringup.sim_joint_state_publisher:main',
         ],
     },
 )
