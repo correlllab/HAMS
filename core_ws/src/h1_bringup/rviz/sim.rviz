@@ -8,14 +8,15 @@ Panels:
         - /Status1
         - /TF1/Frames1
         - /PointCloud21
+        - /PointCloud21/Status1
+        - /PointCloud21/Topic1
         - /DepthImage1
         - /DepthImage1/Topic1
         - /ColorImage1
-        - /ColorImage1/Status1
         - /ColorImage1/Topic1
         - /RobotModel1
       Splitter Ratio: 0.5
-    Tree Height: 495
+    Tree Height: 562
   - Class: rviz_common/Selection
     Name: Selection
   - Class: rviz_common/Tool Properties
@@ -33,7 +34,7 @@ Panels:
     Experimental: false
     Name: Time
     SyncMode: 0
-    SyncSource: ""
+    SyncSource: PointCloud2
 Visualization Manager:
   Class: ""
   Displays:
@@ -94,11 +95,23 @@ Visualization Manager:
           Value: true
         left_wrist_yaw_link:
           Value: true
+        lg_base_bot:
+          Value: true
+        lg_base_top:
+          Value: true
+        lg_mount:
+          Value: true
         lidar_link:
           Value: true
         logo_link:
           Value: true
         pelvis:
+          Value: true
+        rg_base_bot:
+          Value: true
+        rg_base_top:
+          Value: true
+        rg_mount:
           Value: true
         right_ankle_pitch_link:
           Value: true
@@ -167,6 +180,10 @@ Visualization Manager:
                         left_wrist_yaw_link:
                           left_hand_camera_link:
                             {}
+                          lg_mount:
+                            lg_base_bot:
+                              lg_base_top:
+                                {}
             lidar_link:
               {}
             logo_link:
@@ -178,6 +195,10 @@ Visualization Manager:
                     right_wrist_roll_link:
                       right_wrist_pitch_link:
                         right_wrist_yaw_link:
+                          rg_mount:
+                            rg_base_bot:
+                              rg_base_top:
+                                {}
                           right_hand_camera_link:
                             {}
       Update Interval: 0
@@ -192,7 +213,7 @@ Visualization Manager:
       Channel Name: intensity
       Class: rviz_default_plugins/PointCloud2
       Color: 255; 255; 255
-      Color Transformer: AxisColor
+      Color Transformer: Intensity
       Decay Time: 0
       Enabled: true
       Invert Rainbow: false
@@ -211,7 +232,7 @@ Visualization Manager:
         Durability Policy: Volatile
         Filter size: 10
         History Policy: Keep Last
-        Reliability Policy: Reliable
+        Reliability Policy: Best Effort
         Value: /livox/lidar
       Use Fixed Frame: true
       Use rainbow: true
@@ -343,6 +364,51 @@ Visualization Manager:
           Show Axes: false
           Show Trail: false
           Value: true
+        lg_base_bot:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+          Value: true
+        lg_base_top:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+          Value: true
+        lg_left_crank:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+          Value: true
+        lg_left_finger:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+          Value: true
+        lg_left_rocker:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+          Value: true
+        lg_mount:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+          Value: true
+        lg_right_crank:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+          Value: true
+        lg_right_finger:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+          Value: true
+        lg_right_rocker:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+          Value: true
         lidar_link:
           Alpha: 1
           Show Axes: false
@@ -353,6 +419,51 @@ Visualization Manager:
           Show Trail: false
           Value: true
         pelvis:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+          Value: true
+        rg_base_bot:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+          Value: true
+        rg_base_top:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+          Value: true
+        rg_left_crank:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+          Value: true
+        rg_left_finger:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+          Value: true
+        rg_left_rocker:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+          Value: true
+        rg_mount:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+          Value: true
+        rg_right_crank:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+          Value: true
+        rg_right_finger:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+          Value: true
+        rg_right_rocker:
           Alpha: 1
           Show Axes: false
           Show Trail: false
@@ -485,7 +596,7 @@ Visualization Manager:
   Views:
     Current:
       Class: rviz_default_plugins/Orbit
-      Distance: 1.04228675365448
+      Distance: 4.977495193481445
       Enable Stereo Rendering:
         Stereo Eye Separation: 0.05999999865889549
         Stereo Focal Distance: 1
@@ -500,10 +611,10 @@ Visualization Manager:
       Invert Z Axis: false
       Name: Current View
       Near Clip Distance: 0.009999999776482582
-      Pitch: 0.4853993058204651
+      Pitch: -0.029600314795970917
       Target Frame: <Fixed Frame>
       Value: Orbit (rviz)
-      Yaw: 5.478566646575928
+      Yaw: 5.3135762214660645
     Saved: ~
 Window Geometry:
   ColorImage:
@@ -515,7 +626,7 @@ Window Geometry:
   Height: 1371
   Hide Left Dock: false
   Hide Right Dock: false
-  QMainWindow State: 000000ff00000000fd000000040000000000000156000004c1fc020000000afb0000001200530065006c0065006300740069006f006e00000001e10000009b0000005c00fffffffb0000001e0054006f006f006c002000500072006f007000650072007400690065007302000001ed0000047500000185000000a3fb000000120056006900650077007300200054006f006f02000001df000002110000018500000122fb000000200054006f006f006c002000500072006f0070006500720074006900650073003203000002880000011d000002210000017afb000000100044006900730070006c006100790073010000003b00000278000000c700fffffffb0000002000730065006c0065006300740069006f006e00200062007500660066006500720200000138000000aa0000023a00000294fb00000014005700690064006500530074006500720065006f02000000e6000000d2000003ee0000030bfb0000000c004b0069006e0065006300740200000186000001060000030c00000261fb00000014004400650070007400680049006d00610067006501000002b9000000f10000002800fffffffb000000140043006f006c006f00720049006d00610067006501000003b00000014c0000002800ffffff000000010000010f000006c1fc0200000003fb0000001e0054006f006f006c002000500072006f00700065007200740069006500730100000041000000780000000000000000fb0000000a00560069006500770073000000003b000006c1000000a000fffffffb0000001200530065006c0065006300740069006f006e010000025a000000b200000000000000000000000200000490000000a9fc0100000001fb0000000a00560069006500770073030000004e00000080000002e10000019700000003000006970000003efc0100000002fb0000000800540069006d00650100000000000006970000025300fffffffb0000000800540069006d006501000000000000045000000000000000000000053b000004c100000004000000040000000800000008fc0000000100000002000000010000000a0054006f006f006c00730100000000ffffffff0000000000000000
+  QMainWindow State: 000000ff00000000fd000000040000000000000156000004c1fc020000000afb0000001200530065006c0065006300740069006f006e00000001e10000009b0000005c00fffffffb0000001e0054006f006f006c002000500072006f007000650072007400690065007302000001ed0000047500000185000000a3fb000000120056006900650077007300200054006f006f02000001df000002110000018500000122fb000000200054006f006f006c002000500072006f0070006500720074006900650073003203000002880000011d000002210000017afb000000100044006900730070006c006100790073010000003b000002bb000000c700fffffffb0000002000730065006c0065006300740069006f006e00200062007500660066006500720200000138000000aa0000023a00000294fb00000014005700690064006500530074006500720065006f02000000e6000000d2000003ee0000030bfb0000000c004b0069006e0065006300740200000186000001060000030c00000261fb00000014004400650070007400680049006d00610067006501000002fc000000ae0000002800fffffffb000000140043006f006c006f00720049006d00610067006501000003b00000014c0000002800ffffff000000010000010f000006c1fc0200000003fb0000001e0054006f006f006c002000500072006f00700065007200740069006500730100000041000000780000000000000000fb0000000a00560069006500770073000000003b000006c1000000a000fffffffb0000001200530065006c0065006300740069006f006e010000025a000000b200000000000000000000000200000490000000a9fc0100000001fb0000000a00560069006500770073030000004e00000080000002e10000019700000003000006970000003efc0100000002fb0000000800540069006d00650100000000000006970000025300fffffffb0000000800540069006d006501000000000000045000000000000000000000053b000004c100000004000000040000000800000008fc0000000100000002000000010000000a0054006f006f006c00730100000000ffffffff0000000000000000
   Selection:
     collapsed: false
   Time:

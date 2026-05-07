@@ -36,6 +36,7 @@ def generate_launch_description():
             package="h12_ros2_controller",
             executable='joint_state_publisher',
             name='joint_state_publisher',
+            parameters=[sim_time_param],
             output='screen'
         ),
 
