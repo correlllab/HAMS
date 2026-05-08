@@ -362,7 +362,6 @@ so code edits take effect without rebuilding.
 |----------|---------|---------|
 | `use_rviz` | `true` | Start RViz with `sim.rviz` |
 | `rviz_config` | `<bringup>/rviz/sim.rviz` | Override RViz config |
-| `config` | `<bringup>/config/sim_network.yaml` | Sets `domain_id: 1` and loosens estop limits for sim |
 
 ---
 

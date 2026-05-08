@@ -8,7 +8,6 @@ Panels:
         - /Status1
         - /TF1/Frames1
         - /PointCloud21
-        - /PointCloud21/Status1
         - /PointCloud21/Topic1
         - /DepthImage1
         - /DepthImage1/Topic1
@@ -57,163 +56,30 @@ Visualization Manager:
       Reference Frame: <Fixed Frame>
       Value: true
     - Class: rviz_default_plugins/TF
-      Enabled: true
+      Enabled: false
       Frame Timeout: 15
       Frames:
         All Enabled: false
-        camera_link:
-          Value: true
-        head_camera_link:
-          Value: true
-        imu_link:
-          Value: true
-        left_ankle_pitch_link:
-          Value: true
-        left_ankle_roll_link:
-          Value: true
-        left_elbow_link:
-          Value: true
-        left_hand_camera_link:
-          Value: true
-        left_hip_pitch_link:
-          Value: true
-        left_hip_roll_link:
-          Value: true
-        left_hip_yaw_link:
-          Value: true
-        left_knee_link:
-          Value: true
-        left_shoulder_pitch_link:
-          Value: true
-        left_shoulder_roll_link:
-          Value: true
-        left_shoulder_yaw_link:
-          Value: true
-        left_wrist_pitch_link:
-          Value: true
-        left_wrist_roll_link:
-          Value: true
-        left_wrist_yaw_link:
-          Value: true
-        lg_base_bot:
-          Value: true
-        lg_base_top:
-          Value: true
-        lg_mount:
-          Value: true
-        lidar_link:
-          Value: true
-        logo_link:
-          Value: true
-        pelvis:
-          Value: true
-        rg_base_bot:
-          Value: true
-        rg_base_top:
-          Value: true
-        rg_mount:
-          Value: true
-        right_ankle_pitch_link:
-          Value: true
-        right_ankle_roll_link:
-          Value: true
-        right_elbow_link:
-          Value: true
-        right_hand_camera_link:
-          Value: true
-        right_hip_pitch_link:
-          Value: true
-        right_hip_roll_link:
-          Value: true
-        right_hip_yaw_link:
-          Value: true
-        right_knee_link:
-          Value: true
-        right_shoulder_pitch_link:
-          Value: true
-        right_shoulder_roll_link:
-          Value: true
-        right_shoulder_yaw_link:
-          Value: true
-        right_wrist_pitch_link:
-          Value: true
-        right_wrist_roll_link:
-          Value: true
-        right_wrist_yaw_link:
-          Value: true
-        torso_link:
-          Value: true
       Marker Scale: 1
       Name: TF
       Show Arrows: true
       Show Axes: true
       Show Names: false
       Tree:
-        pelvis:
-          left_hip_yaw_link:
-            left_hip_pitch_link:
-              left_hip_roll_link:
-                left_knee_link:
-                  left_ankle_pitch_link:
-                    left_ankle_roll_link:
-                      {}
-          right_hip_yaw_link:
-            right_hip_pitch_link:
-              right_hip_roll_link:
-                right_knee_link:
-                  right_ankle_pitch_link:
-                    right_ankle_roll_link:
-                      {}
-          torso_link:
-            camera_link:
-              {}
-            head_camera_link:
-              {}
-            imu_link:
-              {}
-            left_shoulder_pitch_link:
-              left_shoulder_roll_link:
-                left_shoulder_yaw_link:
-                  left_elbow_link:
-                    left_wrist_roll_link:
-                      left_wrist_pitch_link:
-                        left_wrist_yaw_link:
-                          left_hand_camera_link:
-                            {}
-                          lg_mount:
-                            lg_base_bot:
-                              lg_base_top:
-                                {}
-            lidar_link:
-              {}
-            logo_link:
-              {}
-            right_shoulder_pitch_link:
-              right_shoulder_roll_link:
-                right_shoulder_yaw_link:
-                  right_elbow_link:
-                    right_wrist_roll_link:
-                      right_wrist_pitch_link:
-                        right_wrist_yaw_link:
-                          rg_mount:
-                            rg_base_bot:
-                              rg_base_top:
-                                {}
-                          right_hand_camera_link:
-                            {}
+        {}
       Update Interval: 0
-      Value: true
+      Value: false
     - Alpha: 1
       Autocompute Intensity Bounds: true
       Autocompute Value Bounds:
-        Max Value: 0.08047294616699219
-        Min Value: -1.031036615371704
+        Max Value: 1.7016289234161377
+        Min Value: -1.126751184463501
         Value: true
       Axis: Z
       Channel Name: intensity
       Class: rviz_default_plugins/PointCloud2
       Color: 255; 255; 255
-      Color Transformer: Intensity
+      Color Transformer: AxisColor
       Decay Time: 0
       Enabled: true
       Invert Rainbow: false
@@ -596,25 +462,25 @@ Visualization Manager:
   Views:
     Current:
       Class: rviz_default_plugins/Orbit
-      Distance: 4.977495193481445
+      Distance: 6.983416557312012
       Enable Stereo Rendering:
         Stereo Eye Separation: 0.05999999865889549
         Stereo Focal Distance: 1
         Swap Stereo Eyes: false
         Value: false
       Focal Point:
-        X: 0.9601701498031616
-        Y: -0.8985496759414673
-        Z: 0.7043333649635315
+        X: 1.002272129058838
+        Y: -0.256534606218338
+        Z: 0.7975371479988098
       Focal Shape Fixed Size: true
       Focal Shape Size: 0.05000000074505806
       Invert Z Axis: false
       Name: Current View
       Near Clip Distance: 0.009999999776482582
-      Pitch: -0.029600314795970917
+      Pitch: 0.30539965629577637
       Target Frame: <Fixed Frame>
       Value: Orbit (rviz)
-      Yaw: 5.3135762214660645
+      Yaw: 5.385430812835693
     Saved: ~
 Window Geometry:
   ColorImage:
@@ -637,4 +503,4 @@ Window Geometry:
     collapsed: false
   Width: 1687
   X: 1753
-  Y: 1168
+  Y: 32

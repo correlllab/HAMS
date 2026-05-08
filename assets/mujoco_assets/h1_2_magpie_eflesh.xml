@@ -468,6 +468,25 @@
     <framequat name="livox_imu_quat" objtype="site" objname="livox_imu_site"/>
     <gyro name="livox_imu_gyro" site="livox_imu_site" noise="5e-4" cutoff="34.9"/>
     <accelerometer name="livox_imu_acc" site="livox_imu_site" noise="1e-2" cutoff="157"/>
+
+    <!-- Magpie hand finger sensors (read by h1_mujoco/magpie_hand_bridge.py).
+         Bridge looks them up by name via mj_name2id, so position in this
+         block doesn't matter; appended here to keep the upstream 27-motor
+         sensor ordering consumed by unitree_interface.py untouched. -->
+    <jointpos name="right_hand_left_finger_pos"  joint="left_hinge_1"/>
+    <jointpos name="right_hand_right_finger_pos" joint="right_hinge_1"/>
+    <jointpos name="left_hand_left_finger_pos"   joint="leftg_left_hinge_1"/>
+    <jointpos name="left_hand_right_finger_pos"  joint="leftg_right_hinge_1"/>
+
+    <jointvel name="right_hand_left_finger_vel"  joint="left_hinge_1"/>
+    <jointvel name="right_hand_right_finger_vel" joint="right_hinge_1"/>
+    <jointvel name="left_hand_left_finger_vel"   joint="leftg_left_hinge_1"/>
+    <jointvel name="left_hand_right_finger_vel"  joint="leftg_right_hinge_1"/>
+
+    <jointactuatorfrc name="right_hand_left_finger_torque"  joint="left_hinge_1"/>
+    <jointactuatorfrc name="right_hand_right_finger_torque" joint="right_hinge_1"/>
+    <jointactuatorfrc name="left_hand_left_finger_torque"   joint="leftg_left_hinge_1"/>
+    <jointactuatorfrc name="left_hand_right_finger_torque"  joint="leftg_right_hinge_1"/>
   </sensor>
 
 </mujoco>

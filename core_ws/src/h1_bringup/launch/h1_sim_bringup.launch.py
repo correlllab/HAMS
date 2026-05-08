@@ -16,12 +16,9 @@ def generate_launch_description():
     # bringup inlines their non-rviz nodes and runs a single rviz with sim.rviz.
     bringup_share = get_package_share_directory('h1_bringup')
     default_rviz = os.path.join(bringup_share, 'rviz', 'sim.rviz')
-    default_config = os.path.join(bringup_share, 'config', 'sim_network.yaml')
 
     with open(os.path.join(ASSETS_DIR, 'ros_assets', 'h1_2_magpie_ros.urdf'), 'r') as urdf_file:
         robot_description = urdf_file.read()
-
-    config = LaunchConfiguration('config')
 
     # MuJoCo publishes /clock with sim time. All nodes should use it so
     # TF lookups and sensor timestamps are coherent with the simulation.
@@ -29,8 +26,8 @@ def generate_launch_description():
 
     return LaunchDescription([
         DeclareLaunchArgument('use_rviz', default_value='true'),
+        DeclareLaunchArgument('use_sliders', default_value='true'),
         DeclareLaunchArgument('rviz_config', default_value=default_rviz),
-        DeclareLaunchArgument('config', default_value=default_config),
 
         Node(
             package="h12_ros2_controller",
@@ -52,7 +49,7 @@ def generate_launch_description():
             package='h12_ros2_controller',
             executable='frame_task_server',
             name='frame_task_server',
-            arguments=['--config', config],
+            arguments=['--config', 'sim.yaml'],
             parameters=[sim_time_param],
             output='screen',
         ),
@@ -82,5 +79,28 @@ def generate_launch_description():
             parameters=[sim_time_param],
             output='screen',
             condition=IfCondition(LaunchConfiguration('use_rviz')),
+        ),
+
+        # slider_debugger waits up to 5s on /left_ee_pose & /right_ee_pose,
+        # which frame_task_server publishes only after its IK solver finishes
+        # initialising (URDF load + 150-step torso init — empirically ~7s).
+        # 10s leaves headroom so the sliders seed from the live pose.
+        #
+        # Intentionally NOT using sim_time: the GUI's wait_for_initial_poses
+        # measures wall-clock; with use_sim_time=True a fast sim that's
+        # already past 5s makes get_clock().now() jump and trip the timeout
+        # immediately, falling back to all-zero targets that drive the IK
+        # toward unreachable poses inside the body.
+        TimerAction(
+            period=10.0,
+            actions=[
+                Node(
+                    package='h1_bringup',
+                    executable='slider_debugger',
+                    name='slider_debugger',
+                    output='screen',
+                    condition=IfCondition(LaunchConfiguration('use_sliders')),
+                ),
+            ],
         ),
     ])

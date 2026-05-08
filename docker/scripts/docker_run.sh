@@ -12,6 +12,11 @@ SIM=${1:?Usage: ./docker_run.sh [isaac|mujoco|ros] [override command/args...]}
 shift
 cd "$(dirname "$0")/../.."
 
+# Pre-create host-side bind sources so dockerd doesn't materialise them
+# root-owned on first run. The cache holds msgs_ws build/install/log between
+# container restarts (see docker-compose.yml).
+mkdir -p container_cache/msgs_ws
+
 # Normalize ROS_DOMAIN_ID: treat 0/unset/empty as 1, otherwise pass through.
 # Sims publish on domain 1; domain 0 is reserved for the real robot.
 if [ -z "${ROS_DOMAIN_ID:-}" ] || [ "${ROS_DOMAIN_ID}" = "0" ]; then

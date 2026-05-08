@@ -64,6 +64,16 @@ services:
       - ../h1_mujoco:/home/code/h1_mujoco
       - ../assets:/home/code/assets:ro
       - ./scripts:/home/code/h12_sim_scripts
+      # Only the message packages the magpi sim needs — keeps the rest of
+      # core_ws (vision_pipeline weights, FAST_LIO, root-owned host build
+      # dir, etc.) out of this container. The parent rw mount persists
+      # build/install/log on the host under container_cache/msgs_ws/ so
+      # colcon's incremental rebuild on launch is a near-no-op when the
+      # IDL is unchanged; the two inner :ro mounts override their src/
+      # subdirs so the package sources stay read-only.
+      - ../container_cache/msgs_ws:/home/code/msgs_ws:rw
+      - ../core_ws/src/magpie_msgs:/home/code/msgs_ws/src/magpie_msgs:ro
+      - ../core_ws/src/custom_ros_messages:/home/code/msgs_ws/src/custom_ros_messages:ro
     command: /home/code/h12_sim_scripts/launch_mujoco.sh
 
   ros:

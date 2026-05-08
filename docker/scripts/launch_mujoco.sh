@@ -10,6 +10,16 @@ set -e
 
 source /opt/ros/humble/setup.bash
 
+# Run colcon every launch — it's a fast no-op when nothing's changed.
+# build/install/log are bind-mounted from the host at container_cache/msgs_ws/
+# (see docker-compose.yml), so they persist across `docker compose run --rm`
+# cycles. Wipe that host directory if you need a clean rebuild.
+MSGS_WS=/home/code/msgs_ws
+echo "[launch_mujoco] building $MSGS_WS"
+(cd "$MSGS_WS" && colcon build --symlink-install \
+    --packages-select magpie_msgs custom_ros_messages)
+source "$MSGS_WS/install/setup.bash"
+
 export ROS_DOMAIN_ID="${ROS_DOMAIN_ID:-1}"
 
 # Auto-add --headless if no display is reachable (SSH without X11, cloud VM, CI).

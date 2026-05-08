@@ -201,3 +201,12 @@ RUN rm -f /usr/local/lib/python3.10/dist-packages/distutils-precedence.pth
 WORKDIR /home/code/core_ws
 
 CMD ["/home/code/h12_sim_scripts/launch_ros.sh"]
+
+# -----------------------------------------------------------------------------
+# Tkinter — needed by h1_bringup's slider_debugger (Tk GUI for live wrist /
+# gripper control). Appended at the end so iterating on this layer does not
+# bust the heavy apt / pip / SAM / robocasa layers above.
+# -----------------------------------------------------------------------------
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        python3-tk \
+    && rm -rf /var/lib/apt/lists/*

@@ -82,3 +82,21 @@ RUN echo y | python -m robocasa.scripts.download_kitchen_assets --type all
 WORKDIR /home/code/h1_mujoco
 
 CMD ["/bin/bash"]
+
+# -----------------------------------------------------------------------------
+# msgs_ws toolchain — minimal colcon + ament + rosidl_default_generators so
+# launch_mujoco.sh can build the IDL-only workspace at every container start
+# (magpie_msgs + custom_ros_messages, both ament_cmake interface packages).
+# Appended at the end intentionally so iterating on this layer does not bust
+# the heavy mujoco/robocasa/asset layers above.
+# -----------------------------------------------------------------------------
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        python3-colcon-common-extensions \
+        ros-humble-ament-cmake \
+        ros-humble-ament-cmake-auto \
+        ros-humble-ament-cmake-python \
+        ros-humble-rosidl-default-generators \
+    && rm -rf /var/lib/apt/lists/*
+
+# Bind-mount target for ../core_ws/src/{magpie_msgs,custom_ros_messages}.
+RUN mkdir -p /home/code/msgs_ws/src

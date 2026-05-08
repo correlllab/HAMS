@@ -15,7 +15,6 @@ setup(
         ('share/' + package_name, ['package.xml']),
         (os.path.join('share', package_name, 'launch'), glob('launch/*.py')),
         (os.path.join('share', package_name, 'rviz'), glob('rviz/*.rviz')),
-        (os.path.join('share', package_name, 'config'), glob('config/*.yaml')),
     ],
     install_requires=['setuptools'],
     zip_safe=True,
@@ -31,6 +30,7 @@ setup(
     entry_points={
         'console_scripts': [
             'push_red_cube = h1_bringup.push_red_cube:main',
+            'slider_debugger = h1_bringup.slider_debugger:main',
         ],
     },
 )

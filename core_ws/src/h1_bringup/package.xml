@@ -14,6 +14,7 @@
   <exec_depend>h12_safety_layer</exec_depend>
   <exec_depend>vision_pipeline</exec_depend>
   <exec_depend>custom_ros_messages</exec_depend>
+  <exec_depend>magpie_msgs</exec_depend>
   <exec_depend>python3-opencv</exec_depend>
   <exec_depend>python3-numpy</exec_depend>
   <exec_depend>python3-scipy</exec_depend>
