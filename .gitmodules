@@ -47,3 +47,6 @@
 [submodule "core_ws/src/unitree_ros2"]
 	path = core_ws/src/unitree_ros2
 	url = git@github.com:unitreerobotics/unitree_ros2.git
+[submodule "CL_Assets"]
+	path = CL_Assets
+	url = git@github.com:correlllab/CL_Assets.git

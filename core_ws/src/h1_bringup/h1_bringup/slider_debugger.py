@@ -25,7 +25,7 @@ from geometry_msgs.msg import Pose, Point, Quaternion, PoseStamped
 from builtin_interfaces.msg import Duration
 
 from custom_ros_messages.action import FrameTask
-from magpie_msgs.srv import SetGripperPosition
+from custom_ros_messages.srv import SetGripperPosition
 
 
 WRIST_FRAMES = ('left_wrist_yaw_link', 'right_wrist_yaw_link')

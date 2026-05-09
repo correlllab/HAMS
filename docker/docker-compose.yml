@@ -24,7 +24,7 @@ services:
       - ${XAUTHORITY:-$HOME/.Xauthority}:/root/.Xauthority:ro
       - /dev/input:/dev/input:ro
       - /dev/dri:/dev/dri:rw
-      - ../assets/isaac_assets:/home/code/cl_assets
+      - ../CL_Assets:/home/code/CL_Assets:ro
       - ./scripts:/home/code/h12_sim_scripts
       - ../CL_isaaclab_sim:/home/code/CL_isaaclab_sim
       - ../CL_isaaclab_sim/.isaac_cache/ov:/root/.cache/ov
@@ -62,7 +62,7 @@ services:
       - /dev/input:/dev/input:ro
       - /dev/dri:/dev/dri:rw
       - ../h1_mujoco:/home/code/h1_mujoco
-      - ../assets:/home/code/assets:ro
+      - ../CL_Assets:/home/code/CL_Assets:ro
       - ./scripts:/home/code/h12_sim_scripts
       # Only the message packages the magpi sim needs — keeps the rest of
       # core_ws (vision_pipeline weights, FAST_LIO, root-owned host build
@@ -99,6 +99,6 @@ services:
       - /tmp/.X11-unix:/tmp/.X11-unix:rw
       - ${XAUTHORITY:-$HOME/.Xauthority}:/root/.Xauthority:ro
       - ../core_ws:/home/code/core_ws
-      - ../assets:/home/code/assets:ro
+      - ../CL_Assets:/home/code/CL_Assets:ro
       - ./scripts:/home/code/h12_sim_scripts
     command: /home/code/h12_sim_scripts/launch_ros.sh

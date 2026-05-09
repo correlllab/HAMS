@@ -7,7 +7,7 @@ from launch.conditions import IfCondition
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 
-ASSETS_DIR = '/home/code/assets'
+ASSETS_DIR = '/home/code/CL_Assets'
 
 
 def generate_launch_description():
