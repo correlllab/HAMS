@@ -21,21 +21,15 @@ from scipy.spatial.transform import Rotation
 import rclpy
 from rclpy.node import Node
 from rclpy.action import ActionClient
-from geometry_msgs.msg import Pose, Point, Quaternion, PoseStamped
+from geometry_msgs.msg import Pose, Point, Quaternion
 from builtin_interfaces.msg import Duration
 
 from custom_ros_messages.action import FrameTask
-from custom_ros_messages.srv import SetGripperPosition
+from magpie_msgs.srv import SetGripperPosition
 
 
 WRIST_FRAMES = ('left_wrist_yaw_link', 'right_wrist_yaw_link')
 SPIN_PERIOD_MS = 100
-SEND_PERIOD_MS = 200
-# Long horizon: frame_task_server breaks out of its control loop on
-# convergence and we cancel the goal as soon as the slider changes. Setting
-# duration to match SEND_PERIOD_MS made the server preempt itself before any
-# visible motion happened — and added a 50-step settling delay (~500 ms)
-# after every "successful" 200 ms goal.
 GOAL_DURATION_SEC = 30
 
 
@@ -54,53 +48,12 @@ class SliderDebugger(Node):
         self.left_gripper_cli = self.create_client(SetGripperPosition, self.left_gripper_srv_name)
         self.right_gripper_cli = self.create_client(SetGripperPosition, self.right_gripper_srv_name)
 
-        self._initial_left = None
-        self._initial_right = None
-        self._left_sub = self.create_subscription(
-            PoseStamped, '/left_ee_pose', self._on_left_pose, 1)
-        self._right_sub = self.create_subscription(
-            PoseStamped, '/right_ee_pose', self._on_right_pose, 1)
+        self._initial_left = (0.3, 0.2, 0.1, 0.0, 0.0, 0.0)
+        self._initial_right = (0.3, -0.2, 0.1, 0.0, 0.0, 0.0)
 
         self._goal_handle = None
-        self._last_wrist_values = None
-        self._last_left_grip = None
-        self._last_right_grip = None
         self._warned_left_grip = False
         self._warned_right_grip = False
-
-    def _on_left_pose(self, msg: PoseStamped):
-        if self._initial_left is None:
-            self._initial_left = self._pose_to_xyzrpy(msg.pose)
-
-    def _on_right_pose(self, msg: PoseStamped):
-        if self._initial_right is None:
-            self._initial_right = self._pose_to_xyzrpy(msg.pose)
-
-    @staticmethod
-    def _pose_to_xyzrpy(pose: Pose):
-        q = [pose.orientation.x, pose.orientation.y, pose.orientation.z, pose.orientation.w]
-        rpy = Rotation.from_quat(q).as_euler('xyz')
-        return (pose.position.x, pose.position.y, pose.position.z,
-                float(rpy[0]), float(rpy[1]), float(rpy[2]))
-
-    def wait_for_initial_poses(self, timeout_sec=5.0):
-        # Use time.monotonic, NOT self.get_clock().now() — when use_sim_time
-        # is True the first /clock arrival can jump past `timeout_sec` in one
-        # step and trip an immediate "timeout" before any pose has arrived.
-        import time as _time
-        end = _time.monotonic() + timeout_sec
-        while rclpy.ok() and (self._initial_left is None or self._initial_right is None):
-            rclpy.spin_once(self, timeout_sec=0.05)
-            if _time.monotonic() > end:
-                break
-        if self._initial_left is None:
-            self.get_logger().warn(
-                'Timed out waiting for /left_ee_pose; initialising left sliders to zero')
-            self._initial_left = (0.0,) * 6
-        if self._initial_right is None:
-            self.get_logger().warn(
-                'Timed out waiting for /right_ee_pose; initialising right sliders to zero')
-            self._initial_right = (0.0,) * 6
 
     def _build_pose(self, x, y, z, r, p, yw) -> Pose:
         qx, qy, qz, qw = Rotation.from_euler('xyz', [r, p, yw]).as_quat()
@@ -194,8 +147,6 @@ def _read_wrist(sliders):
 def main():
     rclpy.init()
     node = SliderDebugger()
-    node.get_logger().info('Waiting for /left_ee_pose and /right_ee_pose to seed sliders...')
-    node.wait_for_initial_poses(timeout_sec=5.0)
 
     root = tk.Tk()
     root.title('H1 Slider Debugger')
@@ -219,6 +170,19 @@ def main():
     right_grip.set(0.5)
     right_grip.pack(pady=2)
 
+    def on_send():
+        if not rclpy.ok():
+            return
+        left_xyzrpy = _read_wrist(left_sliders)
+        right_xyzrpy = _read_wrist(right_sliders)
+        node.send_wrist_targets(left_xyzrpy, right_xyzrpy)
+        node.send_gripper('left', left_grip.get())
+        node.send_gripper('right', right_grip.get())
+
+    send_button = tk.Button(root, text='Send', command=on_send,
+                            width=20, height=2)
+    send_button.pack(side=tk.BOTTOM, pady=10)
+
     def on_close():
         node.cancel_active_goal()
         try:
@@ -233,31 +197,7 @@ def main():
             rclpy.spin_once(node, timeout_sec=0.0)
             root.after(SPIN_PERIOD_MS, spin_tick)
 
-    def send_tick():
-        if not rclpy.ok():
-            return
-        left_xyzrpy = _read_wrist(left_sliders)
-        right_xyzrpy = _read_wrist(right_sliders)
-        wrist_values = left_xyzrpy + right_xyzrpy
-        if wrist_values != node._last_wrist_values:
-            node.send_wrist_targets(left_xyzrpy, right_xyzrpy)
-            node._last_wrist_values = wrist_values
-
-        lg = left_grip.get()
-        if node._last_left_grip is None or lg != node._last_left_grip:
-            if node._last_left_grip is not None:
-                node.send_gripper('left', lg)
-            node._last_left_grip = lg
-        rg = right_grip.get()
-        if node._last_right_grip is None or rg != node._last_right_grip:
-            if node._last_right_grip is not None:
-                node.send_gripper('right', rg)
-            node._last_right_grip = rg
-
-        root.after(SEND_PERIOD_MS, send_tick)
-
     root.after(SPIN_PERIOD_MS, spin_tick)
-    root.after(SEND_PERIOD_MS, send_tick)
 
     try:
         root.mainloop()

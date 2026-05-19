@@ -92,7 +92,7 @@ def generate_launch_description():
         # immediately, falling back to all-zero targets that drive the IK
         # toward unreachable poses inside the body.
         TimerAction(
-            period=10.0,
+            period=1.0,
             actions=[
                 Node(
                     package='h1_bringup',
