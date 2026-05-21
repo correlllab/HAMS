@@ -2,11 +2,24 @@ import os
 
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, SetEnvironmentVariable, TimerAction
+from launch.actions import (
+    DeclareLaunchArgument,
+    IncludeLaunchDescription,
+    SetEnvironmentVariable,
+    TimerAction,
+)
 from launch.conditions import IfCondition
+from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 
+# IMPORTANT: ROS_DOMAIN_ID must be exported in the launching shell. The safety
+# layer uses unitree_sdk2py's DDS ChannelSubscriber (which honours
+# $ROS_DOMAIN_ID and falls back to the YAML's network.domain_id only if the env
+# is unset), while walking_node / frame_task_server / mujoco_ros_bridge are
+# rclpy nodes that pick up the env directly. If the variable is missing, the
+# DDS half and the rclpy half can end up on different domains and the safety
+# layer will see no commands.
 ASSETS_DIR = '/home/code/CL_Assets'
 
 
@@ -24,10 +37,39 @@ def generate_launch_description():
     # TF lookups and sensor timestamps are coherent with the simulation.
     sim_time_param = {'use_sim_time': True}
 
+    nav_launch = IncludeLaunchDescription(
+        PythonLaunchDescriptionSource(
+            os.path.join(bringup_share, 'launch', 'h1_navigation.launch.py')
+        ),
+        launch_arguments={'use_sim_time': 'true'}.items(),
+        condition=IfCondition(LaunchConfiguration('use_nav')),
+    )
+
     return LaunchDescription([
         DeclareLaunchArgument('use_rviz', default_value='true'),
         DeclareLaunchArgument('use_sliders', default_value='true'),
+        DeclareLaunchArgument('use_nav', default_value='true'),
         DeclareLaunchArgument('rviz_config', default_value=default_rviz),
+
+        nav_launch,
+
+        # The MuJoCo bridge back-projects depth into 3D using REP-103 optical
+        # convention (+z = forward, +x = right, +y = down) but stamps the
+        # resulting camera_info / image / depth messages with the optical
+        # frame name below. The URDF defines only camera_link (a ROS link
+        # frame, +x = forward, +z = up); without this static TF the vision
+        # pipeline would treat optical-convention points as if they were in
+        # camera_link, rotating every detection ~90 deg out of place.
+        Node(
+            package='tf2_ros',
+            executable='static_transform_publisher',
+            name='camera_optical_frame_broadcaster',
+            arguments=['0', '0', '0',
+                       '-1.5707963267948966', '0', '-1.5707963267948966',
+                       'camera_link', 'camera_color_optical_frame'],
+            parameters=[sim_time_param],
+            output='screen',
+        ),
 
         Node(
             package="h12_ros2_controller",
@@ -55,13 +97,13 @@ def generate_launch_description():
         ),
         
         # vision_pipeline (from vp.launch.py, minus rviz)
-        # Node(
-        #     package='vision_pipeline',
-        #     executable='vp',
-        #     name='vp_node',
-        #     parameters=[sim_time_param],
-        #     output='screen',
-        # ),
+        Node(
+            package='vision_pipeline',
+            executable='vp',
+            name='vp_node',
+            parameters=[sim_time_param],
+            output='screen',
+        ),
 
         Node(
             package='h12_safety_layer',
@@ -72,13 +114,13 @@ def generate_launch_description():
             output='screen',
         ),
 
-        Node(
-            package='h12_lowerbody_controller',
-            executable='walking_node',
-            name='walking_node',
-            parameters=[sim_time_param],
-            output='screen',
-        ),
+        # Node(
+        #     package='h12_lowerbody_controller',
+        #     executable='walking_node',
+        #     name='walking_node',
+        #     parameters=[sim_time_param],
+        #     output='screen',
+        # ),
 
         Node(
             package='rviz2',

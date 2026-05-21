@@ -8,7 +8,6 @@ commands.
 Direct adaptation of example/deploy_mujoco.py to a real-robot ROS 2 stack.
 '''
 
-import time
 from pathlib import Path
 
 import numpy as np
@@ -19,6 +18,7 @@ from ament_index_python.packages import get_package_share_directory
 from geometry_msgs.msg import Twist
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
+from rclpy.time import Time
 from unitree_hg.msg import LowCmd, LowState
 
 
@@ -80,7 +80,7 @@ class WalkingNode(Node):
         self._obs = np.zeros(self._num_obs, dtype=np.float32)
 
         self._lowstate: LowState | None = None
-        self._start_time: float | None = None
+        self._start_time: Time | None = None
 
         lowstate_qos = QoSProfile(
             reliability=ReliabilityPolicy.BEST_EFFORT,
@@ -93,7 +93,7 @@ class WalkingNode(Node):
         self._cmd_vel_sub = self.create_subscription(
             Twist, '/cmd_vel', self._on_cmd_vel, 10
         )
-        self._cmd_pub = self.create_publisher(LowCmd, 'safety/lowcmd_lower_in', 10)
+        self._cmd_pub = self.create_publisher(LowCmd, '/safety/lowcmd_lower_in', 10)
 
         self._timer = self.create_timer(1.0 / control_hz, self._tick)
 
@@ -105,12 +105,16 @@ class WalkingNode(Node):
     def _on_lowstate(self, msg: LowState) -> None:
         self._lowstate = msg
         if self._start_time is None:
-            self._start_time = time.time()
+            self._start_time = self.get_clock().now()
 
     def _on_cmd_vel(self, msg: Twist) -> None:
+        # Policy was trained with SI commands in roughly [-1, 1] m/s (linear)
+        # and [-1, 1] rad/s (yaw). Clip to keep the policy's observation inside
+        # its training distribution.
         self._cmd[0] = msg.linear.x
         self._cmd[1] = msg.linear.y
         self._cmd[2] = msg.angular.z
+        np.clip(self._cmd, -1.0, 1.0, out=self._cmd)
 
     def _tick(self) -> None:
         if self._lowstate is None or self._start_time is None:
@@ -131,7 +135,8 @@ class WalkingNode(Node):
         gravity_orientation = get_gravity_orientation(quat)
         omega_obs = omega * self._ang_vel_scale
 
-        phase = ((time.time() - self._start_time) % GAIT_PERIOD) / GAIT_PERIOD
+        elapsed = (self.get_clock().now() - self._start_time).nanoseconds * 1e-9
+        phase = (elapsed % GAIT_PERIOD) / GAIT_PERIOD
         sin_phase = np.sin(2 * np.pi * phase)
         cos_phase = np.cos(2 * np.pi * phase)
 

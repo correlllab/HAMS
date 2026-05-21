@@ -9,6 +9,10 @@
 set -e
 
 source /opt/ros/humble/setup.bash
+# livox_ros_driver2 (CustomMsg/CustomPoint) is baked into the mujoco image at
+# /opt/livox_ws by MujocoDockerfile. Source it so mujoco_ros_bridge.py can
+# import livox_ros_driver2.msg.
+source /opt/livox_ws/install/setup.bash
 
 # Run colcon every launch — it's a fast no-op when nothing's changed.
 # build/install/log are bind-mounted from the host at container_cache/msgs_ws/
