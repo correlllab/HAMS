@@ -79,8 +79,8 @@ Visualization Manager:
     - Alpha: 1
       Autocompute Intensity Bounds: true
       Autocompute Value Bounds:
-        Max Value: 1.7239902019500732
-        Min Value: -1.0227727890014648
+        Max Value: 1.5020904541015625
+        Min Value: -1.1001834869384766
         Value: true
       Axis: Z
       Channel Name: intensity
@@ -523,8 +523,8 @@ Visualization Manager:
     - Alpha: 1
       Autocompute Intensity Bounds: true
       Autocompute Value Bounds:
-        Max Value: 1.6983691453933716
-        Min Value: -0.9842664003372192
+        Max Value: 1.4682139158248901
+        Min Value: -1.0491985082626343
         Value: true
       Axis: Z
       Channel Name: intensity
@@ -656,7 +656,7 @@ Visualization Manager:
     - Alpha: 1
       Class: rviz_default_plugins/Polygon
       Color: 25; 255; 0
-      Enabled: true
+      Enabled: false
       Name: PublishedFootprint
       Topic:
         Depth: 5
@@ -665,7 +665,7 @@ Visualization Manager:
         History Policy: Keep Last
         Reliability Policy: Reliable
         Value: /global_costmap/published_footprint
-      Value: true
+      Value: false
     - Alpha: 1
       Autocompute Intensity Bounds: true
       Autocompute Value Bounds:
@@ -717,7 +717,7 @@ Visualization Manager:
       Axes Radius: 0.10000000149011612
       Class: rviz_default_plugins/Pose
       Color: 255; 25; 0
-      Enabled: true
+      Enabled: false
       Head Length: 0.10000000149011612
       Head Radius: 0.10000000149011612
       Name: L_EE_Pose
@@ -731,13 +731,13 @@ Visualization Manager:
         History Policy: Keep Last
         Reliability Policy: Reliable
         Value: /left_ee_pose
-      Value: true
+      Value: false
     - Alpha: 1
       Axes Length: 1
       Axes Radius: 0.10000000149011612
       Class: rviz_default_plugins/Pose
       Color: 255; 25; 0
-      Enabled: true
+      Enabled: false
       Head Length: 0.10000000149011612
       Head Radius: 0.10000000149011612
       Name: R_EE_Pose
@@ -751,7 +751,7 @@ Visualization Manager:
         History Policy: Keep Last
         Reliability Policy: Reliable
         Value: /right_ee_pose
-      Value: true
+      Value: false
     - Alpha: 1
       Arrow Length: 0.10000000149011612
       Axes Length: 0.30000001192092896
@@ -819,7 +819,7 @@ Visualization Manager:
   Views:
     Current:
       Class: rviz_default_plugins/Orbit
-      Distance: 3.3005082607269287
+      Distance: 5.836850643157959
       Enable Stereo Rendering:
         Stereo Eye Separation: 0.05999999865889549
         Stereo Focal Distance: 1
@@ -834,10 +834,10 @@ Visualization Manager:
       Invert Z Axis: false
       Name: Current View
       Near Clip Distance: 0.009999999776482582
-      Pitch: 1.2447962760925293
+      Pitch: 0.46479731798171997
       Target Frame: <Fixed Frame>
       Value: Orbit (rviz)
-      Yaw: 4.199068069458008
+      Yaw: 1.6640620231628418
     Saved: ~
 Window Geometry:
   ColorImage:
@@ -859,5 +859,5 @@ Window Geometry:
   Views:
     collapsed: false
   Width: 1687
-  X: 1753
+  X: 66
   Y: 32

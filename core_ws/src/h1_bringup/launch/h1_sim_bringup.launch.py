@@ -114,13 +114,13 @@ def generate_launch_description():
             output='screen',
         ),
 
-        # Node(
-        #     package='h12_lowerbody_controller',
-        #     executable='walking_node',
-        #     name='walking_node',
-        #     parameters=[sim_time_param],
-        #     output='screen',
-        # ),
+        Node(
+            package='h12_lowerbody_controller',
+            executable='walking_node',
+            name='walking_node',
+            parameters=[sim_time_param],
+            output='screen',
+        ),
 
         Node(
             package='rviz2',

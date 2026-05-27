@@ -19,6 +19,7 @@ from geometry_msgs.msg import Twist
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
 from rclpy.time import Time
+from std_srvs.srv import Trigger
 from unitree_hg.msg import LowCmd, LowState
 
 
@@ -101,6 +102,21 @@ class WalkingNode(Node):
             f'walking_node ready: config={config_path}, policy={policy_path}, '
             f'control_hz={control_hz}'
         )
+
+        self._disable_elastic_band_if_present()
+
+    def _disable_elastic_band_if_present(self) -> None:
+        cli = self.create_client(Trigger, '/elastic_band/toggle')
+        if not cli.wait_for_service(timeout_sec=1.0):
+            self.get_logger().info('elastic band toggle service not available — skipping')
+            return
+        future = cli.call_async(Trigger.Request())
+        rclpy.spin_until_future_complete(self, future, timeout_sec=2.0)
+        result = future.result()
+        if result is None:
+            self.get_logger().warn('elastic band toggle call timed out')
+            return
+        self.get_logger().info(f'elastic band toggle: {result.message}')
 
     def _on_lowstate(self, msg: LowState) -> None:
         self._lowstate = msg

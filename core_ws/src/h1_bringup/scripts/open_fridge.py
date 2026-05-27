@@ -1,14 +1,12 @@
 #!/usr/bin/env python3
 """Detect the fridge handle via the vision pipeline, then drive the right arm to open it."""
 
-import time
-
 import rclpy
 from rclpy.node import Node
 from rclpy.action import ActionClient
 from rclpy.duration import Duration as RclpyDuration
 from action_msgs.msg import GoalStatus
-from geometry_msgs.msg import Pose, Point, Quaternion, PointStamped
+from geometry_msgs.msg import Pose, Point, Quaternion, PointStamped, PoseStamped
 from builtin_interfaces.msg import Duration
 
 from tf2_ros import Buffer, TransformListener, TransformException
@@ -16,6 +14,7 @@ from tf2_geometry_msgs import do_transform_point
 
 from custom_ros_messages.srv import UpdateTrackedObject, UpdateBeliefs, Query
 from custom_ros_messages.action import FrameTask
+from nav2_msgs.action import NavigateToPose
 from magpie_msgs.srv import SetGripperPosition
 import struct
 import numpy as np
@@ -36,6 +35,7 @@ class FridgeOpener(Node):
         self.query_cli = self.create_client(Query, '/vp_query_tracked_objects')
         self.frame_task_cli = ActionClient(self, FrameTask, '/frame_task')
         self.gripper_cli = self.create_client(SetGripperPosition, GRIPPER_SRV)
+        self.nav_cli = ActionClient(self, NavigateToPose, '/navigate_to_pose')
 
         self.tf_buffer = Buffer()
         self.tf_listener = TransformListener(self.tf_buffer, self)
@@ -46,6 +46,7 @@ class FridgeOpener(Node):
         self.query_cli.wait_for_service(timeout_sec=10.0)
         self.frame_task_cli.wait_for_server(timeout_sec=10.0)
         self.gripper_cli.wait_for_service(timeout_sec=10.0)
+        self.nav_cli.wait_for_server(timeout_sec=10.0)
         self.get_logger().info('All endpoints ready.')
 
     def _call(self, client, request, name):
@@ -121,6 +122,38 @@ class FridgeOpener(Node):
         status = result.status if result else GoalStatus.STATUS_UNKNOWN
         return status == GoalStatus.STATUS_SUCCEEDED
 
+    def _nav_feedback_cb(self, feedback_msg):
+        fb = feedback_msg.feedback
+        print(
+            f'\rnav feedback: distance_remaining={fb.distance_remaining:.3f} m '
+            f'recoveries={fb.number_of_recoveries}',
+            end='', flush=True,
+        )
+
+    def navigate_to(self, x, y, yaw=0.0, frame='map', timeout_sec=120.0):
+        goal = NavigateToPose.Goal()
+        goal.pose = PoseStamped()
+        goal.pose.header.frame_id = frame
+        goal.pose.header.stamp = self.get_clock().now().to_msg()
+        goal.pose.pose.position = Point(x=float(x), y=float(y), z=0.0)
+        half = 0.5 * float(yaw)
+        goal.pose.pose.orientation = Quaternion(
+            x=0.0, y=0.0, z=float(np.sin(half)), w=float(np.cos(half))
+        )
+
+        self.get_logger().info(f'navigate_to_pose -> ({x:.3f}, {y:.3f}, yaw={yaw:.3f}) in {frame!r}')
+        send_future = self.nav_cli.send_goal_async(goal, feedback_callback=self._nav_feedback_cb)
+        rclpy.spin_until_future_complete(self, send_future, timeout_sec=10.0)
+        goal_handle = send_future.result()
+        if not goal_handle or not goal_handle.accepted:
+            self.get_logger().error('navigate_to_pose goal rejected')
+            return False
+        result_future = goal_handle.get_result_async()
+        rclpy.spin_until_future_complete(self, result_future, timeout_sec=timeout_sec)
+        result = result_future.result()
+        status = result.status if result else GoalStatus.STATUS_UNKNOWN
+        return status == GoalStatus.STATUS_SUCCEEDED
+
     def set_gripper(self, position_mm, speed=1.0):
         req = SetGripperPosition.Request()
         req.position = float(position_mm)
@@ -163,9 +196,14 @@ def main():
     rclpy.init()
     node = FridgeOpener()
     try:
+        node.get_logger().info('=== Navigate to (0, 0, 0) ===')
+        if not node.navigate_to(0.0, 0.0, yaw=0.0):
+            node.get_logger().error('Navigation failed — aborting.')
+            return
+
         node.get_logger().info('=== Update beliefs from head camera ===')
         node.update_beliefs("/realsense/head")
-        time.sleep(2.0)
+        node.get_clock().sleep_for(RclpyDuration(seconds=2.0))
 
         node.get_logger().info('=== Query handle centroid ===')
         centroid = node.query_centroid(TARGET_QUERY, target_frame='pelvis')
@@ -183,7 +221,7 @@ def main():
         if not node.open_gripper():
             node.get_logger().error('Gripper open failed.')
             return
-        time.sleep(1)
+        node.get_clock().sleep_for(RclpyDuration(seconds=1.0))
 
         node.get_logger().info('=== Approach handle ===')
         approach_x = hx - 0.5  # 25 cm in front of handle along robot +x
@@ -200,7 +238,7 @@ def main():
         if not node.close_gripper(position_mm=0.0, speed=1.0):
             node.get_logger().error('Gripper close failed.')
             return
-        time.sleep(3)
+        node.get_clock().sleep_for(RclpyDuration(seconds=5.0))
 
         node.get_logger().info('=== Pull door open ===')
         # Naive: pull straight back along -x by 25 cm.

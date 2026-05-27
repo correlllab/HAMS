@@ -31,8 +31,7 @@ setup(
     },
     entry_points={
         'console_scripts': [
-            'push_red_cube = h1_bringup.push_red_cube:main',
-            'slider_debugger = h1_bringup.slider_debugger:main',
+            'open_fridge = h1_bringup.open_fridge:main',
         ],
     },
 )
