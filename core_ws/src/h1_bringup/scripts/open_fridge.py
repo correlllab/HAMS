@@ -197,9 +197,10 @@ def main():
     node = FridgeOpener()
     try:
         node.get_logger().info('=== Navigate to (0, 0, 0) ===')
+        print(f"{node.nav_cli=}")
         if not node.navigate_to(0.0, 0.0, yaw=0.0):
-            node.get_logger().error('Navigation failed — aborting.')
-            return
+            node.get_logger().error('Navigation failed')
+
 
         node.get_logger().info('=== Update beliefs from head camera ===')
         node.update_beliefs("/realsense/head")

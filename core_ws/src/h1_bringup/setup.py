@@ -17,7 +17,7 @@ setup(
         (os.path.join('share', package_name, 'rviz'), glob('rviz/*.rviz')),
         (os.path.join('share', package_name, 'config'), glob('config/*.yaml')),
     ],
-    scripts=['scripts/open_fridge.py'],
+    scripts=['scripts/open_fridge.py', 'scripts/slider_debugger.py'],
     install_requires=['setuptools'],
     zip_safe=True,
     maintainer='max',
@@ -30,8 +30,6 @@ setup(
         ],
     },
     entry_points={
-        'console_scripts': [
-            'open_fridge = h1_bringup.open_fridge:main',
-        ],
+        'console_scripts': [],
     },
 )

@@ -147,7 +147,7 @@ def generate_launch_description():
             actions=[
                 Node(
                     package='h1_bringup',
-                    executable='slider_debugger',
+                    executable='slider_debugger.py',
                     name='slider_debugger',
                     output='screen',
                     condition=IfCondition(LaunchConfiguration('use_sliders')),
