@@ -25,25 +25,13 @@
 	path = core_ws/src/custom_ros_messages
 	url = git@github.com:correlllab/custom_ros_messages.git
 	branch = unified_sim
-[submodule "core_ws/src/magpie_control"]
-	path = core_ws/src/magpie_control
-	url = git@github.com:correlllab/magpie_control.git
-	branch = unified_sim
 [submodule "core_ws/src/magpie_msgs"]
 	path = core_ws/src/magpie_msgs
 	url = git@github.com:correlllab/magpie_msgs.git
 	branch = unified_sim
-[submodule "core_ws/src/FAST_LIO"]
-	path = core_ws/src/FAST_LIO
-	url = git@github.com:hku-mars/FAST_LIO.git
-	branch = ROS2
 [submodule "core_ws/src/livox_ros_driver2"]
 	path = core_ws/src/livox_ros_driver2
 	url = git@github.com:Livox-SDK/livox_ros_driver2.git
-[submodule "core_ws/src/h12_realsense"]
-	path = core_ws/src/h12_realsense
-	url = git@github.com:correlllab/h12_realsense.git
-	branch = unified_sim
 [submodule "core_ws/src/unitree_ros2"]
 	path = core_ws/src/unitree_ros2
 	url = git@github.com:unitreerobotics/unitree_ros2.git
