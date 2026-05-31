@@ -1,8 +1,17 @@
-# Deny-all build context. Only one file is referenced from any Dockerfile
-# (IsaacDockerfile: COPY CL_isaaclab_sim/requirements.txt). Everything else
-# is bind-mounted at runtime via docker-compose.yml, so sending it to the
-# daemon is wasted bandwidth (~11 GB on full builds otherwise).
+# Deny-all build context. Everything is bind-mounted at runtime via
+# docker-compose.yml, so sending it to the daemon is wasted bandwidth (~11 GB
+# on full builds otherwise). Un-deny only files that a Dockerfile COPYs in.
+#
+# Whitelisted COPY sources:
+#   IsaacDockerfile  -> CL_isaaclab_sim/requirements.txt
+#   MujocoDockerfile -> core_ws/src/livox_ros_driver2 (baked-in livox build)
 *
 !CL_isaaclab_sim
 CL_isaaclab_sim/*
 !CL_isaaclab_sim/requirements.txt
+!core_ws
+core_ws/*
+!core_ws/src
+core_ws/src/*
+!core_ws/src/livox_ros_driver2
+core_ws/src/livox_ros_driver2/.git

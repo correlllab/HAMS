@@ -2,12 +2,25 @@ import os
 
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, SetEnvironmentVariable, TimerAction
+from launch.actions import (
+    DeclareLaunchArgument,
+    IncludeLaunchDescription,
+    SetEnvironmentVariable,
+    TimerAction,
+)
 from launch.conditions import IfCondition
+from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 
-ASSETS_DIR = '/home/code/assets'
+# IMPORTANT: ROS_DOMAIN_ID must be exported in the launching shell. The safety
+# layer uses unitree_sdk2py's DDS ChannelSubscriber (which honours
+# $ROS_DOMAIN_ID and falls back to the YAML's network.domain_id only if the env
+# is unset), while walking_node / frame_task_server / mujoco_ros_bridge are
+# rclpy nodes that pick up the env directly. If the variable is missing, the
+# DDS half and the rclpy half can end up on different domains and the safety
+# layer will see no commands.
+ASSETS_DIR = '/home/code/CL_Assets'
 
 
 def generate_launch_description():
@@ -16,23 +29,55 @@ def generate_launch_description():
     # bringup inlines their non-rviz nodes and runs a single rviz with sim.rviz.
     bringup_share = get_package_share_directory('h1_bringup')
     default_rviz = os.path.join(bringup_share, 'rviz', 'sim.rviz')
-    default_config = os.path.join(bringup_share, 'config', 'sim_network.yaml')
 
-    with open(os.path.join(ASSETS_DIR, 'h1_2_handless_ros.urdf'), 'r') as urdf_file:
+    with open(os.path.join(ASSETS_DIR, 'ros_assets', 'h1_2_magpie_ros.urdf'), 'r') as urdf_file:
         robot_description = urdf_file.read()
-
-    config = LaunchConfiguration('config')
 
     # MuJoCo publishes /clock with sim time. All nodes should use it so
     # TF lookups and sensor timestamps are coherent with the simulation.
     sim_time_param = {'use_sim_time': True}
 
-    return LaunchDescription([
-        SetEnvironmentVariable('ROS_DOMAIN_ID', '1'),
+    nav_launch = IncludeLaunchDescription(
+        PythonLaunchDescriptionSource(
+            os.path.join(bringup_share, 'launch', 'h1_navigation.launch.py')
+        ),
+        launch_arguments={'use_sim_time': 'true'}.items(),
+        condition=IfCondition(LaunchConfiguration('use_nav')),
+    )
 
+    return LaunchDescription([
         DeclareLaunchArgument('use_rviz', default_value='true'),
+        DeclareLaunchArgument('use_sliders', default_value='true'),
+        DeclareLaunchArgument('use_nav', default_value='true'),
         DeclareLaunchArgument('rviz_config', default_value=default_rviz),
-        DeclareLaunchArgument('config', default_value=default_config),
+
+        nav_launch,
+
+        # The MuJoCo bridge back-projects depth into 3D using REP-103 optical
+        # convention (+z = forward, +x = right, +y = down) but stamps the
+        # resulting camera_info / image / depth messages with the optical
+        # frame name below. The URDF defines only camera_link (a ROS link
+        # frame, +x = forward, +z = up); without this static TF the vision
+        # pipeline would treat optical-convention points as if they were in
+        # camera_link, rotating every detection ~90 deg out of place.
+        Node(
+            package='tf2_ros',
+            executable='static_transform_publisher',
+            name='camera_optical_frame_broadcaster',
+            arguments=['0', '0', '0',
+                       '-1.5707963267948966', '0', '-1.5707963267948966',
+                       'camera_link', 'camera_color_optical_frame'],
+            parameters=[sim_time_param],
+            output='screen',
+        ),
+
+        Node(
+            package="h12_ros2_controller",
+            executable='joint_state_publisher',
+            name='joint_state_publisher',
+            parameters=[sim_time_param],
+            output='screen'
+        ),
 
         # h12_ros2_controller (from full_launch.py, minus rviz)
         Node(
@@ -43,26 +88,14 @@ def generate_launch_description():
             output='screen',
         ),
         Node(
-            package='h1_bringup',
-            executable='sim_joint_state_publisher',
-            name='joint_state_publisher',
+            package='h12_ros2_controller',
+            executable='frame_task_server',
+            name='frame_task_server',
+            arguments=['--config', 'safety_split.yaml'],
             parameters=[sim_time_param],
             output='screen',
         ),
-        TimerAction(
-            period=2.0,
-            actions=[
-                Node(
-                    package='h12_ros2_controller',
-                    executable='frame_task_server',
-                    name='frame_task_server',
-                    arguments=['--config', config],
-                    parameters=[sim_time_param],
-                    output='screen',
-                ),
-            ],
-        ),
-
+        
         # vision_pipeline (from vp.launch.py, minus rviz)
         Node(
             package='vision_pipeline',
@@ -76,6 +109,15 @@ def generate_launch_description():
             package='h12_safety_layer',
             executable='safety_node',
             name='safety_node',
+            parameters=[sim_time_param, ],
+            arguments=['--config', "default_safety_split.yaml"],
+            output='screen',
+        ),
+
+        Node(
+            package='h12_lowerbody_controller',
+            executable='walking_node',
+            name='walking_node',
             parameters=[sim_time_param],
             output='screen',
         ),
@@ -90,18 +132,25 @@ def generate_launch_description():
             condition=IfCondition(LaunchConfiguration('use_rviz')),
         ),
 
-        # cv2 bundles its own Qt plugins that can clobber rviz2's Qt when both
-        # load in the same launch. Delay the slider GUI so rviz2 has already
-        # initialised Qt from the system libs before cv2 imports.
+        # slider_debugger waits up to 5s on /left_ee_pose & /right_ee_pose,
+        # which frame_task_server publishes only after its IK solver finishes
+        # initialising (URDF load + 150-step torso init — empirically ~7s).
+        # 10s leaves headroom so the sliders seed from the live pose.
+        #
+        # Intentionally NOT using sim_time: the GUI's wait_for_initial_poses
+        # measures wall-clock; with use_sim_time=True a fast sim that's
+        # already past 5s makes get_clock().now() jump and trip the timeout
+        # immediately, falling back to all-zero targets that drive the IK
+        # toward unreachable poses inside the body.
         TimerAction(
-            period=3.0,
+            period=1.0,
             actions=[
                 Node(
                     package='h1_bringup',
-                    executable='wrist_slider_gui',
-                    name='wrist_slider_gui',
-                    parameters=[sim_time_param],
+                    executable='slider_debugger.py',
+                    name='slider_debugger',
                     output='screen',
+                    condition=IfCondition(LaunchConfiguration('use_sliders')),
                 ),
             ],
         ),

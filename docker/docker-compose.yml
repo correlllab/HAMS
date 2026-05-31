@@ -24,7 +24,7 @@ services:
       - ${XAUTHORITY:-$HOME/.Xauthority}:/root/.Xauthority:ro
       - /dev/input:/dev/input:ro
       - /dev/dri:/dev/dri:rw
-      - ../assets/env_assets:/home/code/cl_assets
+      - ../CL_Assets:/home/code/CL_Assets:ro
       - ./scripts:/home/code/h12_sim_scripts
       - ../CL_isaaclab_sim:/home/code/CL_isaaclab_sim
       - ../CL_isaaclab_sim/.isaac_cache/ov:/root/.cache/ov
@@ -62,8 +62,18 @@ services:
       - /dev/input:/dev/input:ro
       - /dev/dri:/dev/dri:rw
       - ../h1_mujoco:/home/code/h1_mujoco
-      - ../assets:/home/code/assets:ro
+      - ../CL_Assets:/home/code/CL_Assets:ro
       - ./scripts:/home/code/h12_sim_scripts
+      # Only the message packages the magpi sim needs — keeps the rest of
+      # core_ws (vision_pipeline weights, FAST_LIO, root-owned host build
+      # dir, etc.) out of this container. The parent rw mount persists
+      # build/install/log on the host under container_cache/msgs_ws/ so
+      # colcon's incremental rebuild on launch is a near-no-op when the
+      # IDL is unchanged; the two inner :ro mounts override their src/
+      # subdirs so the package sources stay read-only.
+      - ../container_cache/msgs_ws:/home/code/msgs_ws:rw
+      - ../core_ws/src/magpie_msgs:/home/code/msgs_ws/src/magpie_msgs:ro
+      - ../core_ws/src/custom_ros_messages:/home/code/msgs_ws/src/custom_ros_messages:ro
     command: /home/code/h12_sim_scripts/launch_mujoco.sh
 
   ros:
@@ -89,6 +99,6 @@ services:
       - /tmp/.X11-unix:/tmp/.X11-unix:rw
       - ${XAUTHORITY:-$HOME/.Xauthority}:/root/.Xauthority:ro
       - ../core_ws:/home/code/core_ws
-      - ../assets:/home/code/assets:ro
+      - ../CL_Assets:/home/code/CL_Assets:ro
       - ./scripts:/home/code/h12_sim_scripts
     command: /home/code/h12_sim_scripts/launch_ros.sh

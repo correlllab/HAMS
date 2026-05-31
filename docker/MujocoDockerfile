@@ -82,3 +82,65 @@ RUN echo y | python -m robocasa.scripts.download_kitchen_assets --type all
 WORKDIR /home/code/h1_mujoco
 
 CMD ["/bin/bash"]
+
+# -----------------------------------------------------------------------------
+# msgs_ws toolchain — minimal colcon + ament + rosidl_default_generators so
+# launch_mujoco.sh can build the IDL-only workspace at every container start
+# (magpie_msgs + custom_ros_messages, both ament_cmake interface packages).
+# Appended at the end intentionally so iterating on this layer does not bust
+# the heavy mujoco/robocasa/asset layers above.
+# -----------------------------------------------------------------------------
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        python3-colcon-common-extensions \
+        ros-humble-ament-cmake \
+        ros-humble-ament-cmake-auto \
+        ros-humble-ament-cmake-python \
+        ros-humble-rosidl-default-generators \
+    && rm -rf /var/lib/apt/lists/*
+
+# Bind-mount target for ../core_ws/src/{magpie_msgs,custom_ros_messages}.
+RUN mkdir -p /home/code/msgs_ws/src
+
+# -----------------------------------------------------------------------------
+# Livox-SDK2 — required by livox_ros_driver2's C++ library (and therefore by
+# its message generation, since the package builds them together). Identical
+# recipe to RosDockerfile so both containers' livox builds resolve the same
+# system library. Appended at the end so iterating on this layer does not bust
+# the heavy mujoco/robocasa/asset layers above.
+# -----------------------------------------------------------------------------
+RUN git clone --depth 1 https://github.com/Livox-SDK/Livox-SDK2.git /tmp/Livox-SDK2 && \
+    cd /tmp/Livox-SDK2 && mkdir build && cd build && \
+    cmake .. -DCMAKE_POLICY_VERSION_MINIMUM=3.5 && make -j"$(nproc)" && make install && \
+    ldconfig && \
+    rm -rf /tmp/Livox-SDK2
+
+# -----------------------------------------------------------------------------
+# apt deps required by livox_ros_driver2's C++ build (see
+# core_ws/src/livox_ros_driver2/package_ROS2.xml).
+# -----------------------------------------------------------------------------
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        libpcl-dev libapr1-dev \
+        ros-humble-pcl-conversions ros-humble-pcl-ros \
+        ros-humble-rclcpp-components ros-humble-rcl-interfaces \
+        ros-humble-rosbag2 \
+        ros-humble-sensor-msgs ros-humble-std-msgs \
+    && rm -rf /var/lib/apt/lists/*
+
+# -----------------------------------------------------------------------------
+# livox_ros_driver2 baked into the image so the mujoco bridge can publish
+# proper livox_ros_driver2/msg/CustomMsg on /livox/lidar. Bind-mount would
+# collide with the ros container's bind-mount of core_ws/src (build.sh writes
+# to its source tree: package_ROS2.xml -> package.xml and launch_ROS2/ ->
+# launch/), so we COPY a snapshot in here and build via the upstream-supported
+# build.sh entry point. build.sh rm -rf's ../../build and ../../install before
+# building, so /opt/livox_ws/src must contain only this one package.
+# -----------------------------------------------------------------------------
+COPY core_ws/src/livox_ros_driver2 /opt/livox_ws/src/livox_ros_driver2
+# Do not rm -rf /opt/livox_ws/build afterwards — build.sh uses
+# --symlink-install, which makes install/ contain symlinks pointing back into
+# build/ for generated message modules and local_setup.bash. Wiping build/
+# breaks those symlinks and the Python `from livox_ros_driver2.msg import
+# CustomMsg` fails at runtime. The build dir is small (~20 MB) so just leave it.
+RUN bash -c "source /opt/ros/humble/setup.bash && \
+             cd /opt/livox_ws/src/livox_ros_driver2 && \
+             ./build.sh humble"
