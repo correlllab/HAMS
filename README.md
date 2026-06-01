@@ -13,6 +13,8 @@ running in separate containers and sharing a CycloneDDS ROS domain.
 ## Prerequisites
 
 - Docker (with Compose v2) and the NVIDIA Container Toolkit.
+- Git LFS (`git lfs install`) — required to fetch the large binary assets
+  (URDF meshes, MuJoCo XML, Isaac USD) tracked via LFS.
 - `git submodule update --init --recursive` to populate `core_ws/src`.
 
 A few things worth knowing before you run anything:
@@ -98,3 +100,25 @@ known gap.
   export the same non-zero `ROS_DOMAIN_ID` you used for the container.
 - For a clean rebuild of the message workspace, wipe
   `container_cache/msgs_ws/` on the host before relaunching.
+
+## Working example — open the fridge
+
+End-to-end run of the fridge-opening demo across three terminals. Export the
+same non-zero `ROS_DOMAIN_ID` in every terminal.
+
+```bash
+export ROS_DOMAIN_ID=1   # match across all terminals
+
+# terminal A — MuJoCo (start first so /clock is publishing)
+docker/scripts/docker_run.sh mujoco
+
+# terminal B — ROS workspace shell, then launch bringup
+docker/scripts/docker_run.sh ros
+ros2 launch h1_bringup h1_sim_bringup.launch.py
+
+# terminal C — exec into the running ROS container and run the demo
+docker exec -it humanoid_sim_ros bash
+source /opt/ros/humble/setup.bash
+source /home/code/core_ws/install/setup.bash
+ros2 run h1_bringup open_fridge.py
+```

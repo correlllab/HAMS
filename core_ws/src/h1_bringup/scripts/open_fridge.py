@@ -57,6 +57,12 @@ class FridgeOpener(Node):
             return None
         return future.result()
 
+    def track_object(self, query, action='add'):
+        req = UpdateTrackedObject.Request()
+        req.object = query
+        req.action = action
+        return self._call(self.track_cli, req, 'UpdateTrackedObject')
+
     def update_beliefs(self, camera):
         req = UpdateBeliefs.Request()
         req.camera_name_space = camera
@@ -201,6 +207,9 @@ def main():
         if not node.navigate_to(0.0, 0.0, yaw=0.0):
             node.get_logger().error('Navigation failed')
 
+
+        node.get_logger().info(f'=== Track object: {TARGET_QUERY} ===')
+        node.track_object(TARGET_QUERY)
 
         node.get_logger().info('=== Update beliefs from head camera ===')
         node.update_beliefs("/realsense/head")
