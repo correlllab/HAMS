@@ -49,6 +49,7 @@ def generate_launch_description():
         DeclareLaunchArgument('use_rviz', default_value='true'),
         DeclareLaunchArgument('use_sliders', default_value='true'),
         DeclareLaunchArgument('use_nav', default_value='true'),
+        DeclareLaunchArgument('lowerbody_policy', default_value='fame'),
         DeclareLaunchArgument('rviz_config', default_value=default_rviz),
 
         nav_launch,
@@ -114,11 +115,16 @@ def generate_launch_description():
             output='screen',
         ),
 
+        # Lower-body controller with switchable RL policies (walk / FAME stand).
+        # Defaults to the FAME standing policy so the base holds still for
+        # manipulation; switch to 'walk' for navigation by publishing the policy
+        # name on /lowerbody/set_policy (the controller waits for a safe handover
+        # — standing still, arms home — before committing the switch).
         Node(
             package='h12_lowerbody_controller',
-            executable='walking_node',
-            name='walking_node',
-            parameters=[sim_time_param],
+            executable='lowerbody_controller_node',
+            name='lowerbody_controller_node',
+            parameters=[sim_time_param, {'active_policy': LaunchConfiguration('lowerbody_policy')}],
             output='screen',
         ),
 

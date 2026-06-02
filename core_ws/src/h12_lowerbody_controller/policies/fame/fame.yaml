@@ -1,0 +1,40 @@
+# FAME standing/squatting policy (RMA) — ROS deployment config.
+#
+# Consumed by h12_lowerbody_controller.policy.FamePolicy. Paths are relative to
+# this file. The standalone-sim-only fields from the original training config
+# (xml_path, simulation_*, arm perturbations, video) were dropped — in the ROS
+# pipeline the arms are driven by the upper-body IK and observed via /lowstate.
+
+policy_path: "policy.pt"
+encoder_path: "encoder_3800.pt"
+
+# PD gains for the 12 leg joints (the only joints this policy commands).
+kps: [200, 200, 200, 300, 60, 40,
+      200, 200, 200, 300, 60, 40]
+kds: [5.0, 5.0, 5.0, 7.5, 1.0, 0.3,
+      5.0, 5.0, 5.0, 7.5, 1.0, 0.3]
+
+# Nominal pose. Legs (12) are commanded; arms (torso + 7L + 7R = 15) are only
+# used to build the observation / e_t (they are driven by the IK in this stack).
+default_angles: [-0.16, 0.0, 0.0, 0.36, -0.2, 0.0,
+                 -0.16, 0.0, 0.0, 0.36, -0.2, 0.0]
+default_angles_arms: [0.0,
+                      0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                      0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+
+# Observation scaling (must match training).
+ang_vel_scale: 0.25
+dof_pos_scale: 1.0
+dof_vel_scale: 0.05
+action_scale: 0.25
+cmd_scale: [2.0, 2.0, 0.25]
+
+# RMA shapes: single proprio obs = 76, 3-step history + 3-step z_t -> actor_obs 252.
+num_actions: 12
+num_obs: 252
+obs_history_len: 3
+
+# e_t wrist forces (world frame). No wrist F/T sensors in sim -> zeros; the
+# encoder still adapts the legs to the upper-body configuration the IK produces.
+left_hand_force: [0.0, 0.0, 0.0]
+right_hand_force: [0.0, 0.0, 0.0]
