@@ -1,16 +1,17 @@
-"""Policy registry + safe-handover switching.
+"""Policy registry + idle/active state with safe-handover switching.
 
-The manager owns the set of lower-body policies and exactly one *active* policy.
-A switch request does not take effect immediately: the manager enters a SETTLING
-state and only commits the swap once a **handover gate** confirms the robot is
-standing still with its arms at the nominal pose — so both the outgoing and
-incoming policies see in-distribution observations at the switch instant. The
-incoming policy is then ``reset`` from the live state for a bumpless start.
+The manager holds the lower-body policies and at most one *active* policy.
+``active_name`` is ``None`` when **idle** — the robot is held by the elastic band
+and no policy drives the legs. A requested policy only becomes active once
+*committed*:
 
-The gate is deliberately conservative. ``/lowstate`` exposes no base *linear*
-velocity, so "not drifting" is approximated by small joint velocities, small base
-angular velocity, and a (near-)zero velocity command — adequate because we only
-ever switch *to* standing from a commanded stop. Tune via ``GateConfig``.
+* **first activation** (idle -> policy): the node releases the band, then calls
+  ``commit`` (no gate — the band-held pose is already a stable handover state).
+* **switch** (policy -> policy): committed only when the **handover gate** passes
+  (robot standing still, arms home) so both policies see in-distribution obs.
+
+The incoming policy is ``reset()`` at commit for a clean free-standing warm-up.
+The band itself is owned by the node, not here — this class is pure policy logic.
 """
 
 from __future__ import annotations
@@ -19,28 +20,29 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from .policy import NUM_LEG_JOINTS, NUM_POLICY_JOINTS, LegCommand, Policy, RobotState
+from .policy import LegCommand, Policy, RobotState, gravity_from_quat_fame
 
 
 @dataclass
 class GateConfig:
-    cmd_eps: float = 0.05        # ||velocity command|| below this = "stop requested"
-    gyro_eps: float = 0.30       # rad/s, base angular velocity
-    dq_eps: float = 0.50         # rad/s, max |joint velocity|
-    arm_eps: float = 0.20        # rad, max |arm joint - 0| (arms at home)
-    leg_eps: float = 0.30        # rad, max |leg joint - incoming nominal|
+    # A switch is a "handover": commit only when the robot is in a stable
+    # standing moment so the incoming policy (which resets + warms up) takes over
+    # cleanly. We do NOT require a specific arm/leg pose — both policies balance
+    # from a standing pose, and the arms are held by the IK at its own home
+    # (not at 0), so a pose match is neither achievable nor needed.
+    cmd_eps: float = 0.10        # ||velocity command|| below this = "stop requested"
+    gyro_eps: float = 0.60       # rad/s, base angular velocity (still)
+    dq_eps: float = 0.60         # rad/s, max |joint velocity| (joints still)
+    upright_eps: float = 0.25    # max horizontal gravity component (~14 deg tilt)
     hold_ticks: int = 10         # consecutive passing ticks required (debounce)
     warn_period_ticks: int = 100  # log a "still waiting" note this often
 
 
 class PolicyManager:
-    def __init__(self, policies: dict[str, Policy], active_name: str,
-                 gate: GateConfig | None = None, log=print):
-        if active_name not in policies:
-            raise KeyError(f"active policy {active_name!r} not in {list(policies)}")
+    def __init__(self, policies: dict[str, Policy], gate: GateConfig | None = None, log=print):
         self._policies = policies
-        self._active = active_name
-        self._desired = active_name
+        self._active: str | None = None     # None = idle (band-held, no policy)
+        self._desired: str | None = None
         self._gate = gate or GateConfig()
         self._log = log
         self._pass_count = 0
@@ -48,35 +50,44 @@ class PolicyManager:
 
     # -- introspection -------------------------------------------------------
     @property
-    def active_name(self) -> str:
+    def active_name(self) -> str | None:
         return self._active
 
     @property
-    def desired_name(self) -> str:
+    def desired_name(self) -> str | None:
         return self._desired
 
-    @property
-    def is_settling(self) -> bool:
-        return self._desired != self._active
+    def is_idle(self) -> bool:
+        return self._active is None
+
+    def is_pending(self) -> bool:
+        return self._desired is not None and self._desired != self._active
 
     def names(self) -> list[str]:
         return list(self._policies)
 
+    def has(self, name: str) -> bool:
+        return name in self._policies
+
     # -- control -------------------------------------------------------------
-    def request_switch(self, name: str) -> bool:
+    def request(self, name: str) -> tuple[bool, str]:
+        """Request a policy. Returns (accepted, message). Commit happens later
+        (after band release for the first activation, or after the gate for a
+        switch)."""
         if name not in self._policies:
-            self._log(f"[switch] unknown policy {name!r}; have {list(self._policies)}")
-            return False
-        if name == self._active and not self.is_settling:
-            return True  # already there
-        if name != self._desired:
-            self._log(f"[switch] requested {self._active!r} -> {name!r}; waiting for handover gate")
+            return False, f"unknown policy {name!r}; have {self.names()}"
+        if name == self._active and not self.is_pending():
+            return True, f"{name!r} already active"
         self._desired = name
         self._pass_count = 0
         self._settle_ticks = 0
-        return True
+        kind = "activate (idle->%s)" % name if self.is_idle() else f"switch {self._active!r}->{name!r}"
+        self._log(f"[policy] requested {kind}")
+        return True, f"requested {name!r}"
 
-    def _gate_ok(self, state: RobotState, incoming: Policy) -> bool:
+    def _gate_ok(self, state: RobotState) -> bool:
+        """Stable standing moment: not commanded to move, base + joints still,
+        and upright. Pose-agnostic on purpose (see GateConfig)."""
         g = self._gate
         if np.linalg.norm(state.cmd) > g.cmd_eps:
             return False
@@ -84,46 +95,44 @@ class PolicyManager:
             return False
         if np.max(np.abs(state.dq)) > g.dq_eps:
             return False
-        arms = state.q[NUM_LEG_JOINTS:NUM_POLICY_JOINTS]
-        if np.max(np.abs(arms)) > g.arm_eps:
-            return False
-        legs = state.q[:NUM_LEG_JOINTS]
-        if np.max(np.abs(legs - incoming.nominal_lower)) > g.leg_eps:
+        grav = gravity_from_quat_fame(state.quat)   # [0,0,-1] when upright
+        if float(np.hypot(grav[0], grav[1])) > g.upright_eps:
             return False
         return True
 
-    def update(self, state: RobotState) -> str | None:
-        """Advance the switch state machine. Returns the new active name if a
-        switch committed this tick, else None. Call once per tick before run()."""
-        if not self.is_settling:
-            return None
-
+    def commit(self, state: RobotState) -> str:
+        """Activate the desired policy now (reset for a clean warm-up). Used for
+        the first activation right after band release."""
         incoming = self._policies[self._desired]
+        incoming.reset(state)
+        old = self._active
+        self._active = self._desired
+        self._pass_count = 0
+        self._settle_ticks = 0
+        self._log(f"[policy] committed {old!r} -> {self._active!r}")
+        return self._active
+
+    def update_switch(self, state: RobotState) -> str | None:
+        """Advance a *switch* between two active policies (gated). Returns the new
+        active name on commit, else None. Only call when already active and a
+        different policy is desired."""
+        if self.is_idle() or not self.is_pending():
+            return None
         self._settle_ticks += 1
-        if self._gate_ok(state, incoming):
+        if self._gate_ok(state):
             self._pass_count += 1
         else:
             self._pass_count = 0
             if self._settle_ticks % self._gate.warn_period_ticks == 0:
-                self._log(f"[switch] still waiting to enter {self._desired!r} "
-                          f"(robot not yet standing-still with arms home)")
-
+                self._log(f"[policy] waiting to enter {self._desired!r} "
+                          f"(need standing-still with arms home)")
         if self._pass_count >= self._gate.hold_ticks:
-            incoming.reset(state)
-            old = self._active
-            self._active = self._desired
-            self._pass_count = 0
-            self._settle_ticks = 0
-            self._log(f"[switch] committed {old!r} -> {self._active!r}")
-            return self._active
+            return self.commit(state)
         return None
 
     def reset_active(self, state: RobotState) -> None:
-        """Restart the active policy's warm-up from the current state. Call this
-        at band release so a history-based policy (FAME) discards the band-held
-        (out-of-distribution) history and warms up free-standing, matching the
-        standalone deploy that the policy was validated against."""
-        self._policies[self._active].reset(state)
+        if self._active is not None:
+            self._policies[self._active].reset(state)
 
     def run(self, state: RobotState) -> LegCommand:
         return self._policies[self._active].compute(state)

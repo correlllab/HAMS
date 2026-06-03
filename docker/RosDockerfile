@@ -91,7 +91,7 @@ RUN git clone --depth 1 https://github.com/Livox-SDK/Livox-SDK2.git /tmp/Livox-S
 #    `--ignore-installed blinker` works around apt's old python3-blinker that
 #    pip cannot cleanly uninstall.
 # -----------------------------------------------------------------------------
-RUN pip install --no-cache-dir --ignore-installed blinker \
+RUN pip install --no-cache-dir --timeout 300 --retries 10 --ignore-installed blinker \
         "numpy<2" \
         "scikit-learn>=1.4" \
         pin-pink \

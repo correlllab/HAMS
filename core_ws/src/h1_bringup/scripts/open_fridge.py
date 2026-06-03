@@ -204,8 +204,8 @@ def main():
     try:
         node.get_logger().info('=== Navigate to (0, 0, 0) ===')
         print(f"{node.nav_cli=}")
-        if not node.navigate_to(0.0, 0.0, yaw=0.0):
-            node.get_logger().error('Navigation failed')
+        # if not node.navigate_to(0.0, 0.0, yaw=0.0):
+        #     node.get_logger().error('Navigation failed')
 
 
         node.get_logger().info(f'=== Track object: {TARGET_QUERY} ===')

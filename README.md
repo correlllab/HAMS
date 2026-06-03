@@ -1,124 +1,138 @@
 # Humanoid_Simulation
 
-Humanoid sim stack for the Correll Lab H1 robot: MuJoCo, ROS 2, and Isaac Sim
-running in separate containers and sharing a CycloneDDS ROS domain.
+Simulation stack for the Correll Lab **Unitree H1‑2** humanoid. A physics
+simulator (MuJoCo, or Isaac Lab) publishes robot state + sensors, and a ROS 2
+(Humble) workspace runs perception, planning, and control. Each piece runs in
+its own Docker container and they talk over a shared **CycloneDDS** domain.
 
-## Layout
-
-- `docker/` — Dockerfiles, `docker-compose.yml`, and the build/run scripts.
-- `core_ws/` — ROS 2 workspace (bringup, IK, perception, safety). Submodules.
-- `h1_mujoco/` — MuJoCo simulator entry point and bridges.
-- `CL_Assets/` — URDF, MuJoCo XML, and Isaac USD assets.
-
-## Prerequisites
-
-- Docker (with Compose v2) and the NVIDIA Container Toolkit.
-- Git LFS (`git lfs install`) — required to fetch the large binary assets
-  (URDF meshes, MuJoCo XML, Isaac USD) tracked via LFS.
-- `git submodule update --init --recursive` to populate `core_ws/src`.
-
-A few things worth knowing before you run anything:
-
-- The build/run scripts can be invoked from any directory — they resolve their
-  own location, so `docker/scripts/docker_run.sh mujoco` works just as well
-  from `/tmp` as from the repo root.
-- Any non-zero `ROS_DOMAIN_ID` exported on the host is forwarded into the
-  MuJoCo and ROS containers. If it is unset or `0`, it is normalized to `1`
-  (domain 0 is reserved for the real robot).
-- Isaac currently overrides this and pins its DDS bridge to channel 1 — see
-  the Isaac section below.
-
-## Build the containers
-
-```bash
-docker/scripts/docker_build.sh             # all three
-docker/scripts/docker_build.sh mujoco ros  # subset
-docker/scripts/docker_build.sh isaac       # isaac only
+```
+┌──────────────────────── Docker, network_mode: host, nvidia ────────────────────────┐
+│                                                                                     │
+│  humanoid_sim_mujoco                         humanoid_ros                           │
+│  (h1_mujoco/h12_mujoco.py)                   (ros2 launch h1_bringup …)             │
+│    ├ rt/lowstate (DDS) ─────────────────►  frame_task_server   (arm IK, upper body) │
+│    ├ /realsense/head/*, /lidar, /tf, /clock ►  vp_node          (CLIP/SAM/Gemini)   │
+│    │                                         lowerbody_controller (walk / FAME RL)  │
+│    │                                         nav2 + slam, joint/robot_state, rviz   │
+│    │                                              │ upper cmd        │ leg cmd      │
+│    │                                              ▼                  ▼              │
+│    └ rt/lowcmd (DDS) ◄──────────────────────  safety_node  (merge + clip + estop)  │
+│        ▲ magpie grippers (/gripper/*)                                               │
+│                                                                                     │
+│  humanoid_sim_isaac  (alternative to mujoco) — Isaac Sim 5.1 + IsaacLab 2.3.2       │
+└─────────────────────────────────────────────────────────────────────────────────── ┘
 ```
 
-The MuJoCo and ROS images both inherit from `humanoid_sim_base`, which is
-built first automatically when either profile is selected. Isaac is
-self-contained and does not use the base.
+The MuJoCo and Isaac containers are **interchangeable** physics backends; you run
+one or the other, never both. Everything shares `ROS_DOMAIN_ID` (default `1`;
+`0` is reserved for the real robot).
 
-## Run the MuJoCo container
+## Repository layout
+
+| Path | What it is |
+|------|------------|
+| `docker/` | `BaseDockerfile` + `{Mujoco,Ros,Isaac}Dockerfile`, `docker-compose.yml`, and `scripts/` (`docker_build.sh`, `docker_run.sh`, `launch_*.sh`). |
+| `h1_mujoco/` ⊂ | MuJoCo sim: `h12_mujoco.py` (entry), `mujoco_ros_bridge.py` (camera/lidar/TF/`/clock`), `unitree_interface.py` (`rt/lowstate`↔`rt/lowcmd` DDS), `magpie_hand_bridge.py`, `scene_builder.py` (Robocasa kitchen). |
+| `CL_isaaclab_sim/` ⊂ | Isaac Lab tasks + `sim_main.py` (alternative backend). |
+| `CL_Assets/` ⊂ | Robot URDF (`ros_assets/h1_2_magpie_ros.urdf`), MuJoCo XML (`mujoco_assets/h1_2_magpie.xml`), meshes, scene/object assets. |
+| `core_ws/` | The ROS 2 workspace — `src/` (below), plus `build/`/`install/`/`log/`. |
+| `container_cache/` | Persists `msgs_ws` build artifacts across `--rm` container runs. |
+
+`⊂` = git submodule. Most `core_ws/src` packages are submodules too:
+
+| `core_ws/src/` package | Role |
+|------------------------|------|
+| `h1_bringup` | Top-level launch (`h1_sim_bringup.launch.py`), nav launch, and tasks (`scripts/open_fridge.py`, `slider_debugger.py`). *In‑repo.* |
+| `h12_ros2_controller` ⊂ | Arm control: `frame_task_server` (Pink differential IK + QP) on the `/frame_task` action; joint_state_publisher. |
+| `h12_ros2_model` ⊂ | Robot description helper. |
+| `h12_lowerbody_controller` | **Lower-body RL** — walking + FAME standing/squat policies, the switchable controller (see below). *In‑repo.* |
+| `h12_safety_layer` ⊂ | Merges lower (legs) + upper (torso/arms) commands → `rt/lowcmd`; clipping + e‑stop. |
+| `vision_pipeline` ⊂ | CLIP/SAM2/SAM3 + Gemini perception; `/vp_*` services. |
+| `custom_ros_messages`, `magpie_msgs` ⊂ | IDL: `FrameTask` action, `Query`/`UpdateBeliefs` srvs, gripper msgs. |
+| `unitree_ros2` ⊂, `livox_ros_driver2` ⊂, `FAST_LIO` | Unitree DDS msgs (`LowState`/`LowCmd`), Livox driver, LiDAR‑inertial SLAM. |
+
+## Docker images
+
+`humanoid_sim_base` (CUDA 12.2 / Ubuntu 22.04 / ROS Humble / CycloneDDS 0.10.x
+from source / torch cu130 / pin·pink·mink) is the shared base for **mujoco** and
+**ros**. **isaac** is self‑contained (conda Python 3.11, Isaac Sim 5.1).
+
+## Quickstart
+
+**Prerequisites:** Docker + Compose v2, NVIDIA Container Toolkit, `git lfs install`,
+and `git submodule update --init --recursive`. The vision pipeline needs a
+`core_ws/src/vision_pipeline/vision_pipeline/API_KEYS.py` containing
+`GEMINI_KEY = "..."` (untracked — add your own).
 
 ```bash
-docker/scripts/docker_run.sh mujoco            # windowed viewer
-docker/scripts/docker_run.sh mujoco --headless # no DISPLAY / SSH / CI
-docker/scripts/docker_run.sh mujoco bash       # drop to a shell instead
+# 1. build (base is built automatically for mujoco/ros)
+docker/scripts/docker_build.sh mujoco ros        # or: isaac, or no args = all
 
-# pick a custom ROS domain (e.g. several devs on one network)
-ROS_DOMAIN_ID=42 docker/scripts/docker_run.sh mujoco
-```
+export ROS_DOMAIN_ID=1                            # match across all terminals
 
-Once it's up, MuJoCo publishes `rt/lowstate` over CycloneDDS plus
-`/head/color/image_raw`, `/head/depth/image_raw`, `/head/color/camera_info`,
-`/lidar/points`, and `/tf` on the chosen ROS domain (default `1`).
+# 2. terminal A — physics sim (start first so /clock is publishing)
+docker/scripts/docker_run.sh mujoco              # windowed; --headless for no GUI
 
-## Run the ROS container and bringup
-
-The ROS launcher only builds the workspace and drops to a shell, so bringup
-is a manual step. Open two terminals and make sure both see the same
-`ROS_DOMAIN_ID` — export it once in your shell or prefix each invocation:
-
-```bash
-export ROS_DOMAIN_ID=1   # any non-zero value, but match across terminals
-
-# terminal A — start MuJoCo first so /clock is publishing
-docker/scripts/docker_run.sh mujoco
-
-# terminal B — ROS workspace shell (auto-builds core_ws on first run)
+# 3. terminal B — ROS workspace shell (auto-builds core_ws on first run), then bringup
 docker/scripts/docker_run.sh ros
-
-# inside the ROS container
-ros2 launch h1_bringup h1_sim_bringup.launch.py
+ros2 launch h1_bringup h1_sim_bringup.launch.py   # args: use_rviz/use_sliders/use_nav/lowerbody_policy
 ```
 
-Bringup starts `joint_state_publisher`, `robot_state_publisher`, the
-`frame_task_server` IK solver, the `safety_node`, and `rviz2`.
+Scripts resolve their own path (run from anywhere). `ROS_DOMAIN_ID` of `0`/unset
+is normalized to `1`. Run `docker/scripts/docker_run.sh mujoco bash` to drop to a
+shell instead of auto-launching.
 
-## Isaac container — WIP / TODO
+## Lower-body RL control
 
-The Isaac profile builds and runs the same way as the others:
+The legs are driven by a TorchScript RL policy. `h12_lowerbody_controller` wraps
+this as a **switchable controller** at 50 Hz that publishes leg PD setpoints to
+the safety layer (`/safety/lowcmd_lower_in`); the arms come from the IK
+(`frame_task_server`).
 
-```bash
-docker/scripts/docker_build.sh isaac
-docker/scripts/docker_run.sh  isaac
-```
+**Policies** (`policies/<name>/` holds weights + `*.yaml`):
+- `walk` — locomotion policy (velocity command via `/cmd_vel`).
+- `fame` — RMA standing/squatting policy (env-factor encoder + history); base
+  height via `/lowerbody/squat_cmd`. Trimmed inference encoder lives in
+  `h12_lowerbody_controller/rma/`.
 
-The launcher is `docker/scripts/launch_isaac.sh`. Task selection, asset
-paths, and the OmniGraph DDS bridge are not yet documented here. Note that
-the bridge currently `unset`s `ROS_DOMAIN_ID` and pins itself to channel 1
-regardless of the host setting — bridging to a non-default domain is a
-known gap.
+**Operating model** — the bringup runs `lowerbody_controller_node`:
+1. Robot starts **held by the elastic band, idle** (`lowerbody_policy:=none`).
+2. **Start a policy** (releases the band once `frame_task` is ready, then engages):
+   ```bash
+   ros2 service call /lowerbody/start_fame std_srvs/srv/Trigger    # stand
+   ros2 service call /lowerbody/start_walk std_srvs/srv/Trigger    # walk
+   ```
+3. **Switching** is gated — it commits only when the robot is standing still and
+   upright, resetting the incoming policy for a clean handover.
 
-## Troubleshooting
-
-- X11 / GUI: run `xhost +local:docker` once per session if rviz, the MuJoCo
-  viewer, or the slider GUI fail to open.
-- Talking to the sim from the host (`ros2 topic list`, standalone `rviz2`):
-  export the same non-zero `ROS_DOMAIN_ID` you used for the container.
-- For a clean rebuild of the message workspace, wipe
-  `container_cache/msgs_ws/` on the host before relaunching.
+Status on `/lowerbody/active_policy`; `/lowerbody/set_policy` (String) is an
+equivalent topic. Set `lowerbody_policy:=fame` to auto-engage at launch instead
+of starting idle. `walking_node` / `fame_node` are standalone single-policy
+nodes; `reference/standalone_fame_test.py` is a no‑ROS MuJoCo regression harness.
 
 ## Working example — open the fridge
 
-End-to-end run of the fridge-opening demo across three terminals. Export the
-same non-zero `ROS_DOMAIN_ID` in every terminal.
+The robot can stay band-held (stable for manipulation) while the demo runs.
+Match `ROS_DOMAIN_ID` in every terminal.
 
 ```bash
-export ROS_DOMAIN_ID=1   # match across all terminals
-
-# terminal A — MuJoCo (start first so /clock is publishing)
-docker/scripts/docker_run.sh mujoco
-
-# terminal B — ROS workspace shell, then launch bringup
-docker/scripts/docker_run.sh ros
-ros2 launch h1_bringup h1_sim_bringup.launch.py
-
-# terminal C — exec into the running ROS container and run the demo
+# terminal A — MuJoCo;  terminal B — ROS bringup (as in Quickstart)
+# terminal C — run the demo
 docker exec -it humanoid_sim_ros bash
-source /opt/ros/humble/setup.bash
-source /home/code/core_ws/install/setup.bash
 ros2 run h1_bringup open_fridge.py
 ```
+
+`open_fridge.py`: navigate to the fridge (Nav2) → query the handle
+(`vision_pipeline`, Gemini) → reach + grasp + pull (`/frame_task` IK + gripper).
+
+## Isaac container — WIP
+
+`docker/scripts/docker_run.sh isaac` runs `launch_isaac.sh` (Isaac Sim 5.1 +
+IsaacLab 2.3.2). Its OmniGraph DDS bridge currently pins itself to domain 1
+regardless of the host setting — non-default-domain bridging is a known gap.
+
+## Troubleshooting
+
+- **GUI** (rviz / MuJoCo viewer / sliders won't open): `xhost +local:docker` once per session.
+- **Host can't see sim topics:** export the same non-zero `ROS_DOMAIN_ID`.
+- **Clean message-workspace rebuild:** delete `container_cache/msgs_ws/` before relaunching.

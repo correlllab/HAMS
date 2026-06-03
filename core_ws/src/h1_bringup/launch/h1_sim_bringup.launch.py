@@ -49,7 +49,10 @@ def generate_launch_description():
         DeclareLaunchArgument('use_rviz', default_value='true'),
         DeclareLaunchArgument('use_sliders', default_value='true'),
         DeclareLaunchArgument('use_nav', default_value='true'),
-        DeclareLaunchArgument('lowerbody_policy', default_value='fame'),
+        # 'none' = robot starts held by the elastic band, idle, until a policy is
+        # started via /lowerbody/start_<walk|fame> (or set active_policy to
+        # auto-engage one at launch).
+        DeclareLaunchArgument('lowerbody_policy', default_value='none'),
         DeclareLaunchArgument('rviz_config', default_value=default_rviz),
 
         nav_launch,
@@ -122,8 +125,8 @@ def generate_launch_description():
         # — standing still, arms home — before committing the switch).
         Node(
             package='h12_lowerbody_controller',
-            executable='lowerbody_controller_node',
-            name='lowerbody_controller_node',
+            executable='fame_node',
+            name='fame_node',
             parameters=[sim_time_param, {'active_policy': LaunchConfiguration('lowerbody_policy')}],
             output='screen',
         ),

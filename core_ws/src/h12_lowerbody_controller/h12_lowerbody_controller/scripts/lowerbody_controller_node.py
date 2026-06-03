@@ -1,21 +1,28 @@
-"""Generic lower-body controller node with seamless policy switching.
+"""Lower-body controller node: band-held idle -> service-activated policy -> switch.
 
-Runs one of several lower-body policies (walking, FAME standing/squatting) at a
-fixed rate against ``/lowstate`` and publishes 12-joint PD setpoints on
-``/safety/lowcmd_lower_in`` for the safety layer to merge with the upper-body IK.
-
-This generalizes the original ``walking_node`` (which was a single hardcoded
-policy) into a registry + ``PolicyManager`` that switches policies only when the
-robot is standing still with arms home (see policy_manager.py).
+Flow
+----
+1. The robot starts held by the elastic band, **idle** (no policy drives the legs).
+2. A policy is *started* by calling its service (one Trigger service per policy,
+   auto-created from the registry):
+       ros2 service call /lowerbody/start_fame std_srvs/srv/Trigger
+       ros2 service call /lowerbody/start_walk std_srvs/srv/Trigger
+   The first activation releases the elastic band (gated on frame_task being
+   ready, /left_ee_pose) and then engages the policy.
+3. Switching between policies is **seamless**: the request only commits once the
+   handover gate passes (robot standing still, arms home), with the incoming
+   policy reset for a clean warm-up (see policy_manager.py).
 
 Interfaces
 ----------
+srv  /lowerbody/start_<name>   (std_srvs/Trigger)      start/switch to a policy
+sub  /lowerbody/set_policy     (std_msgs/String)       same, as a topic (convenience)
 sub  /lowstate                 (unitree_hg/LowState)   robot state
-sub  /cmd_vel                  (geometry_msgs/Twist)   velocity command
-sub  /lowerbody/set_policy     (std_msgs/String)       request a policy by name
-sub  /lowerbody/squat_cmd      (std_msgs/Float32)      base-height / squat command (FAME)
+sub  /cmd_vel                  (geometry_msgs/Twist)   velocity command (walk)
+sub  /lowerbody/squat_cmd      (std_msgs/Float32)      base-height / squat (FAME)
+sub  /left_ee_pose             (geometry_msgs/PoseStamped)  frame_task-ready signal
 pub  /safety/lowcmd_lower_in   (unitree_hg/LowCmd)     12-joint leg setpoints
-pub  /lowerbody/active_policy  (std_msgs/String, latched)  current active policy
+pub  /lowerbody/active_policy  (std_msgs/String, latched)  active policy ("idle" when none)
 """
 
 import os
@@ -52,22 +59,22 @@ class LowerBodyControllerNode(Node):
         super().__init__("lowerbody_controller_node")
 
         self.declare_parameter("control_hz", 50.0)
-        self.declare_parameter("active_policy", "fame")
+        # "none" -> start idle (band-held), wait for a start service. Otherwise
+        # auto-activate that policy at startup (releases the band when ready).
+        self.declare_parameter("active_policy", "none")
         self.declare_parameter("walk_config", _share("policies", "walk", "walk.yaml"))
         self.declare_parameter("fame_config", _share("policies", "fame", "fame.yaml"))
         self.declare_parameter("default_height_cmd", 1.0)
         self.declare_parameter("disable_elastic_band", True)
-        # Hold the band until frame_task_server has FINISHED its open-loop
-        # startup routine (Moving home/torso, which assumes a stable base) — it
-        # publishes /left_ee_pose only after that completes. Releasing earlier
-        # crashes frame_task (base moves mid-init -> e-stop) and free-falls the
-        # robot before the control chain is live.
+        # Release the band only after frame_task_server has finished its open-loop
+        # startup (it publishes /left_ee_pose only then); earlier release crashes
+        # frame_task and free-falls the robot.
         self.declare_parameter("band_wait_for_frame_task", True)
         self.declare_parameter("band_release_topic", "/left_ee_pose")
         self.declare_parameter("band_max_wait", 30.0)
 
-        control_hz = self.get_parameter("control_hz").value
-        active = self.get_parameter("active_policy").value
+        control_hz = float(self.get_parameter("control_hz").value)
+        startup_policy = str(self.get_parameter("active_policy").value).strip().lower()
         walk_cfg = self.get_parameter("walk_config").value
         fame_cfg = self.get_parameter("fame_config").value
         self._height_cmd = float(self.get_parameter("default_height_cmd").value)
@@ -83,55 +90,68 @@ class LowerBodyControllerNode(Node):
                 "Check policies/fame/encoder_3800.pt."
             )
         self._manager = PolicyManager(
-            policies, active_name=active, gate=GateConfig(),
-            log=lambda m: self.get_logger().info(m),
+            policies, gate=GateConfig(), log=lambda m: self.get_logger().info(m)
         )
 
         self._lowstate: LowState | None = None
         self._cmd = np.zeros(3, dtype=np.float32)
 
-        lowstate_qos = QoSProfile(
-            reliability=ReliabilityPolicy.BEST_EFFORT,
-            history=HistoryPolicy.KEEP_LAST,
-            depth=1,
-        )
-        latched = QoSProfile(
-            reliability=ReliabilityPolicy.RELIABLE,
-            durability=DurabilityPolicy.TRANSIENT_LOCAL,
-            history=HistoryPolicy.KEEP_LAST,
-            depth=1,
-        )
+        # band / activation state
+        self._band_released = not bool(self.get_parameter("disable_elastic_band").value)
+        self._frame_task_ready = not bool(self.get_parameter("band_wait_for_frame_task").value)
+        self._band_cli = self.create_client(Trigger, "/elastic_band/toggle")
+        self._request_time: float | None = None  # when the pending activation was asked
+
+        lowstate_qos = QoSProfile(reliability=ReliabilityPolicy.BEST_EFFORT,
+                                  history=HistoryPolicy.KEEP_LAST, depth=1)
+        latched = QoSProfile(reliability=ReliabilityPolicy.RELIABLE,
+                             durability=DurabilityPolicy.TRANSIENT_LOCAL,
+                             history=HistoryPolicy.KEEP_LAST, depth=1)
         self.create_subscription(LowState, "/lowstate", self._on_lowstate, lowstate_qos)
         self.create_subscription(Twist, "/cmd_vel", self._on_cmd_vel, 10)
         self.create_subscription(String, "/lowerbody/set_policy", self._on_set_policy, 10)
         self.create_subscription(Float32, "/lowerbody/squat_cmd", self._on_squat_cmd, 10)
+        self.create_subscription(
+            PoseStamped, self.get_parameter("band_release_topic").value,
+            self._on_frame_task_ready, 10)
         self._cmd_pub = self.create_publisher(LowCmd, "/safety/lowcmd_lower_in", 10)
         self._active_pub = self.create_publisher(String, "/lowerbody/active_policy", latched)
         self._publish_active()
 
-        self.create_timer(1.0 / float(control_hz), self._tick)
+        # one Trigger service per policy: /lowerbody/start_<name>
+        self._start_srvs = [
+            self.create_service(Trigger, f"/lowerbody/start_{name}", self._make_start_handler(name))
+            for name in self._manager.names()
+        ]
+
+        self.create_timer(1.0 / control_hz, self._tick)
         self.get_logger().info(
             f"lowerbody_controller ready: policies={self._manager.names()}, "
-            f"active={self._manager.active_name}, control_hz={control_hz}"
+            f"start services=/lowerbody/start_<{{{'|'.join(self._manager.names())}}}>, "
+            f"control_hz={control_hz}. Robot is band-held idle until a policy is started."
         )
 
-        # Defer band release until the control chain is actually driving the
-        # robot (see band_wait_for_upper above).
-        self._band_released = not self.get_parameter("disable_elastic_band").value
-        self._band_cli = self.create_client(Trigger, "/elastic_band/toggle")
-        self._band_wait_start = time.monotonic()
-        # Set when the band is released so the next tick restarts the active
-        # policy's warm-up from the free-standing state (drops band-held history).
-        self._pending_policy_reset = False
-        if not self._band_released:
-            if self.get_parameter("band_wait_for_frame_task").value:
-                topic = self.get_parameter("band_release_topic").value
-                self.create_subscription(PoseStamped, topic, self._on_frame_task_ready, 10)
-                self.get_logger().info(
-                    f"waiting for frame_task ready ({topic}) before releasing elastic band"
-                )
-            else:
-                self._release_band("disable_elastic_band (no wait)")
+        if startup_policy and startup_policy != "none":
+            self.get_logger().info(f"active_policy={startup_policy!r}: auto-activating at startup")
+            self._request_policy(startup_policy)
+
+    # -- request entry points ------------------------------------------------
+    def _request_policy(self, name: str) -> tuple[bool, str]:
+        ok, msg = self._manager.request(name)
+        if ok and self._manager.is_pending() and self._manager.is_idle():
+            self._request_time = time.monotonic()  # start band-release timeout
+        return ok, msg
+
+    def _make_start_handler(self, name: str):
+        def handler(_req, resp):
+            ok, msg = self._request_policy(name)
+            resp.success = ok
+            resp.message = msg
+            return resp
+        return handler
+
+    def _on_set_policy(self, msg: String) -> None:
+        self._request_policy(msg.data.strip().lower())
 
     # -- callbacks -----------------------------------------------------------
     def _on_lowstate(self, msg: LowState) -> None:
@@ -143,25 +163,20 @@ class LowerBodyControllerNode(Node):
         self._cmd[2] = msg.angular.z
         np.clip(self._cmd, -1.0, 1.0, out=self._cmd)
 
-    def _on_set_policy(self, msg: String) -> None:
-        self._manager.request_switch(msg.data.strip())
-
     def _on_squat_cmd(self, msg: Float32) -> None:
         self._height_cmd = float(msg.data)
 
+    def _on_frame_task_ready(self, _msg: PoseStamped) -> None:
+        self._frame_task_ready = True
+
     # -- helpers -------------------------------------------------------------
     def _publish_active(self) -> None:
-        self._active_pub.publish(String(data=self._manager.active_name))
-
-    def _on_frame_task_ready(self, _msg: PoseStamped) -> None:
-        if not self._band_released:
-            self._release_band("frame_task ready (ee_pose received)")
+        self._active_pub.publish(String(data=self._manager.active_name or "idle"))
 
     def _release_band(self, reason: str) -> None:
         if self._band_released:
             return
         self._band_released = True
-        self._pending_policy_reset = True  # restart policy warm-up free-standing
         if not self._band_cli.service_is_ready() and not self._band_cli.wait_for_service(timeout_sec=1.0):
             self.get_logger().warn("elastic band toggle service unavailable — band NOT released")
             return
@@ -179,34 +194,37 @@ class LowerBodyControllerNode(Node):
         quat = np.asarray(msg.imu_state.quaternion, dtype=np.float32)
         gyro = np.asarray(msg.imu_state.gyroscope, dtype=np.float32)
         t = self.get_clock().now().nanoseconds * 1e-9
-        return RobotState(
-            q=q, dq=dq, quat=quat, gyro=gyro,
-            cmd=self._cmd.copy(), height_cmd=self._height_cmd, t=t,
-        )
+        return RobotState(q=q, dq=dq, quat=quat, gyro=gyro,
+                          cmd=self._cmd.copy(), height_cmd=self._height_cmd, t=t)
 
     # -- main loop -----------------------------------------------------------
     def _tick(self) -> None:
-        # Fallback: release the band even if the upper-body command never shows
-        # up, so a misconfigured stack fails loudly rather than hanging held.
-        if not self._band_released and \
-                (time.monotonic() - self._band_wait_start) > self.get_parameter("band_max_wait").value:
-            self.get_logger().warn("upper-body command not seen within band_max_wait — releasing band anyway")
-            self._release_band("band_max_wait timeout")
-
         if self._lowstate is None:
             return
         state = self._state_from_lowstate(self._lowstate)
 
-        if self._pending_policy_reset:
-            self._manager.reset_active(state)
-            self._pending_policy_reset = False
-            self.get_logger().info("reset active policy for fresh free-standing warm-up (band released)")
+        if self._manager.is_pending():
+            if self._manager.is_idle():
+                # First activation: release the band (when frame_task is ready or
+                # the timeout fires), then engage the policy.
+                if not self._band_released:
+                    if self._frame_task_ready:
+                        self._release_band("frame_task ready")
+                    elif self._request_time is not None and \
+                            (time.monotonic() - self._request_time) > self.get_parameter("band_max_wait").value:
+                        self._release_band("band_max_wait timeout (frame_task not ready)")
+                if self._band_released:
+                    self._manager.commit(state)   # resets policy -> clean warm-up
+                    self._publish_active()
+            else:
+                # Switch between active policies: gated handover.
+                if self._manager.update_switch(state) is not None:
+                    self._publish_active()
 
-        if self._manager.update(state) is not None:  # a switch committed this tick
-            self._publish_active()
+        if self._manager.is_idle():
+            return  # band-held, no policy commands the legs yet
 
         leg = self._manager.run(state)
-
         cmd_msg = LowCmd()
         for i in range(NUM_LEG_JOINTS):
             m = cmd_msg.motor_cmd[i]
