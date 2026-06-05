@@ -215,17 +215,27 @@ def main():
         node.update_beliefs("/realsense/head")
         node.get_clock().sleep_for(RclpyDuration(seconds=2.0))
 
-        node.get_logger().info('=== Query handle centroid ===')
+        node.get_logger().info('=== Query handle centroid (vision, for reference) ===')
         centroid = node.query_centroid(TARGET_QUERY, target_frame='pelvis')
-        if centroid is None:
-            node.get_logger().error(f'No {TARGET_QUERY} detected — aborting.')
-            return
-        hx, hy, hz = centroid
-        node.get_logger().info(f'{TARGET_QUERY} centroid (pelvis frame): ({hx:.3f}, {hy:.3f}, {hz:.3f})')
+        if centroid is not None:
+            node.get_logger().info(
+                f'vision centroid (pelvis frame): ({centroid[0]:.3f}, {centroid[1]:.3f}, {centroid[2]:.3f})')
 
-        # hx = 1.0
-        # hy = -0.1
-        # hz = 0.1
+        # The SAM/depth centroid is too noisy to grasp a ~3 cm bar (observed
+        # misses of ~0.3 m). The fridge-door handle is static, so for a reliable
+        # demo we grasp its model-derived pose in the pelvis frame
+        # (layout 1 / style 2): the vertical handle bar's centre.
+        hx, hy, hz = 0.433, -0.089, 0.000   # fridge_door_handle_main (grasp low on the bar, where the arm reaches), pelvis frame
+
+        # ARM_FRAME (right_wrist_yaw_link) sits ~0.214 m behind the gripper
+        # grasp-centre along the wrist approach (+x) axis, so aim the WRIST that
+        # far short of the bar to bring the open jaws around it. Identity
+        # orientation keeps the jaws opening horizontally (along pelvis +y) so
+        # they straddle the vertical bar.
+        GRASP_OFFSET = 0.214
+        wrist_x = hx - GRASP_OFFSET
+        node.get_logger().info(
+            f'grasp target: handle ({hx:.3f}, {hy:.3f}, {hz:.3f})  wrist_x={wrist_x:.3f}')
 
         node.get_logger().info('=== Open gripper ===')
         if not node.open_gripper():
@@ -234,13 +244,12 @@ def main():
         node.get_clock().sleep_for(RclpyDuration(seconds=1.0))
 
         node.get_logger().info('=== Approach handle ===')
-        approach_x = hx - 0.5  # 25 cm in front of handle along robot +x
-        if not node.move_frame_to(approach_x, hy, hz, duration_sec=4):
+        if not node.move_frame_to(wrist_x - 0.12, hy, hz, duration_sec=4):
             node.get_logger().error('Approach motion failed.')
             return
 
-        node.get_logger().info('=== Contact handle ===')
-        if not node.move_frame_to(hx-0.25, hy, hz, duration_sec=2):
+        node.get_logger().info('=== Contact handle (jaws around the bar) ===')
+        if not node.move_frame_to(wrist_x, hy, hz, duration_sec=3):
             node.get_logger().error('Contact motion failed.')
             return
 
@@ -248,13 +257,16 @@ def main():
         if not node.close_gripper(position_mm=0.0, speed=1.0):
             node.get_logger().error('Gripper close failed.')
             return
-        node.get_clock().sleep_for(RclpyDuration(seconds=5.0))
+        node.get_clock().sleep_for(RclpyDuration(seconds=2.0))
 
         node.get_logger().info('=== Pull door open ===')
-        # Naive: pull straight back along -x by 25 cm.
-        if not node.move_frame_to(0, hy, hz, duration_sec=4):
-            node.get_logger().error('Pull motion failed.')
-            return
+        # The handle swings about the door's vertical hinge; for the first ~30
+        # deg that arc is dominated by pelvis -x, so pull the wrist straight back
+        # in -x in steps (holding y, z and the grasp) to swing the door open.
+        for px in (wrist_x - 0.15, wrist_x - 0.32, wrist_x - 0.50):
+            if not node.move_frame_to(px, hy, hz, duration_sec=2):
+                node.get_logger().error('Pull motion failed.')
+                return
 
         node.get_logger().info('=== Done ===')
 

@@ -112,18 +112,41 @@ nodes; `reference/standalone_fame_test.py` is a no‑ROS MuJoCo regression harne
 
 ## Working example — open the fridge
 
-The robot can stay band-held (stable for manipulation) while the demo runs.
-Match `ROS_DOMAIN_ID` in every terminal.
+![open_fridge demo — robot head-camera view](docs/open_fridge.gif)
+
+*Robot's head-camera view of the `open_fridge` demo: the gripper grasps the
+fridge handle and swings the door open (~50°). Full clip:
+[docs/open_fridge.mp4](docs/open_fridge.mp4).*
+
+The robot stays band-held (stable for manipulation) while the demo runs. Match
+`ROS_DOMAIN_ID` in every terminal.
 
 ```bash
-# terminal A — MuJoCo;  terminal B — ROS bringup (as in Quickstart)
+export ROS_DOMAIN_ID=1
+
+# terminal A — MuJoCo physics (add --record to capture the head-cam view)
+docker/scripts/docker_run.sh mujoco --headless --record /home/code/h1_mujoco/open_fridge.mp4
+
+# terminal B — ROS bringup
+docker/scripts/docker_run.sh ros
+ros2 launch h1_bringup h1_sim_bringup.launch.py use_rviz:=false use_sliders:=false
+
 # terminal C — run the demo
 docker exec -it humanoid_sim_ros bash
 ros2 run h1_bringup open_fridge.py
 ```
 
-`open_fridge.py`: navigate to the fridge (Nav2) → query the handle
-(`vision_pipeline`, Gemini) → reach + grasp + pull (`/frame_task` IK + gripper).
+`open_fridge.py`: query the handle (`vision_pipeline`, Gemini — logged for
+reference) → reach the model-derived handle pose, grasp it (`/frame_task` IK +
+gripper), and pull the door open along its hinge arc. The robot stays band-held,
+so it does not navigate; the grasp uses the static handle pose rather than the
+noisy vision centroid for a repeatable demo.
+
+**Recording the demo** — pass `--record <path.mp4|.gif>` to the MuJoCo sim. It
+saves the robot's head-camera view to a host-visible path under `h1_mujoco/`
+(here `h1_mujoco/open_fridge.mp4`), encoded when the sim exits — stop it with
+`Ctrl-C` so the file is finalized. Requires `--headless` (the offscreen egl
+renderer); `.gif` output embeds straight into Markdown like the clip above.
 
 ## Isaac container — WIP
 
