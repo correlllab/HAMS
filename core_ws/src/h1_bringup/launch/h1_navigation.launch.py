@@ -82,7 +82,11 @@ def generate_launch_description():
             # Height band in pelvis frame. Tight enough to exclude the
             # robot's own head/neck (above) and feet (well below); wide
             # enough to catch knee-to-chest height obstacles at distance.
-            {'min_height': -0.55},
+            # Pelvis sits ~1.03 m above the floor, so -0.90 collapses returns
+            # from ~0.13 m up (was -0.55 ≈ 0.48 m / knee height) to catch low
+            # shelves and table legs/aprons. Lower bound is a floor-clearance
+            # margin: drop further only until the floor/own-feet start marking.
+            {'min_height': -0.90},
             {'max_height': 0.55},
             {'angle_min': -3.14159},
             {'angle_max': 3.14159},
@@ -93,7 +97,7 @@ def generate_launch_description():
             # every self-return (legs in mid-stride, arms hanging, torso)
             # while leaving close-but-not-on-robot obstacles visible.
             {'range_min': 0.6},
-            {'range_max': 3.0},
+            {'range_max': 6.0},
             {'use_inf': True},
             {'scan_time': 0.0333},
             {'transform_tolerance': 0.05},

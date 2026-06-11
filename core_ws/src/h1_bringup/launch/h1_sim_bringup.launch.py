@@ -110,7 +110,7 @@ def generate_launch_description():
             executable='safety_node',
             name='safety_node',
             parameters=[sim_time_param, ],
-            arguments=['--config', "default_safety_split.yaml"],
+            arguments=['--config', "sim_safety_split.yaml"],
             output='screen',
         ),
 
@@ -142,16 +142,16 @@ def generate_launch_description():
         # already past 5s makes get_clock().now() jump and trip the timeout
         # immediately, falling back to all-zero targets that drive the IK
         # toward unreachable poses inside the body.
-        TimerAction(
-            period=1.0,
-            actions=[
-                Node(
-                    package='h1_bringup',
-                    executable='slider_debugger.py',
-                    name='slider_debugger',
-                    output='screen',
-                    condition=IfCondition(LaunchConfiguration('use_sliders')),
-                ),
-            ],
-        ),
+        # TimerAction(
+        #     period=1.0,
+        #     actions=[
+        #         Node(
+        #             package='h1_bringup',
+        #             executable='slider_debugger.py',
+        #             name='slider_debugger',
+        #             output='screen',
+        #             condition=IfCondition(LaunchConfiguration('use_sliders')),
+        #         ),
+        #     ],
+        # ),
     ])

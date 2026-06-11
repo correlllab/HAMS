@@ -76,11 +76,20 @@ class FridgeOpener(Node):
         result = self._call(self.query_cli, req, 'Query')
         if not result or not result.success or not result.clouds:
             return None
-        cloud = result.clouds[0]
-        centroid = _centroid_from_cloud(cloud)
-        if centroid is None:
-            return None
-        return self._transform_point(centroid, cloud.header.frame_id, cloud.header.stamp, target_frame)
+        target = (0.0, 0.0, 0.1)
+        best = None
+        best_dist = None
+        for cloud in result.clouds:
+            centroid = _centroid_from_cloud(cloud)
+            transformed = self._transform_point(
+                centroid, cloud.header.frame_id, cloud.header.stamp, target_frame)
+            if transformed is None:
+                continue
+            dist = sum((a - b) ** 2 for a, b in zip(transformed, target))
+            if best_dist is None or dist < best_dist:
+                best_dist = dist
+                best = transformed
+        return best
 
     def _transform_point(self, xyz, source_frame, stamp, target_frame):
         pt = PointStamped()
@@ -202,10 +211,10 @@ def main():
     rclpy.init()
     node = FridgeOpener()
     try:
-        node.get_logger().info('=== Navigate to (0, 0, 0) ===')
-        print(f"{node.nav_cli=}")
-        if not node.navigate_to(0.0, 0.0, yaw=0.0):
-            node.get_logger().error('Navigation failed')
+        # node.get_logger().info('=== Navigate to (0, 0, 0) ===')
+        # print(f"{node.nav_cli=}")
+        # if not node.navigate_to(0.0, 0.0, yaw=0.0):
+        #     node.get_logger().error('Navigation failed')
 
 
         node.get_logger().info(f'=== Track object: {TARGET_QUERY} ===')
