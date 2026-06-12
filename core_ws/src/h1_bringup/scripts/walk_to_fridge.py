@@ -34,11 +34,25 @@ from unitree_hg.msg import LowState
 from open_fridge import FridgeOpener
 
 # --- tunables -------------------------------------------------------------
-WALK_SPEED = 0.4          # m/s commanded forward (cmd_vel linear.x)
-WALK_TIME = 6.5           # s of forward walking — dead-reckoned toward the counter
-HEADING_KP = 3.0          # rad/s per rad of yaw error (walk straight; open-loop drifts)
+WALK_SPEED = 0.4          # m/s commanded forward (cmd_vel linear.x) — open-loop fallback
+WALK_TIME = 6.5           # s of forward walking — open-loop fallback
+HEADING_KP = 3.0          # rad/s per rad of yaw error (open-loop fallback)
 STOP_SETTLE = 2.0         # s to stand still before switching policy
-FAME_SETTLE = 15.0        # s to let FAME fully stabilize the stand before requesting walk
+FAME_SETTLE = 5.0         # s to let FAME stabilize the stand before requesting walk
+
+# --- closed-loop navigation (ground-truth world->pelvis TF from the sim) ------
+# Goal = the manipulation spot in front of the fridge (world frame). FAST-LIO
+# odom diverges during the gait, so we navigate on the sim's ground-truth pose
+# (a stand-in for real odom/SLAM on hardware). P-control on /cmd_vel.
+NAV_GOAL = (4.25, -1.4, math.pi / 2.0)   # (x, y, yaw) world
+NAV_KP_LIN = 1.3          # cmd per metre of position error
+NAV_KP_YAW = 1.5          # cmd per rad of yaw error
+NAV_POS_TOL = 0.10        # m  — within this of the goal = arrived
+NAV_YAW_TOL = 0.12        # rad
+NAV_APPROACH_TOL = 0.30   # m  — switch from "drive toward" to fine-position
+NAV_VMAX = 0.45           # max commanded forward/lateral (cmd_vel is clipped to 1)
+NAV_WMAX = 0.50           # max commanded yaw rate
+NAV_TIMEOUT = 90.0        # s (longer for the cross-room diagonal)
 
 # Fridge-door handle in the pelvis frame once standing at the counter (same
 # pose the band-held open_fridge demo uses for spawn y=-1.4). Valid only if the
@@ -139,6 +153,75 @@ class WalkToFridge(FridgeOpener):
             rclpy.spin_once(self, timeout_sec=0.02)
             time.sleep(0.02)
 
+    def pelvis_world_pose(self):
+        """(x, y, yaw) of the pelvis in the world frame, from the sim's
+        ground-truth world->pelvis TF. None if the transform isn't available."""
+        try:
+            tf = self.tf_buffer.lookup_transform(
+                "world", "pelvis", rclpy.time.Time(),
+                timeout=RclpyDuration(seconds=0.3))
+        except Exception as e:
+            self.get_logger().warn(f"world->pelvis TF unavailable: {e}", once=True)
+            return None
+        t = tf.transform.translation
+        q = tf.transform.rotation
+        return (t.x, t.y, _yaw_from_quat([q.w, q.x, q.y, q.z]))
+
+    def walk_to_pose(self, gx, gy, gyaw):
+        """Closed-loop nav to a world goal, walking facing the direction of
+        travel (turn -> drive -> fine-position) on the ground-truth pelvis pose:
+          phase 1: aim at (gx,gy) and walk forward toward it,
+          phase 2: turn in place to the goal heading gyaw,
+          phase 3: fine forward/lateral/yaw P-control until within tolerance.
+        """
+        self.get_logger().info(f"nav -> world ({gx:.2f}, {gy:.2f}, yaw={gyaw:.2f})")
+        clamp = lambda v, lim: max(-lim, min(lim, v))
+        end = time.time() + NAV_TIMEOUT
+        phase = 1
+        self.get_logger().info("nav phase 1: drive toward goal")
+        dist = float("inf")
+        while time.time() < end:
+            rclpy.spin_once(self, timeout_sec=0.05)
+            p = self.pelvis_world_pose()
+            if p is None:
+                time.sleep(0.05)
+                continue
+            x, y, yaw = p
+            ex, ey = gx - x, gy - y
+            dist = math.hypot(ex, ey)
+            eyaw = _wrap(gyaw - yaw)
+            t = Twist()
+            if phase == 1:
+                if dist < NAV_APPROACH_TOL:
+                    phase = 2
+                    self.get_logger().info("nav phase 2: turn to goal yaw")
+                    continue
+                herr = _wrap(math.atan2(ey, ex) - yaw)        # heading toward the goal
+                # walk forward only while roughly aimed at the goal (cos gate)
+                t.linear.x = clamp(NAV_KP_LIN * dist, NAV_VMAX) * max(0.0, math.cos(herr))
+                t.angular.z = clamp(NAV_KP_YAW * herr, NAV_WMAX)
+            elif phase == 2:
+                if abs(eyaw) < NAV_YAW_TOL:
+                    phase = 3
+                    self.get_logger().info("nav phase 3: fine-position")
+                    continue
+                t.angular.z = clamp(NAV_KP_YAW * eyaw, NAV_WMAX)
+            else:  # phase 3 — nail the pose
+                if dist < NAV_POS_TOL and abs(eyaw) < NAV_YAW_TOL:
+                    self.get_logger().info(
+                        f"reached goal: dist={dist:.3f} m, eyaw={eyaw:.3f} rad")
+                    self.stop()
+                    return
+                bx = ex * math.cos(yaw) + ey * math.sin(yaw)
+                by = -ex * math.sin(yaw) + ey * math.cos(yaw)
+                t.linear.x = clamp(NAV_KP_LIN * bx, NAV_VMAX)
+                t.linear.y = clamp(NAV_KP_LIN * by, 0.3)
+                t.angular.z = clamp(NAV_KP_YAW * eyaw, NAV_WMAX)
+            self.cmd_pub.publish(t)
+            time.sleep(0.05)
+        self.get_logger().warn(f"nav timed out (phase {phase}, dist={dist:.3f} m)")
+        self.stop()
+
     def grasp_and_open(self):
         """Grasp the fridge handle, targeting its fixed world pose transformed
         into the CURRENT pelvis frame (sim ground-truth world->pelvis TF) so it
@@ -200,10 +283,14 @@ def main():
             node.get_logger().error("walk policy did not engage — aborting.")
             return
 
-        # 3. Walk to the fridge (open-loop, heading held).
-        node.get_logger().info("=== Walk to the fridge (open-loop) ===")
-        node.walk_forward(WALK_TIME, WALK_SPEED)
-        node.get_clock().sleep_for(RclpyDuration(seconds=STOP_SETTLE))
+        # 3. Walk to the fridge — closed-loop go-to-pose on the ground-truth
+        #    pelvis pose (corrects the open-loop drift/overshoot).
+        node.get_logger().info("=== Walk to the fridge (closed-loop nav) ===")
+        node.walk_to_pose(*NAV_GOAL)
+        # Switch to FAME promptly: at cmd=0 the walk policy marches in place and
+        # drifts the base, so don't dwell here before the handover (else the
+        # grasp pose shifts off the handle).
+        node.get_clock().sleep_for(RclpyDuration(seconds=0.3))
 
         # 4. Switch back to FAME to stand still for the grasp.
         node.get_logger().info("=== Switch back to FAME standing ===")
