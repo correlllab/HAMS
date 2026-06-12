@@ -49,6 +49,7 @@ def generate_launch_description():
         DeclareLaunchArgument('use_rviz', default_value='true'),
         DeclareLaunchArgument('use_sliders', default_value='true'),
         DeclareLaunchArgument('use_nav', default_value='true'),
+        DeclareLaunchArgument('use_skills', default_value='true'),
         DeclareLaunchArgument('rviz_config', default_value=default_rviz),
 
         nav_launch,
@@ -114,12 +115,26 @@ def generate_launch_description():
             output='screen',
         ),
 
+        
+        # Node(
+        #     package='h12_lowerbody_controller',
+        #     executable='walking_node',
+        #     name='walking_node',
+        #     parameters=[sim_time_param],
+        #     output='screen',
+        # ),
+
+        # h12_skills: serves the /skill/* atomic-skill actions (open_door,
+        # grasp, pick_place, ...). On startup it waits ~10s each on the vision
+        # pipeline services, the grippers, and the frame_task / nav action
+        # servers (all started above), then idles ready for goals.
         Node(
-            package='h12_lowerbody_controller',
-            executable='walking_node',
-            name='walking_node',
+            package='h12_skills',
+            executable='skills',
+            name='h12_skills',
             parameters=[sim_time_param],
             output='screen',
+            condition=IfCondition(LaunchConfiguration('use_skills')),
         ),
 
         Node(
@@ -142,16 +157,16 @@ def generate_launch_description():
         # already past 5s makes get_clock().now() jump and trip the timeout
         # immediately, falling back to all-zero targets that drive the IK
         # toward unreachable poses inside the body.
-        # TimerAction(
-        #     period=1.0,
-        #     actions=[
-        #         Node(
-        #             package='h1_bringup',
-        #             executable='slider_debugger.py',
-        #             name='slider_debugger',
-        #             output='screen',
-        #             condition=IfCondition(LaunchConfiguration('use_sliders')),
-        #         ),
-        #     ],
-        # ),
+        TimerAction(
+            period=1.0,
+            actions=[
+                Node(
+                    package='h1_bringup',
+                    executable='slider_debugger.py',
+                    name='slider_debugger',
+                    output='screen',
+                    condition=IfCondition(LaunchConfiguration('use_sliders')),
+                ),
+            ],
+        ),
     ])

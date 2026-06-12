@@ -16,17 +16,39 @@ running in separate containers and sharing a CycloneDDS ROS domain.
 - Git LFS (`git lfs install`) — required to fetch the large binary assets
   (URDF meshes, MuJoCo XML, Isaac USD) tracked via LFS.
 - `git submodule update --init --recursive` to populate `core_ws/src`.
+- Copy `docker/.env.example` to `docker/.env` and fill in your `GEMINI_API_KEY`
+  and `ROS_DOMAIN_ID` (see [Configuration](#configuration)).
 
 A few things worth knowing before you run anything:
 
 - The build/run scripts can be invoked from any directory — they resolve their
   own location, so `docker/scripts/docker_run.sh mujoco` works just as well
   from `/tmp` as from the repo root.
-- Any non-zero `ROS_DOMAIN_ID` exported on the host is forwarded into the
-  MuJoCo and ROS containers. If it is unset or `0`, it is normalized to `1`
-  (domain 0 is reserved for the real robot).
+- `ROS_DOMAIN_ID` is read from `docker/.env` and forwarded into the MuJoCo and
+  ROS containers. If it is unset or `0`, it is normalized to `1` (domain 0 is
+  reserved for the real robot).
 - Isaac currently overrides this and pins its DDS bridge to channel 1 — see
   the Isaac section below.
+
+## Configuration
+
+Runtime settings live in `docker/.env` (git-ignored — it holds your API key).
+Copy the template once and edit it; you never need to `export` these variables
+in your shell:
+
+```bash
+cp docker/.env.example docker/.env
+# then edit docker/.env:
+#   GEMINI_API_KEY=...   # https://aistudio.google.com/apikey
+#   ROS_DOMAIN_ID=1      # any non-zero value; 0 is reserved for the real robot
+```
+
+Both `docker compose` and `docker/scripts/docker_run.sh` load `docker/.env`
+automatically, so every container and every terminal sees the same values.
+`ROS_DOMAIN_ID` is passed to all containers; `GEMINI_API_KEY` is passed only to
+the `ros` container (the vision pipeline's Gemini backbone and `h12_skills` need
+it). Because the run scripts `source` the file, `docker/.env` takes precedence
+over any value left exported in your shell.
 
 ## Build the containers
 
@@ -47,8 +69,8 @@ docker/scripts/docker_run.sh mujoco            # windowed viewer
 docker/scripts/docker_run.sh mujoco --headless # no DISPLAY / SSH / CI
 docker/scripts/docker_run.sh mujoco bash       # drop to a shell instead
 
-# pick a custom ROS domain (e.g. several devs on one network)
-ROS_DOMAIN_ID=42 docker/scripts/docker_run.sh mujoco
+# to use a custom ROS domain (e.g. several devs on one network),
+# set ROS_DOMAIN_ID in docker/.env (see Configuration above)
 ```
 
 Once it's up, MuJoCo publishes `rt/lowstate` over CycloneDDS plus
@@ -58,12 +80,12 @@ Once it's up, MuJoCo publishes `rt/lowstate` over CycloneDDS plus
 ## Run the ROS container and bringup
 
 The ROS launcher only builds the workspace and drops to a shell, so bringup
-is a manual step. Open two terminals and make sure both see the same
-`ROS_DOMAIN_ID` — export it once in your shell or prefix each invocation:
+is a manual step. `ROS_DOMAIN_ID` (all containers) and `GEMINI_API_KEY` (the
+`ros` container, for the vision pipeline's Gemini backbone and `h12_skills`)
+both come from `docker/.env`, so there is nothing to export — just open two
+terminals:
 
 ```bash
-export ROS_DOMAIN_ID=1   # any non-zero value, but match across terminals
-
 # terminal A — start MuJoCo first so /clock is publishing
 docker/scripts/docker_run.sh mujoco
 
@@ -96,19 +118,19 @@ known gap.
 
 - X11 / GUI: run `xhost +local:docker` once per session if rviz, the MuJoCo
   viewer, or the slider GUI fail to open.
-- Talking to the sim from the host (`ros2 topic list`, standalone `rviz2`):
-  export the same non-zero `ROS_DOMAIN_ID` you used for the container.
+- Talking to the sim from the host (`ros2 topic list`, standalone `rviz2`)
+  bypasses the run scripts, so it won't pick up `docker/.env` on its own —
+  load it into your shell first: `set -a; source docker/.env; set +a`.
 - For a clean rebuild of the message workspace, wipe
   `container_cache/msgs_ws/` on the host before relaunching.
 
 ## Working example — open the fridge
 
-End-to-end run of the fridge-opening demo across three terminals. Export the
-same non-zero `ROS_DOMAIN_ID` in every terminal.
+End-to-end run of the fridge-opening demo across three terminals. All three
+share `ROS_DOMAIN_ID` from `docker/.env` (terminals A and B via the run scripts,
+terminal C via the already-running container), so there's nothing to export.
 
 ```bash
-export ROS_DOMAIN_ID=1   # match across all terminals
-
 # terminal A — MuJoCo (start first so /clock is publishing)
 docker/scripts/docker_run.sh mujoco
 

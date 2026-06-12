@@ -12,6 +12,17 @@ SIM=${1:?Usage: ./docker_run.sh [isaac|mujoco|ros] [override command/args...]}
 shift
 cd "$(dirname "$0")/../.."
 
+# Load local secrets / overrides (GEMINI_API_KEY, ROS_DOMAIN_ID, ...). compose
+# also auto-loads docker/.env, but sourcing here makes the values available to
+# this script too (e.g. the ROS_DOMAIN_ID normalization below). set -a exports
+# them so the values reach `docker compose` as host-env vars. Note: this
+# overwrites any same-named vars already exported in your shell.
+if [ -f docker/.env ]; then
+    set -a
+    source docker/.env
+    set +a
+fi
+
 # Pre-create host-side bind sources so dockerd doesn't materialise them
 # root-owned on first run. The cache holds msgs_ws build/install/log between
 # container restarts (see docker-compose.yml).

@@ -778,7 +778,7 @@ Visualization Manager:
       Max Intensity: 4096
       Min Color: 0; 0; 0
       Min Intensity: 0
-      Name: FridgeHandlePointCloud2
+      Name: Tracked Objects PointCloud
       Position Transformer: XYZ
       Selectable: true
       Size (Pixels): 3
@@ -790,13 +790,13 @@ Visualization Manager:
         Filter size: 10
         History Policy: Keep Last
         Reliability Policy: Best Effort
-        Value: /tracked_objects/pointcloud/fridge_handle
+        Value: /tracked_objects/pointcloud
       Use Fixed Frame: true
       Use rainbow: true
       Value: true
     - Class: rviz_default_plugins/MarkerArray
       Enabled: true
-      Name: FridgeHandleMarkerArray
+      Name: Tracked Objects Markers
       Namespaces:
         {}
       Topic:
@@ -804,7 +804,7 @@ Visualization Manager:
         Durability Policy: Volatile
         History Policy: Keep Last
         Reliability Policy: Best Effort
-        Value: /tracked_objects/markers/fridge_handle
+        Value: /tracked_objects/markers
       Value: true
     - Alpha: 1
       Axes Length: 1

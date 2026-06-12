@@ -95,6 +95,9 @@ services:
       - NVIDIA_DRIVER_CAPABILITIES=all
       - QT_X11_NO_MITSHM=1
       - ROS_DOMAIN_ID=${ROS_DOMAIN_ID:-1}
+      # Gemini API key for the vision pipeline's gemini backbone + h12_skills.
+      # Passed through from the host shell: export GEMINI_API_KEY before running.
+      - GEMINI_API_KEY=${GEMINI_API_KEY:-}
     volumes:
       - /tmp/.X11-unix:/tmp/.X11-unix:rw
       - ${XAUTHORITY:-$HOME/.Xauthority}:/root/.Xauthority:ro
