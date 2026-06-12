@@ -53,6 +53,12 @@ def generate_launch_description():
         # started via /lowerbody/start_<walk|fame> (or set active_policy to
         # auto-engage one at launch).
         DeclareLaunchArgument('lowerbody_policy', default_value='none'),
+        # Which lower-body node to run. Default 'fame_node' = the FAME-only node
+        # used by the band-held open_fridge demo (unchanged). Set to
+        # 'lowerbody_controller_node' for the switchable walk<->FAME controller
+        # (adds /lowerbody/start_walk|start_fame, /cmd_vel walking) — used by the
+        # walk-to-fridge navigation task.
+        DeclareLaunchArgument('lowerbody_node', default_value='fame_node'),
         DeclareLaunchArgument('rviz_config', default_value=default_rviz),
 
         nav_launch,
@@ -125,8 +131,8 @@ def generate_launch_description():
         # — standing still, arms home — before committing the switch).
         Node(
             package='h12_lowerbody_controller',
-            executable='fame_node',
-            name='fame_node',
+            executable=LaunchConfiguration('lowerbody_node'),
+            name=LaunchConfiguration('lowerbody_node'),
             parameters=[sim_time_param, {'active_policy': LaunchConfiguration('lowerbody_policy')}],
             output='screen',
         ),

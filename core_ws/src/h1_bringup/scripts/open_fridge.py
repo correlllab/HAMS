@@ -225,7 +225,7 @@ def main():
         # misses of ~0.3 m). The fridge-door handle is static, so for a reliable
         # demo we grasp its model-derived pose in the pelvis frame
         # (layout 1 / style 2): the vertical handle bar's centre.
-        hx, hy, hz = 0.433, -0.089, 0.000   # fridge_door_handle_main (grasp low on the bar, where the arm reaches), pelvis frame
+        hx, hy, hz = 0.533, -0.089, 0.000   # fridge_door_handle_main (grasp low on the bar, where the arm reaches), pelvis frame — matches spawn y=-1.4
 
         # ARM_FRAME (right_wrist_yaw_link) sits ~0.214 m behind the gripper
         # grasp-centre along the wrist approach (+x) axis, so aim the WRIST that

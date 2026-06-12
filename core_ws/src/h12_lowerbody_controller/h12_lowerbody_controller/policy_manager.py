@@ -31,10 +31,14 @@ class GateConfig:
     # from a standing pose, and the arms are held by the IK at its own home
     # (not at 0), so a pose match is neither achievable nor needed.
     cmd_eps: float = 0.10        # ||velocity command|| below this = "stop requested"
-    gyro_eps: float = 0.60       # rad/s, base angular velocity (still)
-    dq_eps: float = 0.60         # rad/s, max |joint velocity| (joints still)
+    gyro_eps: float = 1.00       # rad/s, base angular velocity (base roughly still)
+    # The walk policy balances dynamically and keeps the legs stepping (~4 rad/s)
+    # even at cmd=0, so it never produces joint stillness — gating walk->FAME on
+    # low dq would deadlock. Gate the handover on upright + slow base + stop
+    # requested instead, and let the incoming FAME policy settle the legs.
+    dq_eps: float = 6.0          # rad/s, max |joint velocity| (allow walk stepping)
     upright_eps: float = 0.25    # max horizontal gravity component (~14 deg tilt)
-    hold_ticks: int = 10         # consecutive passing ticks required (debounce)
+    hold_ticks: int = 5          # consecutive passing ticks required (debounce)
     warn_period_ticks: int = 100  # log a "still waiting" note this often
 
 

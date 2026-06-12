@@ -2,11 +2,15 @@
 #
 # Consumed by h12_lowerbody_controller.policy.FamePolicy. Paths are relative to
 # this file. The standalone-sim-only fields from the original training config
-# (xml_path, simulation_*, arm perturbations, video) were dropped — in the ROS
-# pipeline the arms are driven by the upper-body IK and observed via /lowstate.
+# (xml_path, simulation_*, kps_arms, arm-swing perturbations, video) are dropped
+# — in the ROS pipeline the arms are driven by the upper-body IK and observed via
+# /lowstate.
+#
+# Checkpoints: rma_magpie Jun10 run, step 3600 (policy_3600 / encoder_3600),
+# trained with the torso (waist-yaw) nominal at -0.35 rad (see default_angles_arms).
 
-policy_path: "policy.pt"
-encoder_path: "encoder_3800.pt"
+policy_path: "policy_3600.pt"
+encoder_path: "encoder_3600.pt"
 
 # PD gains for the 12 leg joints (the only joints this policy commands).
 kps: [200, 200, 200, 300, 60, 40,
@@ -15,10 +19,15 @@ kds: [5.0, 5.0, 5.0, 7.5, 1.0, 0.3,
       5.0, 5.0, 5.0, 7.5, 1.0, 0.3]
 
 # Nominal pose. Legs (12) are commanded; arms (torso + 7L + 7R = 15) are only
-# used to build the observation / e_t (they are driven by the IK in this stack).
-default_angles: [-0.16, 0.0, 0.0, 0.36, -0.2, 0.0,
-                 -0.16, 0.0, 0.0, 0.36, -0.2, 0.0]
-default_angles_arms: [0.0,
+# used to build the observation / e_t (driven by the IK in this stack).
+default_angles: [0.0, -0.16, 0.0, 0.36, -0.2, 0.0,
+                 0.0, -0.16, 0.0, 0.36, -0.2, 0.0]
+# Arm nominal. Index 0 = torso_joint (a waist YAW, MJCF axis 0 0 1) — this run
+# was trained with a -0.35 rad torso offset, so the proprio obs uses (q_torso -
+# (-0.35)). For the obs to match training the ACTUAL waist should be held at
+# -0.35 too (upper_controller torso_target); left at 0 it adds a constant +0.35
+# obs bias the RMA encoder has to absorb.
+default_angles_arms: [-0.35,
                       0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
                       0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
 

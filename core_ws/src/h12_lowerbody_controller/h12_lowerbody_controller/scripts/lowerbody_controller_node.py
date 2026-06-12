@@ -100,6 +100,7 @@ class LowerBodyControllerNode(Node):
         self._band_released = not bool(self.get_parameter("disable_elastic_band").value)
         self._frame_task_ready = not bool(self.get_parameter("band_wait_for_frame_task").value)
         self._band_cli = self.create_client(Trigger, "/elastic_band/toggle")
+        self._awaiting_band_release = False  # policy committed, band not yet released
         self._request_time: float | None = None  # when the pending activation was asked
 
         lowstate_qos = QoSProfile(reliability=ReliabilityPolicy.BEST_EFFORT,
@@ -205,24 +206,40 @@ class LowerBodyControllerNode(Node):
 
         if self._manager.is_pending():
             if self._manager.is_idle():
-                # First activation: release the band (when frame_task is ready or
-                # the timeout fires), then engage the policy.
-                if not self._band_released:
-                    if self._frame_task_ready:
-                        self._release_band("frame_task ready")
-                    elif self._request_time is not None and \
-                            (time.monotonic() - self._request_time) > self.get_parameter("band_max_wait").value:
-                        self._release_band("band_max_wait timeout (frame_task not ready)")
-                if self._band_released:
-                    self._manager.commit(state)   # resets policy -> clean warm-up
-                    self._publish_active()
+                # First activation: engage the policy FIRST so it is actively
+                # driving the legs while the band still holds the robot. The band
+                # is released afterwards (below), once frame_task is ready —
+                # releasing before any policy controls the legs drops the robot.
+                self._manager.commit(state)   # resets policy -> clean warm-up
+                self._publish_active()
+                self._awaiting_band_release = not self._band_released
             else:
                 # Switch between active policies: gated handover.
                 if self._manager.update_switch(state) is not None:
                     self._publish_active()
 
+        # Release the band only after a policy is committed and driving the legs
+        # (gated on frame_task being ready, or the max-wait timeout).
+        if self._awaiting_band_release and not self._band_released:
+            released = False
+            if self._frame_task_ready:
+                self._release_band("policy active + frame_task ready")
+                released = True
+            elif self._request_time is not None and \
+                    (time.monotonic() - self._request_time) > self.get_parameter("band_max_wait").value:
+                self._release_band("policy active + band_max_wait timeout")
+                released = True
+            if released:
+                # Reset the active policy AT band release so its observation
+                # history (which filled with band-held states) is cleared and it
+                # warms up fresh on free-standing — otherwise FAME's first free
+                # actions are computed from stale band-held obs and it topples.
+                # (This is exactly what fame_node does, and why it stays up.)
+                self._manager.reset_active(state)
+                self._awaiting_band_release = False
+
         if self._manager.is_idle():
-            return  # band-held, no policy commands the legs yet
+            return  # nothing requested yet -> band-held, legs uncommanded
 
         leg = self._manager.run(state)
         cmd_msg = LowCmd()

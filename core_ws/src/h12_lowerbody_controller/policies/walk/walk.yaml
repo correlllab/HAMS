@@ -12,8 +12,10 @@ control_decimation: 10
 kps: [200, 200, 200, 300, 40, 40, 200, 200, 200, 300, 40, 40]
 kds: [2.5, 2.5, 2.5, 4, 2, 2,  2.5, 2.5, 2.5, 4, 2, 2]
 
-default_angles: [0, -0.16, 0.0, 0.36, -0.2, 0.0, 
-                 0, -0.16, 0.0, 0.36, -0.2, 0.0]
+# Training nominal: hip_pitch = -0.16 (slight forward lean). FAME shares this
+# exact nominal by joint name, so the walk<->FAME handover has no leg-target jump.
+default_angles: [0.0, -0.16, 0.0, 0.36, -0.2, 0.0,
+                 0.0, -0.16, 0.0, 0.36, -0.2, 0.0]
 
 ang_vel_scale: 0.25
 dof_pos_scale: 1.0
