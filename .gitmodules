@@ -16,7 +16,7 @@
 [submodule "core_ws/src/h12_safety_layer"]
 	path = core_ws/src/h12_safety_layer
 	url = git@github.com:correlllab/h12_safety_layer.git
-	branch = unified_sim
+	branch = main
 [submodule "core_ws/src/vision_pipeline"]
 	path = core_ws/src/vision_pipeline
 	url = git@github.com:correlllab/vision_pipeline.git
@@ -38,3 +38,6 @@
 [submodule "CL_Assets"]
 	path = CL_Assets
 	url = git@github.com:correlllab/CL_Assets.git
+[submodule "unitree_sdk2_python"]
+	path = unitree_sdk2_python
+	url = git@github.com:Oya-Tomo/unitree_sdk2_python.git
