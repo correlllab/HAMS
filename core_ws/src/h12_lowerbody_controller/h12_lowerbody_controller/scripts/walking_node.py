@@ -1,11 +1,13 @@
 '''Walking policy ROS 2 node.
 
-Runs the TorchScript walking policy from example/walkingPolicy.pt against
+Runs the TorchScript walking policy from policies/walk/walkingPolicy.pt against
 live robot state on /lowstate and publishes lower-body PD setpoints on
 safety/lowcmd_lower_in for the h12_safety_layer to merge with upper-body
 commands.
 
-Direct adaptation of example/deploy_mujoco.py to a real-robot ROS 2 stack.
+Kept as a standalone single-policy node; the generic, switchable controller is
+lowerbody_controller_node (see policy.py / policy_manager.py). Direct adaptation
+of reference/deploy_mujoco.py to a real-robot ROS 2 stack.
 '''
 
 from pathlib import Path
@@ -43,14 +45,14 @@ def get_gravity_orientation(quaternion):
 
 def _default_example_path(filename: str) -> str:
     pkg_share = get_package_share_directory('h12_lowerbody_controller')
-    return str(Path(pkg_share) / 'example' / filename)
+    return str(Path(pkg_share) / 'policies' / 'walk' / filename)
 
 
 class WalkingNode(Node):
     def __init__(self):
         super().__init__('walking_node')
 
-        self.declare_parameter('config_path', _default_example_path('h1_2.yaml'))
+        self.declare_parameter('config_path', _default_example_path('walk.yaml'))
         self.declare_parameter('policy_path', _default_example_path('walkingPolicy.pt'))
         self.declare_parameter('control_hz', 50.0)
 
