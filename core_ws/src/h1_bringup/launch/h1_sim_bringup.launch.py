@@ -42,23 +42,19 @@ def generate_launch_description():
             os.path.join(bringup_share, 'launch', 'h1_navigation.launch.py')
         ),
         launch_arguments={'use_sim_time': 'true'}.items(),
-        condition=IfCondition(LaunchConfiguration('use_nav')),
     )
 
     return LaunchDescription([
         DeclareLaunchArgument('use_rviz', default_value='true'),
         DeclareLaunchArgument('use_sliders', default_value='true'),
-        DeclareLaunchArgument('use_nav', default_value='true'),
         # 'none' = robot starts held by the elastic band, idle, until a policy is
         # started via /lowerbody/start_<walk|fame> (or set active_policy to
         # auto-engage one at launch).
-        DeclareLaunchArgument('lowerbody_policy', default_value='none'),
         # Which lower-body node to run. Default 'fame_node' = the FAME-only node
         # used by the band-held open_fridge demo (unchanged). Set to
         # 'lowerbody_controller_node' for the switchable walk<->FAME controller
         # (adds /lowerbody/start_walk|start_fame, /cmd_vel walking) — used by the
         # walk-to-fridge navigation task.
-        DeclareLaunchArgument('lowerbody_node', default_value='fame_node'),
         DeclareLaunchArgument('rviz_config', default_value=default_rviz),
 
         nav_launch,
@@ -131,9 +127,9 @@ def generate_launch_description():
         # — standing still, arms home — before committing the switch).
         Node(
             package='h12_lowerbody_controller',
-            executable=LaunchConfiguration('lowerbody_node'),
-            name=LaunchConfiguration('lowerbody_node'),
-            parameters=[sim_time_param, {'active_policy': LaunchConfiguration('lowerbody_policy')}],
+            executable="lowerbody_controller_node",
+            name="lowerbody_node",
+            parameters=[sim_time_param, {'active_policy': "fame"}],
             output='screen',
         ),
 

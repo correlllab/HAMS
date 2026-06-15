@@ -13,7 +13,7 @@ Until that is fixed this dead-reckons the approach:
 Run with the robot spawned far and the switchable controller:
   A) docker_run.sh mujoco --spawn far
   B) ros2 launch h1_bringup h1_sim_bringup.launch.py use_rviz:=false \
-         use_sliders:=false use_nav:=false lowerbody_node:=lowerbody_controller_node
+         use_sliders:=false lowerbody_node:=lowerbody_controller_node
   C) ros2 run h1_bringup walk_to_fridge.py
 """
 

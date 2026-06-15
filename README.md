@@ -40,8 +40,7 @@ docker/scripts/docker_run.sh mujoco --spawn far
 # B — ROS bringup: switchable walk/FAME controller, FAME at launch, nav off
 docker/scripts/docker_run.sh ros
 ros2 launch h1_bringup h1_sim_bringup.launch.py \
-    use_rviz:=true use_sliders:=true use_nav:=true \
-    lowerbody_node:=lowerbody_controller_node lowerbody_policy:=fame
+    use_rviz:=true use_sliders:=true 
 
 # C — stand on FAME -> walk to the fridge (closed-loop) -> switch to FAME -> grasp
 docker exec -it humanoid_sim_ros bash
