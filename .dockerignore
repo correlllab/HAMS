@@ -5,6 +5,7 @@
 # Whitelisted COPY sources:
 #   IsaacDockerfile  -> CL_isaaclab_sim/requirements.txt
 #   MujocoDockerfile -> core_ws/src/livox_ros_driver2 (baked-in livox build)
+#   BaseDockerfile   -> unitree_sdk2_python (local SDK install)
 *
 !CL_isaaclab_sim
 CL_isaaclab_sim/*
@@ -15,3 +16,6 @@ core_ws/*
 core_ws/src/*
 !core_ws/src/livox_ros_driver2
 core_ws/src/livox_ros_driver2/.git
+!unitree_sdk2_python
+!unitree_sdk2_python/**
+unitree_sdk2_python/.git

@@ -74,15 +74,11 @@ RUN git clone --depth 1 --branch releases/0.10.x https://github.com/eclipse-cycl
 
 ENV CYCLONEDDS_HOME=/cyclonedds/install
 
-# Install unitree_sdk2_python. Upstream setup.py only declares the top-level
-# package, so sub-packages like `b2` are dropped on install while `__init__.py`
-# still imports them — causing ImportError at runtime. Copy the full source
-# tree into site-packages after install to ensure every sub-module is present.
-RUN git clone --depth 1 https://github.com/unitreerobotics/unitree_sdk2_python /tmp/unitree_sdk2_python && \
-    uv pip install --system /tmp/unitree_sdk2_python && \
-    SP=$(python3 -c "import site; print(site.getsitepackages()[0])") && \
-    cp -r /tmp/unitree_sdk2_python/unitree_sdk2py/* "$SP/unitree_sdk2py/" && \
-    rm -rf /tmp/unitree_sdk2_python
+# Install unitree_sdk2_python from the local checkout and keep the source in
+# the image for development/debugging.
+COPY unitree_sdk2_python /home/code/unitree_sdk2_python
+RUN cd /home/code/unitree_sdk2_python && \
+    uv pip install --system .
 
 # PyTorch with CUDA 13.0 (supports sm_120 / Blackwell, e.g. RTX 5070 Ti).
 # Bundled CUDA runtime is self-contained — no host toolkit version dependency.
