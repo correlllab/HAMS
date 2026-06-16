@@ -49,6 +49,8 @@ def generate_launch_description():
         DeclareLaunchArgument('use_rviz', default_value='true'),
         DeclareLaunchArgument('use_sliders', default_value='true'),
         DeclareLaunchArgument('use_nav', default_value='true'),
+        DeclareLaunchArgument('use_vision', default_value='false'),
+        DeclareLaunchArgument('use_walking', default_value='true'),
         DeclareLaunchArgument('rviz_config', default_value=default_rviz),
 
         nav_launch,
@@ -103,6 +105,7 @@ def generate_launch_description():
             name='vp_node',
             parameters=[sim_time_param],
             output='screen',
+            condition=IfCondition(LaunchConfiguration('use_vision')),
         ),
 
         Node(
@@ -120,6 +123,7 @@ def generate_launch_description():
             name='walking_node',
             parameters=[sim_time_param],
             output='screen',
+            condition=IfCondition(LaunchConfiguration('use_walking')),
         ),
 
         Node(

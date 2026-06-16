@@ -22,21 +22,34 @@ fi
 
 if [ "$NEEDS_BUILD" = "1" ]; then
     # livox_ros_driver2 ships a build.sh that picks the ROS 2 file variants
-    # (package_ROS2.xml → package.xml, launch_ROS2 → launch) and drives colcon
+    # (package_ROS2.xml -> package.xml, launch_ROS2 -> launch) and drives colcon
     # from the workspace root. Upstream invokes `colcon build --cmake-args ...`
-    # without --symlink-install; inject the flag so vision_pipeline's
-    # ModelWeights/*.pt are reachable via the install symlink instead of
-    # needing a manual post-build copy. Idempotent — won't re-patch if already
-    # present (e.g. after a previous run on the same bind-mounted clone).
+    # without --symlink-install; temporarily inject the flag so
+    # vision_pipeline's ModelWeights/*.pt are reachable via the install symlink
+    # instead of needing a manual post-build copy. Restore the file afterward so
+    # the bind-mounted submodule does not stay dirty after launch.
     LIVOX_DIR="$WS/src/livox_ros_driver2"
     if [ -x "$LIVOX_DIR/build.sh" ]; then
+        RESTORE_LIVOX_BUILD_SH=0
+        LIVOX_BUILD_BACKUP="$LIVOX_DIR/build.sh.launch_ros.bak"
         if ! grep -q -- '--symlink-install' "$LIVOX_DIR/build.sh"; then
             echo "[launch_ros] patching livox_ros_driver2/build.sh to add --symlink-install"
+            cp "$LIVOX_DIR/build.sh" "$LIVOX_BUILD_BACKUP"
             sed -i 's|colcon build --cmake-args|colcon build --symlink-install --cmake-args|' \
                 "$LIVOX_DIR/build.sh"
+            RESTORE_LIVOX_BUILD_SH=1
         fi
         echo "[launch_ros] livox_ros_driver2/build.sh humble"
+        set +e
         (cd "$LIVOX_DIR" && ./build.sh humble)
+        LIVOX_BUILD_STATUS=$?
+        set -e
+        if [ "$RESTORE_LIVOX_BUILD_SH" = "1" ]; then
+            mv "$LIVOX_BUILD_BACKUP" "$LIVOX_DIR/build.sh"
+        fi
+        if [ "$LIVOX_BUILD_STATUS" -ne 0 ]; then
+            exit "$LIVOX_BUILD_STATUS"
+        fi
     else
         echo "[launch_ros] colcon build"
         colcon build --symlink-install

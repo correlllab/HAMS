@@ -3,8 +3,8 @@
 	url = git@github.com:correlllab/CL_isaaclab_sim.git
 [submodule "h1_mujoco"]
 	path = h1_mujoco
-	url = git@github.com:correlllab/h1_mujoco.git
-	branch = unified_sim
+	url = git@github.com:xtan1025/h1_mujoco.git
+	branch = rh56-grasp-integration
 [submodule "core_ws/src/h12_ros2_controller"]
 	path = core_ws/src/h12_ros2_controller
 	url = git@github.com:correlllab/h12_ros2_controller.git

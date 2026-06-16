@@ -52,18 +52,10 @@ RUN git clone --depth 1 https://github.com/robocasa/robocasa /opt/robocasa && \
 RUN python /opt/robosuite/robosuite/scripts/setup_macros.py && \
     python /opt/robocasa/robocasa/scripts/setup_macros.py
 
-# Optional robosuite/robocasa deps that print "WARNING: not installed" on
-# every import otherwise:
-#   - robosuite_models: extra robot meshes (git-only — not on PyPI).
-#   - mink: whole-body IK; robosuite hard-codes the 0.0.5 pin in its warning.
-#   - mimicgen: demonstration-generation environments (git-only).
-# We don't *use* any of these — installation is purely to silence the
-# import-time warnings.
-RUN git clone --depth 1 https://github.com/ARISE-Initiative/robosuite_models /opt/robosuite_models && \
-    uv pip install --system --no-cache -e /opt/robosuite_models && \
-    git clone --depth 1 https://github.com/NVlabs/mimicgen /opt/mimicgen && \
-    uv pip install --system --no-cache -e /opt/mimicgen && \
-    uv pip install --system --no-cache --no-deps "mink==0.0.5"
+# Optional robosuite/robocasa packages such as robosuite_models and mimicgen
+# are intentionally not installed here. The H1 MuJoCo path does not use them,
+# and keeping extra GitHub clones in the mandatory image build makes fresh
+# builds fragile. Base already installs the mink IK package used elsewhere.
 
 # Robocasa's textures, fixtures, and objects (~10 GB) — required for any
 # `--scene kitchen` run; KitchenArena fails immediately without them.

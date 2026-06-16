@@ -22,6 +22,7 @@ ARG http_proxy
 ARG https_proxy
 ENV http_proxy=${http_proxy}
 ENV https_proxy=${https_proxy}
+ENV PIP_DEFAULT_TIMEOUT=600
 
 # -----------------------------------------------------------------------------
 # 1. apt: build tooling, system Python C-extensions, ROS workspace deps
@@ -110,21 +111,29 @@ RUN pip install --no-cache-dir --ignore-installed blinker \
 #    because it is not on PyPI. Model weights ship under
 #    vision_pipeline/core/ModelWeights and are bind-mounted via core_ws.
 # -----------------------------------------------------------------------------
+RUN rm -rf /usr/local/lib/python3.10/dist-packages/PIL \
+           /usr/local/lib/python3.10/dist-packages/Pillow* \
+           /usr/local/lib/python3.10/dist-packages/pillow* \
+    && pip install --no-cache-dir --force-reinstall --no-deps "Pillow==11.0.0"
+
 RUN pip install --no-cache-dir \
         "transformers==4.47.1" \
         "google-genai==1.30.0" \
         "opencv-python==4.10.0.84" \
-        "matplotlib==3.9.3" \
-        "Pillow==11.0.0" \
+        "matplotlib==3.9.3"
+
+RUN pip install --no-cache-dir \
         "timm==1.0.17" \
         "ftfy==6.1.1" \
         "regex==2024.11.6" \
         "iopath==0.1.10" \
         "huggingface_hub==0.27.0" \
         "einops==0.8.0" \
-        "pycocotools==2.0.8" \
-        "ultralytics==8.3.52" \
-    && pip install --no-cache-dir git+https://github.com/openai/CLIP.git@a1d0717
+        "pycocotools==2.0.8"
+
+RUN pip install --no-cache-dir "ultralytics==8.3.52"
+
+RUN pip install --no-cache-dir git+https://github.com/openai/CLIP.git@a1d0717
 
 # -----------------------------------------------------------------------------
 # 5. SAM2 / SAM3 — vendored from git.
