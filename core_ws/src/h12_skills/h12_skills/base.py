@@ -1,18 +1,15 @@
 #!/usr/bin/env python3
-"""h12 skills node: action servers for the RoboCasa-style atomic skills.
+"""Shared infrastructure for the h12 skills node.
 
-Serves the 11 Skill* actions from custom_ros_messages on /skill/<name>, each
-implemented with the same machinery open_fridge.py uses:
-
-  vision pipeline  /vp_update_tracked_object, /vp_update_beliefs,
-                   /vp_query_tracked_objects          (detect named objects)
-  frame_task       /frame_task                        (Cartesian grip-site targets)
-  grippers         /gripper/{left,right}/set_position
-  nav2             /navigate_to_pose                  (base motion)
-
-The node also keeps one action client per skill (self.skill_clients): skills
-compose through them (SkillPickPlace calls SkillGrasp via its client), and they
-double as a reference for invoking the skills externally.
+`SkillsBase` holds everything every skill needs: the service/action clients
+(vision pipeline, grippers, frame_task, nav2), the TF buffer, the head-camera
+color cache, the optional Gemini Robotics client, the per-skill action clients
+(self.skill_clients, used for composition like pick_place -> grasp), and the
+helper layers built on top of them (detection, motion primitives, future
+plumbing). Each skill lives in its own module under skills/ as a mixin class
+whose _exec_* method operates on `self`; SkillsNode (node.py) multiply-inherits
+from SkillsBase plus every skill mixin, so the skill bodies resolve
+self.detect_grasp/self.move_frame_to/... against the combined node at runtime.
 
 Motions are first-pass and deliberately naive, in the spirit of open_fridge.py:
 straight-line gripper targets in the pelvis frame, fixed approach offsets along
@@ -22,9 +19,8 @@ hinge or rotation axis is involved.
 SkillGrasp plans an ANTIPODAL grasp from the detection point cloud (PCA of the
 footprint perpendicular to the approach axis: fingers close along the minor
 axis, wrist rolled to match, gripper pre-opened to the measured width). Every
-skill that must hold something (open_door, open_lid, slide_rack, turn_lever,
-twist_knob, pick_place) composes SkillGrasp through this node's own client
-rather than closing the gripper itself.
+skill that must hold something composes SkillGrasp through this node's own
+client (self.skill_clients['grasp']) rather than closing the gripper itself.
 
 Unlike open_fridge.py (a run-to-completion script that owns the spin loop with
 rclpy.spin_until_future_complete), this node executes skills *inside* action
@@ -41,10 +37,9 @@ from functools import partial
 
 import numpy as np
 import rclpy
-from rclpy.action import ActionClient, ActionServer, CancelResponse
+from rclpy.action import ActionClient, CancelResponse
 from rclpy.callback_groups import ReentrantCallbackGroup
 from rclpy.duration import Duration as RclpyDuration
-from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
 
@@ -129,7 +124,7 @@ DEFAULT_SKILL_TIMEOUT = 120.0  # used when goal.timeout is zero [s]
 NAMED_LOCATIONS = {}
 
 # Skill action clients: name -> (action type, action server name). The same
-# table drives the action servers this node provides.
+# table drives the action servers SkillsNode provides.
 SKILL_ACTIONS = {
     'close_door':  (SkillCloseDoor,  '/skill/close_door'),
     'open_door':   (SkillOpenDoor,   '/skill/open_door'),
@@ -304,9 +299,12 @@ class _Run:
         return self.result
 
 
-class SkillsNode(Node):
-    def __init__(self):
-        super().__init__('h12_skills')
+class SkillsBase(Node):
+    """Node holding the clients, perception layer, and motion primitives shared
+    by every skill mixin. SkillsNode (node.py) adds the skill action servers."""
+
+    def __init__(self, node_name='h12_skills'):
+        super().__init__(node_name)
 
         # Everything shares one reentrant group so skill execute callbacks can
         # block on inner service/action futures while the executor keeps
@@ -356,30 +354,6 @@ class SkillsNode(Node):
             for name, (action_type, server) in SKILL_ACTIONS.items()
         }
 
-        # --- skill action servers ----------------------------------------------
-        executors = {
-            'open_door':  self._exec_open_door,
-            'close_door': self._exec_close_door,
-            'open_lid':   self._exec_open_lid,
-            'close_lid':  self._exec_close_lid,
-            'navigate':   self._exec_navigate,
-            'grasp':      self._exec_grasp,
-            'pick_place': self._exec_pick_place,
-            'press':      self._exec_press,
-            'slide_rack': self._exec_slide_rack,
-            'turn_lever': partial(self._exec_turn, SkillTurnLever, 'turn_lever', 'turn'),
-            'twist_knob': partial(self._exec_turn, SkillTwistKnob, 'twist_knob', 'twist'),
-        }
-        self.skill_servers = {
-            name: ActionServer(
-                self, SKILL_ACTIONS[name][0], SKILL_ACTIONS[name][1],
-                execute_callback=executors[name],
-                cancel_callback=self._on_skill_cancel,
-                callback_group=self._cb_group,
-            )
-            for name in SKILL_ACTIONS
-        }
-
         # Wait for the underlying endpoints (non-fatal, mirrors open_fridge.py).
         self.get_logger().info('Waiting for VP services, grippers, and action servers...')
         self.track_cli.wait_for_service(timeout_sec=10.0)
@@ -389,8 +363,6 @@ class SkillsNode(Node):
             cli.wait_for_service(timeout_sec=10.0)
         self.frame_task_cli.wait_for_server(timeout_sec=10.0)
         self.nav_cli.wait_for_server(timeout_sec=10.0)
-        self.get_logger().info(
-            f'h12_skills ready: serving {sorted(self.skill_servers)} on /skill/<name>')
 
     # ----------------------------------------------------- gemini + perception
     def _init_gemini(self):
@@ -726,420 +698,3 @@ class SkillsNode(Node):
         if response.status != GoalStatus.STATUS_SUCCEEDED or not response.result.success:
             return False, response.result.message or 'grasp action did not succeed'
         return True, response.result.message
-
-    # ----------------------------------------------------------- skill servers
-    def _exec_open_door(self, gh):
-        """detect -> grasp (composed via the SkillGrasp action) -> pull.
-
-        Detects locally as well: the pull endpoint and the grasp-roll estimate
-        are needed here, and SkillGrasp's Result (success/message only) cannot
-        return them. SkillGrasp re-detects internally; both detections see the
-        same object, so the antipodal roll estimates agree."""
-        goal = gh.request
-        run = _Run(self, gh, SkillOpenDoor, 'open_door')
-        arm = self._validated_arm(run, goal)
-        if arm is None:
-            return run.abort(f'invalid arm {goal.arm!r}')
-        pull = goal.pull_distance if goal.pull_distance > 0.0 else DEFAULT_PULL_DISTANCE
-
-        if not run.phase('detect', 0.0):
-            return run.result
-        plan = self.detect_grasp(goal.target_object)
-        if plan is None:
-            return run.abort(f'no {goal.target_object!r} detected')
-        (hx, hy, hz), roll, _width = plan
-        grasp_quat = _roll_quat(roll)
-
-        if not run.phase('grasp', 0.4):
-            return run.result
-        ok, why = self._call_grasp_skill(gh, run, goal.target_object, arm)
-        if not ok:
-            return run.abort(f'grasp failed: {why}')
-
-        if not run.phase('pull', 0.75):
-            return run.result
-        # Hold the grasp roll during the pull so the wrist does not untwist
-        # out of the antipodal grip.
-        if not self.move_frame_to(arm, hx - pull, hy, hz,
-                                  duration_sec=4, quat=grasp_quat, outer_gh=gh):
-            return run.abort('pull motion failed')
-        self.open_gripper(arm)   # release the handle, leave the door open
-
-        return run.succeed(f'opened {goal.target_object!r} by {pull:.2f} m')
-
-    def _exec_close_door(self, gh):
-        """detect -> approach -> push (closed-hand push past the handle plane)."""
-        goal = gh.request
-        run = _Run(self, gh, SkillCloseDoor, 'close_door')
-        arm = self._validated_arm(run, goal)
-        if arm is None:
-            return run.abort(f'invalid arm {goal.arm!r}')
-
-        if not run.phase('detect', 0.0):
-            return run.result
-        c = self.detect_object(goal.target_object)
-        if c is None:
-            return run.abort(f'no {goal.target_object!r} detected')
-        hx, hy, hz = c
-
-        if not run.phase('approach', 0.3):
-            return run.result
-        if not self.close_gripper(arm):   # push with a closed hand
-            return run.abort('gripper close failed')
-        approach_x = hx - APPROACH_BACKOFF
-        if not self.move_frame_to(arm, approach_x, hy, hz, duration_sec=4, outer_gh=gh):
-            return run.abort('approach motion failed')
-
-        if not run.phase('push', 0.6):
-            return run.result
-        if not self.move_frame_to(arm, hx + PUSH_DEPTH, hy, hz,
-                                  duration_sec=3, outer_gh=gh):
-            return run.abort('push motion failed')
-        self.move_frame_to(arm, approach_x, hy, hz, duration_sec=2, outer_gh=gh)  # retreat
-
-        return run.succeed(f'closed {goal.target_object!r}')
-
-    def _exec_open_lid(self, gh):
-        """detect -> grasp (composed via SkillGrasp) -> open along an arc about
-        the hinge. Hinge is assumed at the far edge (+x), LID_HINGE_RADIUS
-        behind the grasped point, axis horizontal: the grasp point rises and
-        moves toward the hinge as the lid rotates up."""
-        goal = gh.request
-        run = _Run(self, gh, SkillOpenLid, 'open_lid')
-        arm = self._validated_arm(run, goal)
-        if arm is None:
-            return run.abort(f'invalid arm {goal.arm!r}')
-        angle = goal.open_angle if goal.open_angle > 0.0 else DEFAULT_OPEN_ANGLE
-
-        if not run.phase('detect', 0.0):
-            return run.result
-        plan = self.detect_grasp(goal.target_object)
-        if plan is None:
-            return run.abort(f'no {goal.target_object!r} detected')
-        (hx, hy, hz), roll, _width = plan
-        grasp_quat = _roll_quat(roll)
-
-        if not run.phase('grasp', 0.4):
-            return run.result
-        ok, why = self._call_grasp_skill(gh, run, goal.target_object, arm)
-        if not ok:
-            return run.abort(f'grasp failed: {why}')
-
-        if not run.phase('open', 0.75):
-            return run.result
-        r = LID_HINGE_RADIUS
-        for a in (0.5 * angle, angle):    # two waypoints along the arc
-            wx = hx + r * (1.0 - math.cos(a))
-            wz = hz + r * math.sin(a)
-            if not self.move_frame_to(arm, wx, hy, wz, duration_sec=3,
-                                      quat=grasp_quat, outer_gh=gh):
-                return run.abort('lid arc motion failed')
-        self.open_gripper(arm)            # release the open lid
-
-        return run.succeed(f'opened {goal.target_object!r} to {angle:.2f} rad')
-
-    def _exec_close_lid(self, gh):
-        """detect -> approach above -> push the hinged lid down shut."""
-        goal = gh.request
-        run = _Run(self, gh, SkillCloseLid, 'close_lid')
-        arm = self._validated_arm(run, goal)
-        if arm is None:
-            return run.abort(f'invalid arm {goal.arm!r}')
-
-        if not run.phase('detect', 0.0):
-            return run.result
-        c = self.detect_object(goal.target_object)
-        if c is None:
-            return run.abort(f'no {goal.target_object!r} detected')
-        hx, hy, hz = c
-
-        # Assume the lid is fully open (90 deg) per open_lid's hinge model: the
-        # detected handle then sits directly ABOVE the hinge, so the hinge is at
-        # (hx, hz - r) and the closed handle position is (hx - r, hz - r). Push
-        # the handle back down along the reverse arc — a straight push down at
-        # the detected x would have zero closing torque arm.
-        r = LID_HINGE_RADIUS
-        closed_x, closed_z = hx - r, hz - r
-
-        if not run.phase('approach', 0.3):
-            return run.result
-        if not self.close_gripper(arm):   # push with a closed hand
-            return run.abort('gripper close failed')
-        if not self.move_frame_to(arm, hx, hy, hz + 0.1,
-                                  duration_sec=4, outer_gh=gh):
-            return run.abort('approach motion failed')
-
-        if not run.phase('close', 0.6):
-            return run.result
-        for a in (math.pi / 4, 0.0):      # reverse arc waypoints (45 deg, closed)
-            wx = closed_x + r * (1.0 - math.cos(a))
-            wz = closed_z + r * math.sin(a)
-            if a == 0.0:
-                wz -= 0.05                # overtravel past closed to seat the lid
-            if not self.move_frame_to(arm, wx, hy, wz, duration_sec=3, outer_gh=gh):
-                return run.abort('close-arc motion failed')
-        self.move_frame_to(arm, closed_x - APPROACH_BACKOFF, hy,
-                           closed_z + 0.15, duration_sec=2, outer_gh=gh)  # retreat
-
-        return run.succeed(f'closed {goal.target_object!r}')
-
-    def _exec_navigate(self, gh):
-        """planning -> navigating. Resolves the named target from
-        NAMED_LOCATIONS, else detects it in the map frame and stops
-        NAV_STANDOFF in front of it, facing it."""
-        goal = gh.request
-        run = _Run(self, gh, SkillNavigate, 'navigate')
-        name = goal.target_object.strip()
-
-        if not run.phase('planning', 0.0):
-            return run.result
-        if name in NAMED_LOCATIONS:
-            gx, gy, yaw = NAMED_LOCATIONS[name]
-        else:
-            c = self.detect_object(name, target_frame='map')
-            if c is None:
-                return run.abort(f'no preset or detection for {name!r}')
-            origin = self._frame_origin_in('map', 'pelvis')
-            if origin is None:
-                return run.abort('robot pose in map unavailable')
-            dx, dy = c[0] - origin[0], c[1] - origin[1]
-            dist = math.hypot(dx, dy)
-            if dist < 1e-3:
-                return run.abort('target coincides with the robot')
-            ux, uy = dx / dist, dy / dist
-            gx, gy = c[0] - NAV_STANDOFF * ux, c[1] - NAV_STANDOFF * uy
-            yaw = math.atan2(dy, dx)
-
-        if not run.phase('navigating', 0.3):
-            return run.result
-        if not self.navigate_to(gx, gy, yaw, timeout_sec=run.remaining(), outer_gh=gh):
-            return run.abort(
-                'navigation failed' if run.remaining() > 0 else 'skill timeout')
-
-        return run.succeed(f'arrived at {name!r}')
-
-    def _exec_grasp(self, gh):
-        """detect (antipodal plan) -> approach -> grasp. No lift (by design).
-
-        The detection cloud's y-z footprint is PCA'd; the wrist rolls so the
-        fingers close along the minor axis (antipodal contacts on opposing
-        surfaces) and the gripper pre-opens to the measured width before the
-        approach, so the fingers straddle the object on arrival."""
-        goal = gh.request
-        run = _Run(self, gh, SkillGrasp, 'grasp')
-        arm = self._validated_arm(run, goal)
-        if arm is None:
-            return run.abort(f'invalid arm {goal.arm!r}')
-
-        if not run.phase('detect', 0.0):
-            return run.result
-        plan = self.detect_grasp(goal.target_object)
-        if plan is None:
-            return run.abort(f'no {goal.target_object!r} detected')
-        (hx, hy, hz), roll, width_mm = plan
-        grasp_quat = _roll_quat(roll)
-        preopen = min(GRIPPER_OPEN_MM,
-                      max(width_mm + GRASP_WIDTH_MARGIN_MM, GRASP_PREOPEN_MIN_MM))
-        if width_mm + GRASP_WIDTH_MARGIN_MM > GRIPPER_OPEN_MM:
-            self.get_logger().warn(
-                f'{goal.target_object!r} measured width {width_mm:.0f} mm may '
-                f'exceed the gripper opening ({GRIPPER_OPEN_MM:.0f} mm)')
-
-        if not run.phase('approach', 0.35):
-            return run.result
-        if not self.set_gripper(arm, preopen):
-            return run.abort('gripper pre-open failed')
-        if not self.move_frame_to(arm, hx - APPROACH_BACKOFF, hy, hz,
-                                  duration_sec=4, quat=grasp_quat, outer_gh=gh):
-            return run.abort('approach motion failed')
-
-        if not run.phase('grasp', 0.7):
-            return run.result
-        if not self.move_frame_to(arm, hx, hy, hz, duration_sec=2,
-                                  quat=grasp_quat, outer_gh=gh):
-            return run.abort('contact motion failed')
-        if not self.close_gripper(arm):
-            return run.abort('gripper close failed')
-        self.get_clock().sleep_for(RclpyDuration(seconds=GRIP_SETTLE_SEC))
-
-        return run.succeed(
-            f'grasped {goal.target_object!r} (antipodal: roll '
-            f'{math.degrees(roll):.0f} deg, width {width_mm:.0f} mm)')
-
-    def _exec_pick_place(self, gh):
-        """detect (place target) -> grasp (via the SkillGrasp client) ->
-        carry -> place -> release."""
-        goal = gh.request
-        run = _Run(self, gh, SkillPickPlace, 'pick_place')
-        arm = self._validated_arm(run, goal)
-        if arm is None:
-            return run.abort(f'invalid arm {goal.arm!r}')
-
-        if not run.phase('detect', 0.0):
-            return run.result
-        place = self.detect_object(goal.place_target)
-        if place is None:
-            return run.abort(f'no place target {goal.place_target!r} detected')
-        px, py, pz = place
-
-        if not run.phase('grasp', 0.2):
-            return run.result
-        ok, why = self._call_grasp_skill(gh, run, goal.target_object, arm)
-        if not ok:
-            return run.abort(f'grasp failed: {why}')
-
-        if not run.phase('carry', 0.5):
-            return run.result
-        hover_x = px - APPROACH_BACKOFF
-        if not self.move_frame_to(arm, hover_x, py, pz + PLACE_HOVER, duration_sec=4,
-                                  outer_gh=gh):
-            return run.abort('carry motion failed')
-
-        if not run.phase('place', 0.7):
-            return run.result
-        if not self.move_frame_to(arm, px, py, pz + 0.05,
-                                  duration_sec=3, outer_gh=gh):
-            return run.abort('place motion failed')
-
-        if not run.phase('release', 0.9):
-            return run.result
-        if not self.open_gripper(arm):
-            return run.abort('gripper release failed')
-        self.move_frame_to(arm, hover_x, py, pz + PLACE_HOVER, duration_sec=2,
-                           outer_gh=gh)  # retreat
-
-        return run.succeed(
-            f'placed {goal.target_object!r} at {goal.place_target!r}')
-
-    def _exec_press(self, gh):
-        """detect -> approach -> press past the button plane with a closed hand."""
-        goal = gh.request
-        run = _Run(self, gh, SkillPress, 'press')
-        arm = self._validated_arm(run, goal)
-        if arm is None:
-            return run.abort(f'invalid arm {goal.arm!r}')
-
-        if not run.phase('detect', 0.0):
-            return run.result
-        c = self.detect_object(goal.target_object)
-        if c is None:
-            return run.abort(f'no {goal.target_object!r} detected')
-        bx, by, bz = c
-        press_x = bx + PRESS_DEPTH
-        approach_x = press_x - APPROACH_BACKOFF
-
-        if not run.phase('approach', 0.3):
-            return run.result
-        if not self.close_gripper(arm):   # press with the knuckles
-            return run.abort('gripper close failed')
-        if not self.move_frame_to(arm, approach_x, by, bz, duration_sec=4, outer_gh=gh):
-            return run.abort('approach motion failed')
-
-        if not run.phase('press', 0.6):
-            return run.result
-        if not self.move_frame_to(arm, press_x, by, bz, duration_sec=2, outer_gh=gh):
-            return run.abort('press motion failed')
-        self.move_frame_to(arm, approach_x, by, bz, duration_sec=2, outer_gh=gh)  # retreat
-
-        return run.succeed(f'pressed {goal.target_object!r}')
-
-    def _exec_slide_rack(self, gh):
-        """detect -> grasp (composed via SkillGrasp) -> slide in/out along x."""
-        goal = gh.request
-        run = _Run(self, gh, SkillSlideRack, 'slide_rack')
-        arm = self._validated_arm(run, goal)
-        if arm is None:
-            return run.abort(f'invalid arm {goal.arm!r}')
-        direction = goal.direction.strip().lower()
-        if direction not in ('in', 'out'):
-            return run.abort(f'invalid direction {goal.direction!r} (use "in"|"out")')
-
-        if not run.phase('detect', 0.0):
-            return run.result
-        plan = self.detect_grasp(goal.target_object)
-        if plan is None:
-            return run.abort(f'no {goal.target_object!r} detected')
-        (rx, ry, rz), roll, _width = plan
-        grasp_quat = _roll_quat(roll)
-
-        if not run.phase('grasp', 0.4):
-            return run.result
-        ok, why = self._call_grasp_skill(gh, run, goal.target_object, arm)
-        if not ok:
-            return run.abort(f'grasp failed: {why}')
-
-        if not run.phase('slide', 0.75):
-            return run.result
-        slide = -SLIDE_DISTANCE if direction == 'out' else SLIDE_DISTANCE
-        if not self.move_frame_to(arm, rx + slide, ry, rz, duration_sec=4,
-                                  quat=grasp_quat, outer_gh=gh):
-            return run.abort('slide motion failed')
-        self.open_gripper(arm)   # release the rack
-
-        return run.succeed(f'slid {goal.target_object!r} {direction}')
-
-    def _exec_turn(self, action_type, label, motion_phase, gh):
-        """Shared lever/knob executor: detect -> grasp (composed via SkillGrasp)
-        -> rotate the wrist about the approach (+x) axis by the requested
-        signed angle, relative to the antipodal grasp roll."""
-        goal = gh.request
-        run = _Run(self, gh, action_type, label)
-        arm = self._validated_arm(run, goal)
-        if arm is None:
-            return run.abort(f'invalid arm {goal.arm!r}')
-        direction = goal.direction.strip().lower()
-        if direction not in ('cw', 'ccw'):
-            return run.abort(f'invalid direction {goal.direction!r} (use "cw"|"ccw")')
-        angle = goal.angle if goal.angle > 0.0 else DEFAULT_TURN_ANGLE
-        # cw/ccw are as seen by the robot FACING the mechanism: the rotation
-        # axis (+x, the approach direction) points away from the viewer, so a
-        # positive right-hand roll about +x (left edge up: +y -> +z) appears
-        # CLOCKWISE to the viewer.
-        signed = angle if direction == 'cw' else -angle
-
-        if not run.phase('detect', 0.0):
-            return run.result
-        plan = self.detect_grasp(goal.target_object)
-        if plan is None:
-            return run.abort(f'no {goal.target_object!r} detected')
-        (hx, hy, hz), roll, _width = plan
-
-        if not run.phase('grasp', 0.4):
-            return run.result
-        ok, why = self._call_grasp_skill(gh, run, goal.target_object, arm)
-        if not ok:
-            return run.abort(f'grasp failed: {why}')
-
-        if not run.phase(motion_phase, 0.75):
-            return run.result
-        # Twist RELATIVE to the antipodal grasp roll the wrist already holds —
-        # an absolute target of `signed` alone would first untwist the grasp.
-        if not self.move_frame_to(arm, hx, hy, hz, duration_sec=3,
-                                  quat=_roll_quat(roll + signed), outer_gh=gh):
-            return run.abort(f'{motion_phase} motion failed')
-        self.open_gripper(arm)   # release
-
-        return run.succeed(
-            f'{motion_phase}ed {goal.target_object!r} {direction} by {angle:.2f} rad')
-
-
-def main():
-    rclpy.init()
-    node = SkillsNode()
-    # Skills block inside their execute callbacks while waiting on inner
-    # service/action futures (and pick_place calls the grasp server hosted by
-    # this same node), so a multithreaded executor is required.
-    executor = MultiThreadedExecutor(num_threads=8)
-    executor.add_node(node)
-    try:
-        executor.spin()
-    except KeyboardInterrupt:
-        pass
-    finally:
-        node.destroy_node()
-        if rclpy.ok():
-            rclpy.shutdown()
-
-
-if __name__ == '__main__':
-    main()

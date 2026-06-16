@@ -24,7 +24,7 @@ setup(
     },
     entry_points={
         'console_scripts': [
-            'skills = h12_skills.skills:main',
+            'skills = h12_skills.node:main',
         ],
     },
 )
