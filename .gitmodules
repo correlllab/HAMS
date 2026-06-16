@@ -41,3 +41,6 @@
 [submodule "unitree_sdk2_python"]
 	path = unitree_sdk2_python
 	url = git@github.com:Oya-Tomo/unitree_sdk2_python.git
+[submodule "core_ws/src/estop"]
+	path = core_ws/src/estop
+	url = git@github.com:correlllab/estop.git
