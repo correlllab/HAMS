@@ -78,7 +78,9 @@ ENV CYCLONEDDS_HOME=/cyclonedds/install
 # the image for development/debugging.
 COPY unitree_sdk2_python /home/code/unitree_sdk2_python
 RUN cd /home/code/unitree_sdk2_python && \
-    uv pip install --system .
+    uv pip install --system . && \
+    SP=$(python3 -c "import site; print(site.getsitepackages()[0])") && \
+    cp -r /home/code/unitree_sdk2_python/unitree_sdk2py/* "$SP/unitree_sdk2py/"
 
 # PyTorch with CUDA 13.0 (supports sm_120 / Blackwell, e.g. RTX 5070 Ti).
 # Bundled CUDA runtime is self-contained — no host toolkit version dependency.

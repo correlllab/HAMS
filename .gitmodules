@@ -8,7 +8,7 @@
 [submodule "core_ws/src/h12_ros2_controller"]
 	path = core_ws/src/h12_ros2_controller
 	url = git@github.com:correlllab/h12_ros2_controller.git
-	branch = unified_sim
+	branch = main
 [submodule "core_ws/src/h12_ros2_model"]
 	path = core_ws/src/h12_ros2_model
 	url = git@github.com:correlllab/h12_ros2_model.git
