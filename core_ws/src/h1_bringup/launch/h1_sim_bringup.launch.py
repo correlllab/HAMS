@@ -92,11 +92,11 @@ def generate_launch_description():
             package='h12_ros2_controller',
             executable='frame_task_server',
             name='frame_task_server',
-            arguments=['--config', 'safety_split.yaml'],
+            arguments=['--config', 'sim_safety_split.yaml'],
             parameters=[sim_time_param],
             output='screen',
         ),
-        
+
         # vision_pipeline (from vp.launch.py, minus rviz)
         Node(
             package='vision_pipeline',
