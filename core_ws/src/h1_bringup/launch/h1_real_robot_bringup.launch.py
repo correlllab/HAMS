@@ -3,13 +3,10 @@ import os
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import (
-    DeclareLaunchArgument,
     IncludeLaunchDescription,
     TimerAction,
 )
-from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
-from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 
 # IMPORTANT: ROS_DOMAIN_ID must be exported in the launching shell. The safety
@@ -40,8 +37,16 @@ def generate_launch_description():
         ),
         launch_arguments={'use_sim_time': 'false'}.items(),
     )
+    sensor_launch = IncludeLaunchDescription(
+        PythonLaunchDescriptionSource(
+            os.path.join(bringup_share, 'launch', 'h1_sensors.launch.py')
+        ),
+        launch_arguments={'use_sim_time': 'false'}.items(),
+    )
 
     return LaunchDescription([
+
+        sensor_launch,
 
         nav_launch,
 
@@ -84,18 +89,18 @@ def generate_launch_description():
             ]
         ),
         
-        TimerAction(
-            period=5.0,
-            actions=[
-                Node(
-                    package='h12_ros2_controller',
-                    executable='frame_task_server',
-                    name='frame_task_server',
-                    arguments=['--config', 'tight_safety_split.yaml'],
-                    parameters=[sim_time_param],
-                    output='screen',
-                ),
-            ]
-        ),
+        # TimerAction(
+        #     period=5.0,
+        #     actions=[
+        #         Node(
+        #             package='h12_ros2_controller',
+        #             executable='frame_task_server',
+        #             name='frame_task_server',
+        #             arguments=['--config', 'tight_safety_split.yaml'],
+        #             parameters=[sim_time_param],
+        #             output='screen',
+        #         ),
+        #     ]
+        # ),
         
     ])

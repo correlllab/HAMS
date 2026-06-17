@@ -44,3 +44,6 @@
 [submodule "core_ws/src/estop"]
 	path = core_ws/src/estop
 	url = git@github.com:correlllab/estop.git
+[submodule "core_ws/src/cl_realsense"]
+	path = core_ws/src/cl_realsense
+	url = git@github.com:correlllab/cl_realsense.git
