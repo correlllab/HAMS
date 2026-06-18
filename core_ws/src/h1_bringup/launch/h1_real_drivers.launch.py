@@ -51,8 +51,8 @@ def generate_launch_description():
     # relative), so each side is distinguished by namespace; topics/services
     # land under /left/... and /right/.... auto_detect_port MUST be False with
     # two grippers attached, otherwise both race for the first /dev/ttyUSB*|ACM*.
-    # TODO: replace the placeholder ports with the stable per-gripper paths from
-    # `ls -l /dev/serial/by-id/` (or a udev rule) so left/right never swap.
+    # Ports are the stable /dev/serial/by-id/ paths (follow the board's USB
+    # serial, so they survive reboots/replugs and never swap left<->right).
     left_gripper = Node(
         package='magpie_control',
         executable='gripper_node',
@@ -61,8 +61,16 @@ def generate_launch_description():
         output='screen',
         parameters=[{
             'auto_detect_port': False,
-            'port': '/dev/ttyUSB0',  # TODO: /dev/serial/by-id/...-LEFT
+            # OpenRB-150 serial ...FF101F14 (was ttyACM0)
+            'port': '/dev/serial/by-id/usb-ROBOTIS_OpenRB-150_B0935A515157375037202020FF101F14-if00',
             'use_eflesh': False,
+            # Finger angle limits (degrees), per-gripper calibration.
+            'finger1theta_min': 86.8,
+            'finger1theta_max': 164.52,
+            'finger1theta_90': 138.02,
+            'finger2theta_min': 130.5,
+            'finger2theta_max': 210.56,
+            'finger2theta_90': 157.0,
         }],
     )
 
@@ -74,8 +82,16 @@ def generate_launch_description():
         output='screen',
         parameters=[{
             'auto_detect_port': False,
-            'port': '/dev/ttyUSB1',  # TODO: /dev/serial/by-id/...-RIGHT
+            # OpenRB-150 serial ...FF122F35 (was ttyACM1)
+            'port': '/dev/serial/by-id/usb-ROBOTIS_OpenRB-150_9F2640E15157375037202020FF122F35-if00',
             'use_eflesh': False,
+            # Finger angle limits (degrees), per-gripper calibration.
+            'finger1theta_min': 86.51,
+            'finger1theta_max': 168.33,
+            'finger1theta_90': 141.83,
+            'finger2theta_min': 132.55,
+            'finger2theta_max': 211.44,
+            'finger2theta_90': 159.05,
         }],
     )
 
