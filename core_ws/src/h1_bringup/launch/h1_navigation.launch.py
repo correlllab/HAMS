@@ -51,10 +51,10 @@ def generate_launch_description():
     # Attach FAST-LIO's 'body' frame to H1's 'pelvis' frame.
     #
     # FAST-LIO publishes camera_init -> body where 'body' is the IMU frame
-    # (livox_imu_site in MJCF, which sits at the origin of lidar_link).
-    # So body == lidar_link at startup. The URDF places lidar_link on torso_link at
+    # (livox_imu_site in MJCF, which sits at the origin of livox_link).
+    # So body == livox_link at startup. The URDF places livox_link on torso_link at
     #   xyz=(0.04874, 0, 0.67980) rpy=(0, 0.24015730507441985, 0)
-    # (see CL_Assets/ros_assets/h1_2_magpie_ros.urdf, lidar_joint), and torso_joint
+    # (see CL_Assets/ros_assets/h1_2_magpie_ros.urdf, livox_joint), and torso_joint
     # sits at the pelvis origin with identity rotation.
     #
     # Inverting that transform (body -> pelvis):

@@ -347,10 +347,6 @@ Visualization Manager:
           Alpha: 1
           Show Axes: false
           Show Trail: false
-        head_camera_link:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
         imu_link:
           Alpha: 1
           Show Axes: false
@@ -469,7 +465,7 @@ Visualization Manager:
           Show Axes: false
           Show Trail: false
           Value: true
-        lidar_link:
+        livox_link:
           Alpha: 1
           Show Axes: false
           Show Trail: false
