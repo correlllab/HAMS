@@ -16,6 +16,7 @@ from launch_ros.actions import Node
 # rclpy nodes that pick up the env directly. If the variable is missing, the
 # DDS half and the rclpy half can end up on different domains and the safety
 # layer will see no commands.
+""
 ASSETS_DIR = '/home/unitree/Humanoid_Simulation/CL_Assets'
 
 def generate_launch_description():
@@ -39,7 +40,7 @@ def generate_launch_description():
     )
     drivers_launch = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
-            os.path.join(bringup_share, 'launch', 'h1_drivers.launch.py')
+            os.path.join(bringup_share, 'launch', 'h1_real_drivers.launch.py')
         ),
         launch_arguments={'use_sim_time': 'false'}.items(),
     )
@@ -96,7 +97,7 @@ def generate_launch_description():
                     package='h12_ros2_controller',
                     executable='frame_task_server',
                     name='frame_task_server',
-                    arguments=['--config', 'tight_safety_split.yaml'],
+                    arguments=['--config', 'safety_split.yaml'],
                     parameters=[sim_time_param],
                     output='screen',
                 ),
