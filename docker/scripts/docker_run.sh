@@ -28,9 +28,26 @@ fi
 # container restarts (see docker-compose.yml).
 mkdir -p container_cache/msgs_ws
 
-# Normalize ROS_DOMAIN_ID: treat 0/unset/empty as 1, otherwise pass through.
-# Sims publish on domain 1; domain 0 is reserved for the real robot.
-if [ -z "${ROS_DOMAIN_ID:-}" ] || [ "${ROS_DOMAIN_ID}" = "0" ]; then
+# ROS_DOMAIN_ID handling. Domain 0 is the real robot's DDS command bus.
+#   - Sims (isaac/mujoco) must never run on it: reject an explicit 0 loudly.
+#   - The ros profile may use it (real robot), but only after confirming the
+#     interactive prompt below.
+#   - An unset/empty value defaults to 1, the simulation domain.
+if [ "${ROS_DOMAIN_ID:-}" = "0" ]; then
+    if [ "$SIM" != "ros" ]; then
+        echo "ERROR: ROS_DOMAIN_ID=0 is the real robot's DDS domain; the '$SIM' sim may not run on it." >&2
+        echo "       Set ROS_DOMAIN_ID to a positive value (e.g. 1) in docker/.env, or unset it to default to 1." >&2
+        exit 1
+    fi
+    echo "WARNING: ROS_DOMAIN_ID=0 -> DDS domain 0 is the REAL ROBOT command bus." >&2
+    echo "         Nodes will publish/subscribe on the live robot." >&2
+    read -r -p "Proceed on DDS domain 0 (real robot)? [y/N] " reply
+    case "$reply" in
+        y|Y|yes|YES|Yes) ;;
+        *) echo "Aborted: refused to run on DDS domain 0." >&2; exit 1 ;;
+    esac
+fi
+if [ -z "${ROS_DOMAIN_ID:-}" ]; then
     export ROS_DOMAIN_ID=1
 fi
 

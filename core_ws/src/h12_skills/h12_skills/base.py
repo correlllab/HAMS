@@ -69,7 +69,8 @@ from custom_ros_messages.action import (
     SkillTurnLever, SkillTwistKnob,
 )
 from nav2_msgs.action import NavigateToPose
-from magpie_msgs.srv import SetGripperPosition
+from magpie_msgs.srv import SetGripperPosition, SetGripperForce
+from std_srvs.srv import Trigger
 
 
 CAMERA_NS = '/realsense/head'
@@ -82,12 +83,16 @@ GEMINI_MODEL = 'gemini-robotics-er-1.6-preview'
 # yaw links with the same orientation, pushed forward to the fingertips, so
 # frame_task targets are the grasp point itself (no reach offset needed).
 ARM_FRAMES = {'left': 'left_grip_site', 'right': 'right_grip_site'}
-GRIPPER_SRVS = {'left': '/gripper/left/set_position',
-                'right': '/gripper/right/set_position'}
+# Per-arm gripper service namespace; the magpie driver/sim expose
+# <ns>/set_position, <ns>/set_force, <ns>/open and <ns>/close under each.
+GRIPPER_NS = {'left': '/left/gripper', 'right': '/right/gripper'}
 
-# Gripper travel (mm), matching slider_debugger / the magpie hands.
+# Grasp pre-open width fallback (mm), matching slider_debugger / the magpie
+# hands. Full open/close now go through the dedicated services, not a mm value.
 GRIPPER_OPEN_MM = 85.0
-GRIPPER_CLOSED_MM = 0.0
+# Grip-force limit (N) applied via set_force before closing on an object, so the
+# jaws squeeze with a bounded force rather than the full motor torque.
+GRIP_FORCE_N = 30.0
 
 # Antipodal grasping. The parallel-jaw fingers are assumed to close along the
 # wrist's +y axis at identity orientation; the wrist rolls about +x (the
@@ -318,9 +323,25 @@ class SkillsBase(Node):
             UpdateBeliefs, '/vp_update_beliefs', callback_group=self._cb_group)
         self.query_cli = self.create_client(
             Query, '/vp_query_tracked_objects', callback_group=self._cb_group)
+        # set_position (measured-width pre-open) plus the dedicated open/close/
+        # set_force services, one client per arm.
         self.gripper_clis = {
-            arm: self.create_client(SetGripperPosition, srv, callback_group=self._cb_group)
-            for arm, srv in GRIPPER_SRVS.items()
+            arm: self.create_client(SetGripperPosition, f'{ns}/set_position',
+                                    callback_group=self._cb_group)
+            for arm, ns in GRIPPER_NS.items()
+        }
+        self.gripper_open_clis = {
+            arm: self.create_client(Trigger, f'{ns}/open', callback_group=self._cb_group)
+            for arm, ns in GRIPPER_NS.items()
+        }
+        self.gripper_close_clis = {
+            arm: self.create_client(Trigger, f'{ns}/close', callback_group=self._cb_group)
+            for arm, ns in GRIPPER_NS.items()
+        }
+        self.gripper_force_clis = {
+            arm: self.create_client(SetGripperForce, f'{ns}/set_force',
+                                    callback_group=self._cb_group)
+            for arm, ns in GRIPPER_NS.items()
         }
 
         # --- action clients (arm IK + nav2) -----------------------------------
@@ -359,8 +380,10 @@ class SkillsBase(Node):
         self.track_cli.wait_for_service(timeout_sec=10.0)
         self.beliefs_cli.wait_for_service(timeout_sec=10.0)
         self.query_cli.wait_for_service(timeout_sec=10.0)
-        for cli in self.gripper_clis.values():
-            cli.wait_for_service(timeout_sec=10.0)
+        for clis in (self.gripper_clis, self.gripper_open_clis,
+                     self.gripper_close_clis, self.gripper_force_clis):
+            for cli in clis.values():
+                cli.wait_for_service(timeout_sec=10.0)
         self.frame_task_cli.wait_for_server(timeout_sec=10.0)
         self.nav_cli.wait_for_server(timeout_sec=10.0)
 
@@ -619,6 +642,8 @@ class SkillsBase(Node):
         return response is not None and response.status == GoalStatus.STATUS_SUCCEEDED
 
     def set_gripper(self, arm, position_mm, speed=1.0):
+        """Direct position command (mm); used to pre-open to a measured grasp
+        width. Full open/close go through the dedicated services below."""
         req = SetGripperPosition.Request()
         req.position = float(position_mm)
         req.speed = float(speed)
@@ -631,11 +656,35 @@ class SkillsBase(Node):
             f'actual={result.actual_position:.2f} mm — {result.message}')
         return result.success
 
+    def set_gripper_force(self, arm, max_force_n=GRIP_FORCE_N):
+        """Bound the grip force (N) before closing on an object."""
+        req = SetGripperForce.Request()
+        req.max_force = float(max_force_n)
+        result = self._call_service(
+            self.gripper_force_clis[arm], req, f'SetGripperForce({arm})')
+        if result is None:
+            return False
+        self.get_logger().info(
+            f'gripper {arm} force limit {max_force_n:.1f} N: '
+            f'success={result.success} — {result.message}')
+        return result.success
+
+    def _trigger_gripper(self, client, name):
+        result = self._call_service(client, Trigger.Request(), name)
+        if result is None:
+            return False
+        self.get_logger().info(f'{name}: success={result.success} — {result.message}')
+        return result.success
+
     def open_gripper(self, arm):
-        return self.set_gripper(arm, GRIPPER_OPEN_MM)
+        """Open fully via the dedicated open service."""
+        return self._trigger_gripper(self.gripper_open_clis[arm], f'gripper/open({arm})')
 
     def close_gripper(self, arm):
-        return self.set_gripper(arm, GRIPPER_CLOSED_MM)
+        """Bound the grip force, then close fully on the object."""
+        if not self.set_gripper_force(arm):
+            return False
+        return self._trigger_gripper(self.gripper_close_clis[arm], f'gripper/close({arm})')
 
     def navigate_to(self, x, y, yaw=0.0, frame='map', timeout_sec=120.0, outer_gh=None):
         goal = NavigateToPose.Goal()

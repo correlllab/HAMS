@@ -37,8 +37,8 @@ class SliderDebugger(Node):
     def __init__(self):
         super().__init__('slider_debugger')
 
-        self.declare_parameter('left_gripper_service', '/gripper/left/set_position')
-        self.declare_parameter('right_gripper_service', '/gripper/right/set_position')
+        self.declare_parameter('left_gripper_service', '/left/gripper/set_position')
+        self.declare_parameter('right_gripper_service', '/right/gripper/set_position')
         self.declare_parameter('gripper_max_mm', 85.0)
         self.left_gripper_srv_name = self.get_parameter('left_gripper_service').value
         self.right_gripper_srv_name = self.get_parameter('right_gripper_service').value

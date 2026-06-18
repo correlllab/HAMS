@@ -15,7 +15,8 @@ from tf2_geometry_msgs import do_transform_point
 from custom_ros_messages.srv import UpdateTrackedObject, UpdateBeliefs, Query
 from custom_ros_messages.action import FrameTask
 from nav2_msgs.action import NavigateToPose
-from magpie_msgs.srv import SetGripperPosition
+from magpie_msgs.srv import SetGripperPosition, SetGripperForce
+from std_srvs.srv import Trigger
 import struct
 import numpy as np
 
@@ -23,7 +24,13 @@ import numpy as np
 TARGET_QUERY = 'fridge handle'
 CAMERA_NS = '/realsense/head'
 ARM_FRAME = 'right_wrist_yaw_link'
-GRIPPER_SRV = '/gripper/right/set_position'
+GRIPPER_NS = '/right/gripper'
+GRIPPER_SET_POSITION_SRV = f'{GRIPPER_NS}/set_position'
+GRIPPER_OPEN_SRV = f'{GRIPPER_NS}/open'
+GRIPPER_CLOSE_SRV = f'{GRIPPER_NS}/close'
+GRIPPER_SET_FORCE_SRV = f'{GRIPPER_NS}/set_force'
+# Grip-force limit (N) applied via set_force before closing on the handle.
+GRIP_FORCE_N = 30.0
 
 
 class FridgeOpener(Node):
@@ -34,7 +41,10 @@ class FridgeOpener(Node):
         self.beliefs_cli = self.create_client(UpdateBeliefs, '/vp_update_beliefs')
         self.query_cli = self.create_client(Query, '/vp_query_tracked_objects')
         self.frame_task_cli = ActionClient(self, FrameTask, '/frame_task')
-        self.gripper_cli = self.create_client(SetGripperPosition, GRIPPER_SRV)
+        self.gripper_cli = self.create_client(SetGripperPosition, GRIPPER_SET_POSITION_SRV)
+        self.gripper_open_cli = self.create_client(Trigger, GRIPPER_OPEN_SRV)
+        self.gripper_close_cli = self.create_client(Trigger, GRIPPER_CLOSE_SRV)
+        self.gripper_force_cli = self.create_client(SetGripperForce, GRIPPER_SET_FORCE_SRV)
         self.nav_cli = ActionClient(self, NavigateToPose, '/navigate_to_pose')
 
         self.tf_buffer = Buffer()
@@ -45,7 +55,9 @@ class FridgeOpener(Node):
         self.beliefs_cli.wait_for_service(timeout_sec=10.0)
         self.query_cli.wait_for_service(timeout_sec=10.0)
         self.frame_task_cli.wait_for_server(timeout_sec=10.0)
-        self.gripper_cli.wait_for_service(timeout_sec=10.0)
+        for cli in (self.gripper_cli, self.gripper_open_cli,
+                    self.gripper_close_cli, self.gripper_force_cli):
+            cli.wait_for_service(timeout_sec=10.0)
         self.nav_cli.wait_for_server(timeout_sec=10.0)
         self.get_logger().info('All endpoints ready.')
 
@@ -170,6 +182,7 @@ class FridgeOpener(Node):
         return status == GoalStatus.STATUS_SUCCEEDED
 
     def set_gripper(self, position_mm, speed=1.0):
+        """Direct position command (mm), e.g. to pre-open to a measured width."""
         req = SetGripperPosition.Request()
         req.position = float(position_mm)
         req.speed = float(speed)
@@ -181,11 +194,33 @@ class FridgeOpener(Node):
         )
         return result.success
 
-    def open_gripper(self, position_mm=85.0, speed=1.0):
-        return self.set_gripper(position_mm, speed)
+    def set_force(self, max_force_n=GRIP_FORCE_N):
+        """Bound the grip force (N) before closing on an object."""
+        req = SetGripperForce.Request()
+        req.max_force = float(max_force_n)
+        result = self._call(self.gripper_force_cli, req, 'SetGripperForce')
+        if result is None:
+            return False
+        self.get_logger().info(
+            f'gripper force limit {max_force_n:.1f} N: success={result.success} — {result.message}')
+        return result.success
 
-    def close_gripper(self, position_mm=0.0, speed=1.0):
-        return self.set_gripper(position_mm, speed)
+    def _trigger(self, client, name):
+        result = self._call(client, Trigger.Request(), name)
+        if result is None:
+            return False
+        self.get_logger().info(f'{name}: success={result.success} — {result.message}')
+        return result.success
+
+    def open_gripper(self):
+        """Open fully via the dedicated open service."""
+        return self._trigger(self.gripper_open_cli, 'gripper/open')
+
+    def close_gripper(self):
+        """Bound the grip force, then close fully on the object."""
+        if not self.set_force():
+            return False
+        return self._trigger(self.gripper_close_cli, 'gripper/close')
 
 
 def _centroid_from_cloud(cloud):
@@ -254,7 +289,7 @@ def main():
             return
 
         node.get_logger().info('=== Close gripper on handle ===')
-        if not node.close_gripper(position_mm=0.0, speed=1.0):
+        if not node.close_gripper():
             node.get_logger().error('Gripper close failed.')
             return
         node.get_clock().sleep_for(RclpyDuration(seconds=5.0))

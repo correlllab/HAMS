@@ -10,6 +10,7 @@
   <depend>rclpy</depend>
   <depend>custom_ros_messages</depend>
   <depend>magpie_msgs</depend>
+  <depend>std_srvs</depend>
   <depend>nav2_msgs</depend>
   <depend>tf2_ros</depend>
   <depend>sensor_msgs</depend>

@@ -46,7 +46,42 @@ def generate_launch_description():
         )
     )
 
+    # Magpie grippers, one node per side. The gripper_node has no built-in
+    # left/right concept (node name, gripper/state topic and services are all
+    # relative), so each side is distinguished by namespace; topics/services
+    # land under /left/... and /right/.... auto_detect_port MUST be False with
+    # two grippers attached, otherwise both race for the first /dev/ttyUSB*|ACM*.
+    # TODO: replace the placeholder ports with the stable per-gripper paths from
+    # `ls -l /dev/serial/by-id/` (or a udev rule) so left/right never swap.
+    left_gripper = Node(
+        package='magpie_control',
+        executable='gripper_node',
+        name='gripper_node',
+        namespace='left',
+        output='screen',
+        parameters=[{
+            'auto_detect_port': False,
+            'port': '/dev/ttyUSB0',  # TODO: /dev/serial/by-id/...-LEFT
+            'use_eflesh': False,
+        }],
+    )
+
+    right_gripper = Node(
+        package='magpie_control',
+        executable='gripper_node',
+        name='gripper_node',
+        namespace='right',
+        output='screen',
+        parameters=[{
+            'auto_detect_port': False,
+            'port': '/dev/ttyUSB1',  # TODO: /dev/serial/by-id/...-RIGHT
+            'use_eflesh': False,
+        }],
+    )
+
     return LaunchDescription([
         livox_mid360,
         realsense_cams,
+        left_gripper,
+        right_gripper,
     ])

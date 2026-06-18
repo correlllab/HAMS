@@ -47,3 +47,6 @@
 [submodule "core_ws/src/cl_realsense"]
 	path = core_ws/src/cl_realsense
 	url = git@github.com:correlllab/cl_realsense.git
+[submodule "core_ws/src/magpie_control"]
+	path = core_ws/src/magpie_control
+	url = git@github.com:correlllab/magpie_control.git

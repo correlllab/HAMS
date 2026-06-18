@@ -3,6 +3,7 @@ import os
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import (
+    DeclareLaunchArgument,
     TimerAction,
 )
 from launch.conditions import IfCondition
@@ -32,6 +33,12 @@ def generate_launch_description():
 
     return LaunchDescription([
         
+        # Engage the FAME lower-body standing policy only once the operator has
+        # verified the robot is in a safe start position
+        # (start_position_verified:=true). Defaults to false so a bare launch
+        # never auto-commands the legs on the real robot.
+        DeclareLaunchArgument('start_position_verified', default_value='false'),
+
         # vision_pipeline (from vp.launch.py, minus rviz)
         Node(
             package='vision_pipeline',
@@ -44,22 +51,23 @@ def generate_launch_description():
         # Switchable lower-body RL controller (walk / FAME stand-squat).
         # Auto-engages the FAME standing policy; switch via /lowerbody/start_walk
         # or /lowerbody/set_policy (waits for a safe handover before committing).
+        # Only launched once the start position has been verified.
         Node(
             package='h12_lowerbody_controller',
             executable='lowerbody_controller_node',
             name='lowerbody_controller_node',
             parameters=[sim_time_param, {'active_policy': 'fame'}],
             output='screen',
+            condition=IfCondition(LaunchConfiguration('start_position_verified')),
         ),
 
         Node(
             package='rviz2',
             executable='rviz2',
             name='rviz2_sim',
-            arguments=['-d', LaunchConfiguration('rviz_config')],
+            arguments=['-d',default_rviz],
             parameters=[sim_time_param],
             output='screen',
-            condition=IfCondition(LaunchConfiguration('use_rviz')),
         ),
 
         # slider_debugger waits up to 5s on /left_ee_pose & /right_ee_pose,
@@ -80,7 +88,6 @@ def generate_launch_description():
                     executable='slider_debugger.py',
                     name='slider_debugger',
                     output='screen',
-                    condition=IfCondition(LaunchConfiguration('use_sliders')),
                 ),
             ],
         ),

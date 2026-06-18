@@ -16,7 +16,7 @@ from launch_ros.actions import Node
 # rclpy nodes that pick up the env directly. If the variable is missing, the
 # DDS half and the rclpy half can end up on different domains and the safety
 # layer will see no commands.
-ASSETS_DIR = '/home/code/CL_Assets'
+ASSETS_DIR = '/home/unitree/Humanoid_Simulation/CL_Assets'
 
 def generate_launch_description():
     # The included h12_ros2_controller/full_launch.py and vision_pipeline/vp.launch.py
@@ -37,16 +37,16 @@ def generate_launch_description():
         ),
         launch_arguments={'use_sim_time': 'false'}.items(),
     )
-    sensor_launch = IncludeLaunchDescription(
+    drivers_launch = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
-            os.path.join(bringup_share, 'launch', 'h1_sensors.launch.py')
+            os.path.join(bringup_share, 'launch', 'h1_drivers.launch.py')
         ),
         launch_arguments={'use_sim_time': 'false'}.items(),
     )
 
     return LaunchDescription([
 
-        sensor_launch,
+        drivers_launch,
 
         nav_launch,
 
@@ -83,24 +83,24 @@ def generate_launch_description():
                     executable='safety_node',
                     name='safety_node',
                     parameters=[sim_time_param, ],
-                    arguments=['--config', "tight_safety_split.yaml"],
+                    arguments=['--config', "default_safety_split.yaml"],
                     output='screen',
                 ),
             ]
         ),
         
-        # TimerAction(
-        #     period=5.0,
-        #     actions=[
-        #         Node(
-        #             package='h12_ros2_controller',
-        #             executable='frame_task_server',
-        #             name='frame_task_server',
-        #             arguments=['--config', 'tight_safety_split.yaml'],
-        #             parameters=[sim_time_param],
-        #             output='screen',
-        #         ),
-        #     ]
-        # ),
+        TimerAction(
+            period=5.0,
+            actions=[
+                Node(
+                    package='h12_ros2_controller',
+                    executable='frame_task_server',
+                    name='frame_task_server',
+                    arguments=['--config', 'tight_safety_split.yaml'],
+                    parameters=[sim_time_param],
+                    output='screen',
+                ),
+            ]
+        ),
         
     ])
