@@ -253,7 +253,7 @@ Visualization Manager:
         Durability Policy: Volatile
         History Policy: Keep Last
         Reliability Policy: Best Effort
-        Value: /realsense/head/aligned_depth_to_color/image_raw
+        Value: /realsense/head/aligned_depth_to_color/image_raw/compressed
       Value: true
     - Class: rviz_default_plugins/Image
       Enabled: true
@@ -267,7 +267,7 @@ Visualization Manager:
         Durability Policy: Volatile
         History Policy: Keep Last
         Reliability Policy: Best Effort
-        Value: /realsense/head/color/image_raw
+        Value: /realsense/head/color/image_raw/compressed
       Value: true
     - Class: rviz_default_plugins/Image
       Enabled: true
@@ -281,7 +281,7 @@ Visualization Manager:
         Durability Policy: Volatile
         History Policy: Keep Last
         Reliability Policy: Best Effort
-        Value: /realsense/left_hand/aligned_depth_to_color/image_raw
+        Value: /realsense/left_hand/aligned_depth_to_color/image_raw/compressed
       Value: true
     - Class: rviz_default_plugins/Image
       Enabled: true
@@ -295,7 +295,7 @@ Visualization Manager:
         Durability Policy: Volatile
         History Policy: Keep Last
         Reliability Policy: Best Effort
-        Value: /realsense/left_hand/color/image_raw
+        Value: /realsense/left_hand/color/image_raw/compressed
       Value: true
     - Class: rviz_default_plugins/Image
       Enabled: true
@@ -309,7 +309,7 @@ Visualization Manager:
         Durability Policy: Volatile
         History Policy: Keep Last
         Reliability Policy: Best Effort
-        Value: /realsense/right_hand/aligned_depth_to_color/image_raw
+        Value: /realsense/right_hand/aligned_depth_to_color/image_raw/compressed
       Value: true
     - Class: rviz_default_plugins/Image
       Enabled: true
@@ -323,7 +323,7 @@ Visualization Manager:
         Durability Policy: Volatile
         History Policy: Keep Last
         Reliability Policy: Best Effort
-        Value: /realsense/right_hand/color/image_raw
+        Value: /realsense/right_hand/color/image_raw/compressed
       Value: true
     - Alpha: 1
       Class: rviz_default_plugins/RobotModel

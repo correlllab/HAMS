@@ -48,6 +48,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         ros-humble-rosidl-generator-dds-idl \
         # ROS message types referenced across the workspace
         ros-humble-image-transport \
+        ros-humble-compressed-image-transport \
         ros-humble-vision-msgs \
         ros-humble-nav-msgs \
         ros-humble-std-msgs \
