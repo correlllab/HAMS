@@ -39,11 +39,18 @@ def generate_launch_description():
         # never auto-commands the legs on the real robot.
         DeclareLaunchArgument('start_position_verified', default_value='false'),
 
-        # vision_pipeline (from vp.launch.py, minus rviz)
+        # vision foundation-model services (replaces the vision_pipeline vp node)
         Node(
             package='vision_pipeline',
-            executable='vp',
-            name='vp_node',
+            executable='gemini_server',
+            name='gemini_server',
+            parameters=[sim_time_param],
+            output='screen',
+        ),
+        Node(
+            package='vision_pipeline',
+            executable='sam_server',
+            name='sam_server',
             parameters=[sim_time_param],
             output='screen',
         ),
