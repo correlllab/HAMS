@@ -253,3 +253,91 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         ros-humble-diagnostic-updater \
         ros-humble-foxglove-bridge \
     && rm -rf /var/lib/apt/lists/*
+
+# -----------------------------------------------------------------------------
+# GraspGenX (NVlabs) — installed IN-PLACE into system Python (no uv / no venv).
+#
+# Strategy: install the package --no-deps (prebuilt wheel), then install its deps
+# under a FULL pip-freeze constraint so additive deps can only ADD packages,
+# never change an installed one (torch 2.12.1+cu130, torchvision, timm,
+# transformers, numpy, Pillow, setuptools ...).
+#
+# The diffusion model IS enabled in-place: diffusers==0.11.1 needs
+# huggingface-hub<0.26 (it imports the removed `cached_download`), so we downgrade
+# huggingface-hub 0.27.0 -> 0.25.2 — the one version that ALSO satisfies
+# transformers 4.47.1. Validated that the vision stack
+# (SAM2/SAM3/CLIP/timm/ultralytics/open3d) still imports under 0.25.2 and that
+# graspgenx.grasp_server.GraspGenXSampler imports. Only huggingface-hub moves;
+# everything else stays pinned.
+#
+# Still NOT installed (not needed for grasp inference): pyrender/PyOpenGL, viser,
+# scene-synthesizer (rendering/viz), urdfpy (yourdfpy is used instead). Running an
+# actual grasp additionally needs the checkpoints + gripper_descriptions assets
+# (staged dirs below; see .claude/plans). Appended last so iterating here can't
+# bust the heavy layers above.
+# -----------------------------------------------------------------------------
+ENV GRASPGENX_CHECKPOINT_DIR=/opt/graspgenx/ext/graspgenx_checkpoints \
+    GRASPGENX_GRIPPER_CFG_DIR=/opt/graspgenx/ext/gripper_descriptions
+
+# Clone source + install the package (importable) without pulling its deps.
+# GraspGenX uses PEP 621 [project] metadata, but the system setuptools is clamped
+# to 59.6.0 (RosDockerfile:180-187, required for colcon) which predates PEP 621 —
+# and pip 22.0.2 build isolation lets that old setuptools win, producing a bogus
+# "UNKNOWN-0.0.0" wheel. So we stage a modern setuptools to /tmp/bsetup, build the
+# wheel against it (PYTHONPATH + --no-build-isolation), then install the prebuilt
+# wheel with the system pip: the build sees PEP 621, but the system's
+# colcon-critical setuptools 59.6.0 is never touched. Source stays at /opt/graspgenx.
+RUN git clone --depth 1 https://github.com/NVlabs/GraspGenX.git /opt/graspgenx \
+    && pip install --no-cache-dir --target=/tmp/bsetup "setuptools>=64,<78" wheel setuptools-scm \
+    && SETUPTOOLS_SCM_PRETEND_VERSION=1.0.0 PYTHONPATH=/tmp/bsetup \
+         pip wheel --no-deps --no-build-isolation -w /tmp/gwheel /opt/graspgenx \
+    && pip install --no-cache-dir --no-deps /tmp/gwheel/graspgenx-*.whl \
+    && rm -rf /tmp/bsetup /tmp/gwheel
+
+# Remove a broken Pillow dist-info ghost (pillow-12.2.0.dist-info holds only a
+# REQUESTED file, no METADATA) left in an upstream layer; it crashes pip's
+# metadata scan the moment a Pillow-dependent dep is touched. The real, intact
+# Pillow 11.0.0 install is untouched.
+RUN rm -rf /usr/local/lib/python3.10/dist-packages/pillow-12.2.0.dist-info
+
+# Freeze the ENTIRE current environment as the additive-install constraints (see
+# header). grep '==' drops editable / file-url / comment lines pip freeze emits.
+RUN pip freeze 2>/dev/null | grep '==' > /opt/graspgenx-constraints.txt
+
+# Additive GraspGenX deps that install cleanly under the full freeze (validated
+# in a throwaway container: exit 0, every pinned package unchanged).
+RUN PIP_CONSTRAINT=/opt/graspgenx-constraints.txt pip install --no-cache-dir \
+        "trimesh==4.5.3" \
+        "yourdfpy==0.0.56" \
+        torch-geometric \
+        tensordict \
+        webdataset \
+        sharedarray \
+        python-fcl \
+        addict \
+        "yapf==0.40.1" \
+        tensorboardx \
+        h5py \
+        imageio
+
+# Enable the diffusion model IN-PLACE: diffusers 0.11.1 needs huggingface-hub<0.26
+# (it imports the removed `cached_download`), so downgrade huggingface-hub
+# 0.27.0 -> 0.25.2 — the one version that also satisfies transformers 4.47.1.
+# Validated: SAM2/SAM3/CLIP/timm/ultralytics/open3d still import under 0.25.2 and
+# graspgenx.grasp_server.GraspGenXSampler imports. Constraint = the full freeze
+# MINUS huggingface-hub, so ONLY hf-hub moves; torch/torchvision/timm/transformers/
+# numpy/Pillow/setuptools stay pinned.
+RUN grep -viE '^huggingface[-_]hub==' /opt/graspgenx-constraints.txt \
+        > /opt/graspgenx-constraints-nohf.txt \
+    && PIP_CONSTRAINT=/opt/graspgenx-constraints-nohf.txt pip install --no-cache-dir \
+        "huggingface-hub==0.25.2" \
+        "diffusers==0.11.1"
+
+# Asset staging is deferred to integration (install-only scope). We just create
+# the empty target dirs that GRASPGENX_*_DIR point at; populate them later.
+# NOTE: pre-baking is currently blocked upstream anyway — the third-party
+# gripper_descriptions repo has exhausted its GitHub LFS budget ("This repository
+# exceeded its LFS budget"), so its mesh assets cannot be pulled from that source
+# right now. The HF checkpoint repo (adithyamurali/GraspGenXModel, ~1.7 GB) IS
+# fetchable but is intentionally not baked here, to keep the image lean.
+RUN mkdir -p "$GRASPGENX_CHECKPOINT_DIR" "$GRASPGENX_GRIPPER_CFG_DIR"
