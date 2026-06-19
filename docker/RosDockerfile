@@ -132,15 +132,11 @@ RUN git clone https://github.com/openai/CLIP.git /opt/clip \
 RUN pip install --no-cache-dir --no-deps /opt/clip
 
 # -----------------------------------------------------------------------------
-# 5. SAM2 / SAM3 — vendored from git.
-#    SAM2 needs editable install so its config YAMLs resolve via package path.
+# 5. SAM3 — vendored from git.
 #    SAM3's setup.py produces UNKNOWN-0.0.0; bypass with PYTHONPATH instead.
+#    (hydra-core kept: used for model config resolution.)
 # -----------------------------------------------------------------------------
 RUN pip install --no-cache-dir "hydra-core>=1.3.2"
-
-RUN git clone https://github.com/facebookresearch/sam2.git /opt/sam2 \
-    && cd /opt/sam2 && git checkout c2ec8e14
-RUN pip install --no-cache-dir --no-deps -e /opt/sam2
 
 RUN git clone --depth 1 https://github.com/facebookresearch/sam3.git /opt/sam3
 ENV PYTHONPATH=/opt/sam3:${PYTHONPATH}
@@ -266,7 +262,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # huggingface-hub<0.26 (it imports the removed `cached_download`), so we downgrade
 # huggingface-hub 0.27.0 -> 0.25.2 — the one version that ALSO satisfies
 # transformers 4.47.1. Validated that the vision stack
-# (SAM2/SAM3/CLIP/timm/ultralytics/open3d) still imports under 0.25.2 and that
+# (SAM3/CLIP/timm/ultralytics/open3d) still imports under 0.25.2 and that
 # graspgenx.grasp_server.GraspGenXSampler imports. Only huggingface-hub moves;
 # everything else stays pinned.
 #
@@ -323,7 +319,7 @@ RUN PIP_CONSTRAINT=/opt/graspgenx-constraints.txt pip install --no-cache-dir \
 # Enable the diffusion model IN-PLACE: diffusers 0.11.1 needs huggingface-hub<0.26
 # (it imports the removed `cached_download`), so downgrade huggingface-hub
 # 0.27.0 -> 0.25.2 — the one version that also satisfies transformers 4.47.1.
-# Validated: SAM2/SAM3/CLIP/timm/ultralytics/open3d still import under 0.25.2 and
+# Validated: SAM3/CLIP/timm/ultralytics/open3d still import under 0.25.2 and
 # graspgenx.grasp_server.GraspGenXSampler imports. Constraint = the full freeze
 # MINUS huggingface-hub, so ONLY hf-hub moves; torch/torchvision/timm/transformers/
 # numpy/Pillow/setuptools stay pinned.
