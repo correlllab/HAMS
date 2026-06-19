@@ -18,7 +18,7 @@ setup(
         (os.path.join('share', package_name, 'config'),
             glob('config/*.yaml') + glob('config/*.json')),
     ],
-    scripts=['scripts/open_fridge.py', 'scripts/slider_debugger.py'],
+    scripts=['scripts/slider_debugger.py'],
     install_requires=['setuptools'],
     zip_safe=True,
     maintainer='max',
