@@ -38,6 +38,7 @@ def generate_launch_description():
         # (start_position_verified:=true). Defaults to false so a bare launch
         # never auto-commands the legs on the real robot.
         DeclareLaunchArgument('start_position_verified', default_value='false'),
+        DeclareLaunchArgument('use_skills', default_value='true'),
 
         # vision foundation-model services (replaces the vision_pipeline vp node)
         Node(
@@ -53,6 +54,29 @@ def generate_launch_description():
             name='sam_server',
             parameters=[sim_time_param],
             output='screen',
+        ),
+
+        # graspgen_server + h12_skills: the GraspGenX planning service and the
+        # /skill/* action servers. The grasp skill chains gemini -> sam ->
+        # graspgen -> frame_task. graspgen_server loads a heavy GPU model, so
+        # both are gated on use_skills. The skills node waits ~10s each (non-
+        # fatal) on gemini/sam/graspgen, the grippers, and frame_task — the
+        # latter two arrive over DDS from the robot/driver bringup.
+        Node(
+            package='h12_skills',
+            executable='graspgen_server',
+            name='graspgen_server',
+            parameters=[sim_time_param],
+            output='screen',
+            condition=IfCondition(LaunchConfiguration('use_skills')),
+        ),
+        Node(
+            package='h12_skills',
+            executable='skills',
+            name='h12_skills',
+            parameters=[sim_time_param],
+            output='screen',
+            condition=IfCondition(LaunchConfiguration('use_skills')),
         ),
 
         # Switchable lower-body RL controller (walk / FAME stand-squat).

@@ -133,10 +133,23 @@ def generate_launch_description():
         #     output='screen',
         # ),
 
+        # graspgen_server: GraspGenX 6-DOF grasp-planning service (`graspgen`).
+        # Heavy GPU model (checkpoints + magpie gripper description), so it's
+        # gated with the skills that use it; the grasp skill chains
+        # gemini -> sam -> graspgen -> frame_task.
+        Node(
+            package='h12_skills',
+            executable='graspgen_server',
+            name='graspgen_server',
+            parameters=[sim_time_param],
+            output='screen',
+            condition=IfCondition(LaunchConfiguration('use_skills')),
+        ),
+
         # h12_skills: serves the /skill/* atomic-skill actions (open_door,
         # grasp, pick_place, ...). On startup it waits ~10s each on the vision
-        # pipeline services, the grippers, and the frame_task / nav action
-        # servers (all started above), then idles ready for goals.
+        # pipeline + graspgen services, the grippers, and the frame_task / nav
+        # action servers (all started above), then idles ready for goals.
         Node(
             package='h12_skills',
             executable='skills',

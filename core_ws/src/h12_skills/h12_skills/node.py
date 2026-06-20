@@ -2,16 +2,15 @@
 """h12 skills node: action servers for the RoboCasa-style atomic skills.
 
 Serves the 11 Skill* actions from custom_ros_messages on /skill/<name>. The
-shared machinery (vision pipeline, frame_task, grippers, nav2, the per-skill
-action clients used for composition) lives in SkillsBase (base.py); each skill's
-execute callback is a mixin under skills/. SkillsNode multiply-inherits from
-SkillsBase plus every skill mixin and wires the action servers here.
+shared machinery — the frame_task arm IK action, the per-arm gripper services,
+the gemini_query and sam_segment perception services, and the head-camera image
+cache — lives in SkillsBase (base.py); each skill's execute callback is a mixin
+under skills/. SkillsNode multiply-inherits from SkillsBase plus every skill
+mixin and wires the action servers here.
 
-Skills compose through this node's own clients (SkillPickPlace calls SkillGrasp
-via self.skill_clients['grasp']); those clients also double as a reference for
-invoking the skills externally. Skills execute *inside* action server callbacks
-while a MultiThreadedExecutor spins, so inner service/action calls wait on
-futures with an event instead of spinning.
+Skills execute *inside* action server callbacks while a MultiThreadedExecutor
+spins, so inner service/action calls wait on futures with an event instead of
+spinning.
 """
 
 from functools import partial
@@ -54,7 +53,8 @@ class SkillsNode(SkillsBase, OpenDoorSkill, CloseDoorSkill, OpenLidSkill,
         self.skill_servers = {
             name: ActionServer(
                 self, SKILL_ACTIONS[name][0], SKILL_ACTIONS[name][1],
-                execute_callback=executors[name],
+                execute_callback=self._safe_exec(
+                    name, SKILL_ACTIONS[name][0], executors[name]),
                 cancel_callback=self._on_skill_cancel,
                 callback_group=self._cb_group,
             )
@@ -64,13 +64,28 @@ class SkillsNode(SkillsBase, OpenDoorSkill, CloseDoorSkill, OpenLidSkill,
         self.get_logger().info(
             f'h12_skills ready: serving {sorted(self.skill_servers)} on /skill/<name>')
 
+    def _safe_exec(self, label, action_type, fn):
+        """Wrap a skill execute callback so any escaping exception aborts the goal
+        with a Result, instead of leaving it stuck in EXECUTING (also catches the
+        NotImplementedError from the not-yet-implemented skill stubs)."""
+        def _cb(goal_handle):
+            try:
+                return fn(goal_handle)
+            except Exception as e:
+                self.get_logger().error(f'[{label}] internal error: {e}')
+                result = action_type.Result()
+                result.success = False
+                result.message = f'internal error: {e}'
+                goal_handle.abort()
+                return result
+        return _cb
+
 
 def main():
     rclpy.init()
     node = SkillsNode()
     # Skills block inside their execute callbacks while waiting on inner
-    # service/action futures (and pick_place calls the grasp server hosted by
-    # this same node), so a multithreaded executor is required.
+    # service/action futures, so a multithreaded executor is required.
     executor = MultiThreadedExecutor(num_threads=8)
     executor.add_node(node)
     try:
