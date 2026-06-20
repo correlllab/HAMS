@@ -20,10 +20,29 @@ from rclpy.action import ActionServer
 from rclpy.executors import MultiThreadedExecutor
 
 from .base import SkillsBase, SKILL_ACTIONS
+from .model_logging import ModelLogger, declare_logging_params
 from .skills import (
     OpenDoorSkill, CloseDoorSkill, OpenLidSkill, CloseLidSkill, NavigateSkill,
     GraspSkill, PickPlaceSkill, PressSkill, SlideRackSkill, TurnSkill,
 )
+
+
+def _describe_msg(msg):
+    """Flatten an action goal's primitive fields into a JSON-friendly dict.
+    Lists/nested messages are summarized (length / type) rather than dumped."""
+    out = {}
+    try:
+        for fname in msg.get_fields_and_field_types():
+            v = getattr(msg, fname)
+            if isinstance(v, (bool, int, float, str)):
+                out[fname] = v
+            elif isinstance(v, (list, tuple, bytes)):
+                out[fname] = f'[{len(v)} items]'
+            else:
+                out[fname] = type(v).__name__
+    except Exception as e:
+        out['_error'] = str(e)
+    return out
 
 
 class SkillsNode(SkillsBase, OpenDoorSkill, CloseDoorSkill, OpenLidSkill,
@@ -31,6 +50,10 @@ class SkillsNode(SkillsBase, OpenDoorSkill, CloseDoorSkill, OpenLidSkill,
                  PressSkill, SlideRackSkill, TurnSkill):
     def __init__(self):
         super().__init__()   # SkillsBase: clients, perception, motion primitives
+
+        log, viz, clear = declare_logging_params(self)
+        self.logger = ModelLogger(self, 'skills', 'h12_skills', __file__,
+                                  log=log, visualize=viz, clear=clear)
 
         # --- skill action servers ----------------------------------------------
         # turn_lever/twist_knob share _exec_turn; bind their action type (from
@@ -69,16 +92,44 @@ class SkillsNode(SkillsBase, OpenDoorSkill, CloseDoorSkill, OpenLidSkill,
         with a Result, instead of leaving it stuck in EXECUTING (also catches the
         NotImplementedError from the not-yet-implemented skill stubs)."""
         def _cb(goal_handle):
+            rec = self.logger.start()
+            rec.set(skill=label, request=_describe_msg(goal_handle.request))
+            self._log_head_frame(rec, f'{label}_start')
             try:
-                return fn(goal_handle)
+                result = fn(goal_handle)
+                rec.finish(success=bool(getattr(result, 'success', False)),
+                           message=getattr(result, 'message', ''))
+                return result
             except Exception as e:
                 self.get_logger().error(f'[{label}] internal error: {e}')
                 result = action_type.Result()
                 result.success = False
                 result.message = f'internal error: {e}'
                 goal_handle.abort()
+                rec.finish(success=False, message=result.message)
                 return result
         return _cb
+
+    def _log_head_frame(self, rec, tag):
+        """Save the latest head-camera frame as a visualization artifact, captioned
+        with the skill tag. No-op unless visualization is on and a frame is cached."""
+        if not self.logger.visualize:
+            return
+        img = self.latest_image()
+        if img is None:
+            return
+        try:
+            import cv2
+            import numpy as np
+            buf = np.frombuffer(bytes(img.data), dtype=np.uint8)
+            bgr = cv2.imdecode(buf, cv2.IMREAD_COLOR)
+            if bgr is None:
+                return
+            cv2.putText(bgr, tag, (8, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.7,
+                        (0, 255, 0), 2, cv2.LINE_AA)
+            rec.save_overlay(tag, bgr)
+        except Exception as e:
+            self.get_logger().warn(f'head-frame viz failed: {e}')
 
 
 def main():
