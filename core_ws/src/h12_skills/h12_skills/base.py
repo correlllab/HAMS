@@ -1,132 +1,81 @@
 #!/usr/bin/env python3
 """Shared infrastructure for the h12 skills node.
 
-`SkillsBase` holds everything every skill needs: the service/action clients
-(vision pipeline, grippers, frame_task, nav2), the TF buffer, the head-camera
-color cache, the optional Gemini Robotics client, the per-skill action clients
-(self.skill_clients, used for composition like pick_place -> grasp), and the
-helper layers built on top of them (detection, motion primitives, future
-plumbing). Each skill lives in its own module under skills/ as a mixin class
-whose _exec_* method operates on `self`; SkillsNode (node.py) multiply-inherits
-from SkillsBase plus every skill mixin, so the skill bodies resolve
-self.detect_grasp/self.move_frame_to/... against the combined node at runtime.
+`SkillsBase` is the ROS node every skill mixin plugs into. It owns the external
+clients the skills depend on — the arm IK action (frame_task), the per-arm
+gripper services, the Gemini query service, the SAM segmentation service, and the
+GraspGen planning service — plus the head-camera color/depth/intrinsics caches
+(which feed the perception services and the mask→cloud back-projection), the TF
+listener, the executor-safe service/action call plumbing (_call_service /
+_send_action / _wait_future), and the `_Run` per-goal execution context.
 
-Motions are first-pass and deliberately naive, in the spirit of open_fridge.py:
-straight-line gripper targets in the pelvis frame, fixed approach offsets along
-+x (handle assumed roughly facing the robot), and simple arcs/twists where a
-hinge or rotation axis is involved.
-
-SkillGrasp plans an ANTIPODAL grasp from the detection point cloud (PCA of the
-footprint perpendicular to the approach axis: fingers close along the minor
-axis, wrist rolled to match, gripper pre-opened to the measured width). Every
-skill that must hold something composes SkillGrasp through this node's own
-client (self.skill_clients['grasp']) rather than closing the gripper itself.
-
-Unlike open_fridge.py (a run-to-completion script that owns the spin loop with
-rclpy.spin_until_future_complete), this node executes skills *inside* action
-server callbacks while a MultiThreadedExecutor spins, so all inner service and
-action calls wait on futures with an event instead of spinning.
+Perception pipeline helpers (`query_gemini`, `segment`, `mask_to_cloud`,
+`plan_grasp`) and the motion primitives (`move_frame_to`, gripper ops) are
+implemented here; each skill under skills/ composes them in its `_exec_*` mixin.
+SkillsNode (node.py) multiply-inherits from SkillsBase plus every skill mixin.
 """
 
-import math
-import os
-import struct
 import threading
 import time
-from functools import partial
 
 import numpy as np
-import rclpy
+
 from rclpy.action import ActionClient, CancelResponse
 from rclpy.callback_groups import ReentrantCallbackGroup
 from rclpy.duration import Duration as RclpyDuration
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
+from rclpy.time import Time
 
 from action_msgs.msg import GoalStatus
 from builtin_interfaces.msg import Duration
-from geometry_msgs.msg import Point, PointStamped, Pose, PoseStamped, Quaternion
-from sensor_msgs.msg import CompressedImage
+from geometry_msgs.msg import Point, Pose, Quaternion
+from sensor_msgs.msg import CameraInfo, CompressedImage
+from std_msgs.msg import Header
 
-from cv_bridge import CvBridge
+from sensor_msgs_py import point_cloud2
 from tf2_ros import Buffer, TransformListener, TransformException
-from tf2_geometry_msgs import do_transform_point
 
-# Gemini Robotics (google-genai). Optional: the node still serves skills without
-# it; only Gemini-backed reasoning is disabled if the SDK or key is missing.
-try:
-    from google import genai
-    from google.genai import types as genai_types
-except ImportError:
-    genai = None
-    genai_types = None
-
-from custom_ros_messages.srv import UpdateTrackedObject, UpdateBeliefs, Query
+from custom_ros_messages.srv import GeminiQuery, SamSegment, GraspGen
 from custom_ros_messages.action import FrameTask
 from custom_ros_messages.action import (
     SkillCloseDoor, SkillOpenDoor, SkillCloseLid, SkillOpenLid,
     SkillNavigate, SkillGrasp, SkillPickPlace, SkillPress, SkillSlideRack,
     SkillTurnLever, SkillTwistKnob,
 )
-from nav2_msgs.action import NavigateToPose
 from magpie_msgs.srv import SetGripperPosition, SetGripperForce
 from std_srvs.srv import Trigger
 
+from .perception_utils import (
+    decode_compressed_depth_image, deproject_mask, transform_points,
+    transform_to_matrix,
+)
+
 
 CAMERA_NS = '/realsense/head'
-# Color image the mujoco bridge / realsense publishes (JPEG, sensor QoS); the
-# same topic the vision pipeline subscribes to. JPEG bytes feed Gemini directly.
+# Color (JPEG), aligned depth (compressedDepth, uint16 mm), and intrinsics.
 COLOR_IMAGE_TOPIC = f'{CAMERA_NS}/color/image_raw/compressed'
-# Gemini Robotics ER model (matches vision_pipeline/config.py "gemini_model").
-GEMINI_MODEL = 'gemini-robotics-er-1.6-preview'
+DEPTH_IMAGE_TOPIC = f'{CAMERA_NS}/aligned_depth_to_color/image_raw/compressedDepth'
+CAMERA_INFO_TOPIC = f'{CAMERA_NS}/color/camera_info'
+
 # Grip-site frames at the gripper closure point: fixed children of the wrist
-# yaw links with the same orientation, pushed forward to the fingertips, so
-# frame_task targets are the grasp point itself (no reach offset needed).
+# yaw links pushed forward to the fingertips, so frame_task targets are the
+# grasp point itself (no reach offset needed).
 ARM_FRAMES = {'left': 'left_grip_site', 'right': 'right_grip_site'}
 # Per-arm gripper service namespace; the magpie driver/sim expose
 # <ns>/set_position, <ns>/set_force, <ns>/open and <ns>/close under each.
 GRIPPER_NS = {'left': '/left/gripper', 'right': '/right/gripper'}
 
-# Grasp pre-open width fallback (mm), matching slider_debugger / the magpie
-# hands. Full open/close now go through the dedicated services, not a mm value.
-GRIPPER_OPEN_MM = 85.0
-# Grip-force limit (N) applied via set_force before closing on an object, so the
-# jaws squeeze with a bounded force rather than the full motor torque.
+# Grip-force limit (N) applied via set_force before closing on an object.
 GRIP_FORCE_N = 30.0
-
-# Antipodal grasping. The parallel-jaw fingers are assumed to close along the
-# wrist's +y axis at identity orientation; the wrist rolls about +x (the
-# approach axis) so they close along the minor axis of the detection cloud's
-# y-z footprint, landing both contacts on opposing surfaces.
-MIN_GRASP_POINTS = 20          # below this, fall back to a centered grasp
-GRASP_WIDTH_MARGIN_MM = 25.0   # pre-open this much wider than the object
-GRASP_PREOPEN_MIN_MM = 20.0    # never pre-open narrower than this
-
-# Approach geometry along pelvis +x: frame_task targets the grip-site frames
-# (the gripper closure point), so "contact" places the gripper at the detected
-# point itself and "approach" backs that off by APPROACH_BACKOFF.
-APPROACH_BACKOFF = 0.25
-
-# open_door pull when goal.pull_distance == 0 [m]. open_fridge.py pulls the
-# wrist all the way back to the pelvis plane (x=0, typically 0.5-0.8 m of
-# travel) despite its "25 cm" comment; 0.5 m approximates a full opening.
-DEFAULT_PULL_DISTANCE = 0.5
-PUSH_DEPTH = 0.10              # close_door push past the handle plane [m]
-LID_HINGE_RADIUS = 0.30        # assumed handle-to-hinge distance for lids [m]
-DEFAULT_OPEN_ANGLE = math.pi / 2   # lid opening when goal.open_angle == 0 [rad]
-DEFAULT_TURN_ANGLE = math.pi / 2   # lever/knob turn when goal.angle == 0 [rad]
-PRESS_DEPTH = 0.05             # press past the detected button plane [m]
-SLIDE_DISTANCE = 0.30          # rack travel for slide_rack [m]
-PLACE_HOVER = 0.15             # hover height above a place target [m]
-NAV_STANDOFF = 0.75            # stop this far in front of a navigate target [m]
-
-DETECT_SETTLE_SEC = 2.0        # wait after update_beliefs (open_fridge used 2 s)
-GRIP_SETTLE_SEC = 2.0          # wait after closing the gripper on something
-DEFAULT_SKILL_TIMEOUT = 120.0  # used when goal.timeout is zero [s]
-
-# Map-frame presets for SkillNavigate: name -> (x, y, yaw). Targets not listed
-# here are detected via the vision pipeline and approached to NAV_STANDOFF.
-NAMED_LOCATIONS = {}
+# Used when goal.timeout is zero [s].
+DEFAULT_SKILL_TIMEOUT = 120.0
+# Depth back-projection range [m] and the floor on usable object points.
+# Keep MIN_GRASP_POINTS in sync with graspgen_server.MIN_OBJECT_POINTS so a cloud
+# the server would reject is dropped client-side with an accurate message.
+DEPTH_MIN_M = 0.1
+DEPTH_MAX_M = 3.0
+MIN_GRASP_POINTS = 100
 
 # Skill action clients: name -> (action type, action server name). The same
 # table drives the action servers SkillsNode provides.
@@ -143,93 +92,6 @@ SKILL_ACTIONS = {
     'turn_lever':  (SkillTurnLever,  '/skill/turn_lever'),
     'twist_knob':  (SkillTwistKnob,  '/skill/twist_knob'),
 }
-
-
-def _centroid_from_cloud(cloud):
-    """Mean XYZ of a PointCloud2 (ported verbatim from open_fridge.py)."""
-    n = cloud.width * cloud.height
-    if n == 0:
-        return None
-    data = bytes(cloud.data)
-    step = cloud.point_step
-    xs, ys, zs = [], [], []
-    for i in range(n):
-        off = i * step
-        x = struct.unpack_from('f', data, off + 0)[0]
-        y = struct.unpack_from('f', data, off + 4)[0]
-        z = struct.unpack_from('f', data, off + 8)[0]
-        if np.isfinite(x) and np.isfinite(y) and np.isfinite(z):
-            xs.append(x); ys.append(y); zs.append(z)
-    if not xs:
-        return None
-    return (float(np.mean(xs)), float(np.mean(ys)), float(np.mean(zs)))
-
-
-def _cloud_to_xyz(cloud):
-    """All finite XYZ points of a PointCloud2 as an (N, 3) array (float32
-    x/y/z at offsets 0/4/8, the same layout _centroid_from_cloud assumes)."""
-    n = cloud.width * cloud.height
-    step = cloud.point_step
-    if n == 0 or step < 12:
-        return None
-    buf = np.frombuffer(bytes(cloud.data), dtype=np.uint8)
-    if buf.size < n * step:
-        return None
-    xyz = buf[:n * step].reshape(n, step)[:, :12].copy().view(np.float32)
-    pts = xyz.reshape(n, 3).astype(np.float64)
-    pts = pts[np.isfinite(pts).all(axis=1)]
-    return pts if len(pts) else None
-
-
-def _transform_to_rt(tfm):
-    """Rotation matrix + translation vector of a TransformStamped."""
-    q = tfm.transform.rotation
-    t = tfm.transform.translation
-    x, y, z, w = q.x, q.y, q.z, q.w
-    rot = np.array([
-        [1 - 2 * (y * y + z * z), 2 * (x * y - z * w),     2 * (x * z + y * w)],
-        [2 * (x * y + z * w),     1 - 2 * (x * x + z * z), 2 * (y * z - x * w)],
-        [2 * (x * z - y * w),     2 * (y * z + x * w),     1 - 2 * (x * x + y * y)],
-    ])
-    return rot, np.array([t.x, t.y, t.z])
-
-
-def _antipodal_in_yz(points):
-    """Antipodal grasp plan in the plane perpendicular to the +x approach axis.
-
-    PCA of the cloud's y-z footprint: closing the fingers along the minor
-    (smallest-extent) principal axis puts the two contacts on opposing
-    surfaces with roughly opposing normals — the antipodal condition for a
-    parallel-jaw gripper. Returns (wrist roll about +x [rad, folded into
-    [-pi/2, pi/2]], grasp width [mm]); falls back to (0.0, GRIPPER_OPEN_MM)
-    for sparse or degenerate clouds.
-    """
-    if points is None or len(points) < MIN_GRASP_POINTS:
-        return 0.0, GRIPPER_OPEN_MM
-    yz = points[:, 1:3] - points[:, 1:3].mean(axis=0)
-    cov = np.cov(yz.T)
-    if not np.all(np.isfinite(cov)):
-        return 0.0, GRIPPER_OPEN_MM
-    evals, evecs = np.linalg.eigh(cov)           # eigenvalues ascending
-    if evals[1] <= 1e-12:                        # degenerate footprint
-        return 0.0, GRIPPER_OPEN_MM
-    minor = evecs[:, 0]                          # (y, z) closing direction
-    roll = math.atan2(minor[1], minor[0])        # angle from +y toward +z
-    # The closing axis is a line, not a direction: fold into [-pi/2, pi/2]
-    # so the wrist takes the smaller of the two equivalent rolls.
-    if roll > math.pi / 2:
-        roll -= math.pi
-    elif roll < -math.pi / 2:
-        roll += math.pi
-    proj = yz @ minor
-    width_mm = float(np.percentile(proj, 97.5) - np.percentile(proj, 2.5)) * 1000.0
-    return roll, width_mm
-
-
-def _roll_quat(angle):
-    """Quaternion (x, y, z, w) for a roll of `angle` about the +x (approach) axis."""
-    half = 0.5 * float(angle)
-    return (math.sin(half), 0.0, 0.0, math.cos(half))
 
 
 class _Run:
@@ -305,8 +167,9 @@ class _Run:
 
 
 class SkillsBase(Node):
-    """Node holding the clients, perception layer, and motion primitives shared
-    by every skill mixin. SkillsNode (node.py) adds the skill action servers."""
+    """Node holding the clients, camera caches, call plumbing, perception
+    pipeline, and motion primitives shared by every skill mixin. SkillsNode
+    (node.py) adds the skill action servers."""
 
     def __init__(self, node_name='h12_skills'):
         super().__init__(node_name)
@@ -316,15 +179,7 @@ class SkillsBase(Node):
         # spinning (and so pick_place can call the grasp server in-process).
         self._cb_group = ReentrantCallbackGroup()
 
-        # --- service clients (vision pipeline + grippers) ---------------------
-        self.track_cli = self.create_client(
-            UpdateTrackedObject, '/vp_update_tracked_object', callback_group=self._cb_group)
-        self.beliefs_cli = self.create_client(
-            UpdateBeliefs, '/vp_update_beliefs', callback_group=self._cb_group)
-        self.query_cli = self.create_client(
-            Query, '/vp_query_tracked_objects', callback_group=self._cb_group)
-        # set_position (measured-width pre-open) plus the dedicated open/close/
-        # set_force services, one client per arm.
+        # --- gripper service clients (per arm) --------------------------------
         self.gripper_clis = {
             arm: self.create_client(SetGripperPosition, f'{ns}/set_position',
                                     callback_group=self._cb_group)
@@ -344,87 +199,70 @@ class SkillsBase(Node):
             for arm, ns in GRIPPER_NS.items()
         }
 
-        # --- action clients (arm IK + nav2) -----------------------------------
+        # --- perception service clients ---------------------------------------
+        # gemini_query: image (+/- text) -> Gemini text; sam_segment: image +
+        # box/text -> mono8 mask; graspgen: object cloud -> ranked 6-DOF grasps.
+        self.gemini_cli = self.create_client(
+            GeminiQuery, 'gemini_query', callback_group=self._cb_group)
+        self.sam_cli = self.create_client(
+            SamSegment, 'sam_segment', callback_group=self._cb_group)
+        self.graspgen_cli = self.create_client(
+            GraspGen, 'graspgen', callback_group=self._cb_group)
+
+        # --- arm IK action client ---------------------------------------------
         self.frame_task_cli = ActionClient(
             self, FrameTask, '/frame_task', callback_group=self._cb_group)
-        self.nav_cli = ActionClient(
-            self, NavigateToPose, '/navigate_to_pose', callback_group=self._cb_group)
 
-        # --- subscriber (TF) ---------------------------------------------------
+        # --- TF listener ------------------------------------------------------
         self.tf_buffer = Buffer()
         self.tf_listener = TransformListener(self.tf_buffer, self)
 
-        # --- color image subscription ------------------------------------------
-        # Latest head-camera color frame, kept for Gemini Robotics reasoning.
-        self._cv_bridge = CvBridge()
-        self._latest_color = None        # most recent RGB frame (np.ndarray) or None
-        self._latest_color_jpeg = None   # raw JPEG bytes (for Gemini) or None
-        self._latest_color_stamp = None  # builtin_interfaces/Time of that frame
+        # --- head-camera caches (color for the services, depth+info for lifting
+        #     a 2-D mask to a 3-D cloud) -----------------------------------------
+        self._latest_image = None      # color CompressedImage (for gemini/sam)
+        self._latest_depth = None      # aligned depth CompressedImage (mm)
+        self._latest_caminfo = None    # color CameraInfo (intrinsics + frame)
         self.create_subscription(
             CompressedImage, COLOR_IMAGE_TOPIC, self._on_color_image,
             qos_profile_sensor_data, callback_group=self._cb_group)
+        self.create_subscription(
+            CompressedImage, DEPTH_IMAGE_TOPIC, self._on_depth_image,
+            qos_profile_sensor_data, callback_group=self._cb_group)
+        self.create_subscription(
+            CameraInfo, CAMERA_INFO_TOPIC, self._on_caminfo,
+            qos_profile_sensor_data, callback_group=self._cb_group)
 
-        # --- Gemini Robotics client --------------------------------------------
-        self.gemini_client = self._init_gemini()
-
-        # --- skill action clients ----------------------------------------------
-        # One client per skill; used for composition (pick_place -> grasp) and
-        # as the reference for external callers.
-        self.skill_clients = {
-            name: ActionClient(self, action_type, server, callback_group=self._cb_group)
-            for name, (action_type, server) in SKILL_ACTIONS.items()
-        }
-
-        # Wait for the underlying endpoints (non-fatal, mirrors open_fridge.py).
-        self.get_logger().info('Waiting for VP services, grippers, and action servers...')
-        self.track_cli.wait_for_service(timeout_sec=10.0)
-        self.beliefs_cli.wait_for_service(timeout_sec=10.0)
-        self.query_cli.wait_for_service(timeout_sec=10.0)
+        # Wait for the underlying endpoints (non-fatal).
+        self.get_logger().info('Waiting for gemini/sam/graspgen, grippers, frame_task...')
+        self.gemini_cli.wait_for_service(timeout_sec=10.0)
+        self.sam_cli.wait_for_service(timeout_sec=10.0)
+        self.graspgen_cli.wait_for_service(timeout_sec=10.0)
         for clis in (self.gripper_clis, self.gripper_open_clis,
                      self.gripper_close_clis, self.gripper_force_clis):
             for cli in clis.values():
                 cli.wait_for_service(timeout_sec=10.0)
         self.frame_task_cli.wait_for_server(timeout_sec=10.0)
-        self.nav_cli.wait_for_server(timeout_sec=10.0)
 
-    # ----------------------------------------------------- gemini + perception
-    def _init_gemini(self):
-        """Create the Gemini Robotics client. Non-fatal: returns None (and the
-        node serves skills without Gemini) if the SDK or API key is missing.
-        The key is read from $GEMINI_API_KEY / $GOOGLE_API_KEY (the google-genai
-        SDK also picks these up itself when no key is passed)."""
-        if genai is None:
-            self.get_logger().warn(
-                'google-genai not installed — Gemini Robotics client disabled')
-            return None
-        api_key = os.environ.get('GEMINI_API_KEY') or os.environ.get('GOOGLE_API_KEY')
-        try:
-            client = genai.Client(api_key=api_key) if api_key else genai.Client()
-        except Exception as e:  # missing key, bad creds, etc.
-            self.get_logger().warn(
-                f'Gemini Robotics client init failed ({e}) — disabled')
-            return None
-        self.get_logger().info(f'Gemini Robotics client ready (model {GEMINI_MODEL})')
-        return client
-
+    # ----------------------------------------------------------- camera caches
     def _on_color_image(self, msg: CompressedImage):
-        """Cache the latest head-camera color frame (decoded RGB + raw JPEG)."""
-        self._latest_color_jpeg = bytes(msg.data)
-        self._latest_color_stamp = msg.header.stamp
-        try:
-            self._latest_color = self._cv_bridge.compressed_imgmsg_to_cv2(
-                msg, desired_encoding='rgb8')
-        except Exception as e:
-            self.get_logger().warn(
-                f'color image decode failed: {e}', throttle_duration_sec=5.0)
+        """Cache the latest head-camera color frame (for gemini/sam requests)."""
+        self._latest_image = msg
 
-    def latest_color_image(self):
-        """Most recent head-camera frame as RGB np.ndarray (H, W, 3), or None."""
-        return self._latest_color
+    def _on_depth_image(self, msg: CompressedImage):
+        """Cache the latest aligned-depth frame (for mask→cloud back-projection)."""
+        self._latest_depth = msg
 
-    def latest_color_jpeg(self):
-        """Most recent head-camera frame as JPEG bytes (ready for Gemini), or None."""
-        return self._latest_color_jpeg
+    def _on_caminfo(self, msg: CameraInfo):
+        """Cache the latest color CameraInfo (intrinsics + optical frame id)."""
+        self._latest_caminfo = msg
+
+    def latest_image(self):
+        """Most recent head-camera color frame (sensor_msgs/CompressedImage), or None."""
+        return self._latest_image
+
+    def latest_caminfo(self):
+        """Most recent color CameraInfo, or None."""
+        return self._latest_caminfo
 
     # ------------------------------------------------------------------ utils
     def _on_skill_cancel(self, _cancel_request):
@@ -481,149 +319,103 @@ class SkillsBase(Node):
             self._wait_future(handle.cancel_goal_async(), 2.0)
         return response
 
-    # --------------------------------------------------- vision pipeline layer
-    def track_object(self, query, action='add'):
-        req = UpdateTrackedObject.Request()
-        req.object = query
-        req.action = action
-        return self._call_service(self.track_cli, req, 'UpdateTrackedObject')
+    # ------------------------------------------------- perception (gemini/sam)
+    def query_gemini(self, prompt, image=None):
+        """Ask the gemini_query service `prompt` about `image` (defaults to the
+        latest head-camera frame). Returns Gemini's text response, or None."""
+        img = image if image is not None else self.latest_image()
+        if img is None:
+            self.get_logger().error('query_gemini: no head-camera image yet')
+            return None
+        req = GeminiQuery.Request()
+        req.image = img
+        req.prompt = prompt
+        resp = self._call_service(self.gemini_cli, req, 'GeminiQuery')
+        if resp is None or not resp.success:
+            return None
+        return resp.response
 
-    def update_beliefs(self, camera=CAMERA_NS):
-        req = UpdateBeliefs.Request()
-        req.camera_name_space = camera
-        return self._call_service(self.beliefs_cli, req, 'UpdateBeliefs')
+    def segment(self, text='', positive_boxes=None, negative_boxes=None, image=None):
+        """Run the sam_segment service on `image` (defaults to the latest
+        head-camera frame) with a text prompt and/or flattened pixel-xyxy box
+        exemplars. Returns the mono8 mask (sensor_msgs/Image), or None."""
+        img = image if image is not None else self.latest_image()
+        if img is None:
+            self.get_logger().error('segment: no head-camera image yet')
+            return None
+        req = SamSegment.Request()
+        req.image = img
+        req.text = text or ''
+        req.positive_boxes = [float(v) for v in (positive_boxes or [])]
+        req.negative_boxes = [float(v) for v in (negative_boxes or [])]
+        resp = self._call_service(self.sam_cli, req, 'SamSegment')
+        if resp is None or not resp.success:
+            return None
+        return resp.mask
 
-    def query_centroid(self, query, target_frame='pelvis'):
-        """Centroid of the best detection of `query`, in `target_frame`.
-        Among multiple detections, prefers the one nearest the robot
-        (open_fridge.py picked the cloud closest to a point near the pelvis)."""
-        req = Query.Request()
-        req.query = query
-        req.confidence_threshold = 0.3
-        req.pc_name = ''
-        result = self._call_service(self.query_cli, req, 'Query')
-        if not result or not result.success or not result.clouds:
+    def mask_to_cloud(self, mask_msg, target_frame='pelvis'):
+        """Back-project a mono8 mask + the latest aligned depth/intrinsics into an
+        (N, 3) object point cloud in `target_frame`, or None. Depth and mask must
+        share the color pixel grid (the realsense publishes aligned depth)."""
+        depth_msg, info = self._latest_depth, self._latest_caminfo
+        if mask_msg is None or depth_msg is None or info is None:
+            self.get_logger().error('mask_to_cloud: missing mask, depth, or caminfo')
             return None
-        ref = self._frame_origin_in(target_frame, 'pelvis') or (0.0, 0.0, 0.1)
-        best, best_dist = None, None
-        for cloud in result.clouds:
-            centroid = _centroid_from_cloud(cloud)
-            if centroid is None:
-                continue
-            transformed = self._transform_point(
-                centroid, cloud.header.frame_id, cloud.header.stamp, target_frame)
-            if transformed is None:
-                continue
-            dist = sum((a - b) ** 2 for a, b in zip(transformed, ref))
-            if best_dist is None or dist < best_dist:
-                best_dist, best = dist, transformed
-        return best
-
-    def detect_object(self, query, target_frame='pelvis'):
-        """Full open_fridge detection recipe: track -> update beliefs from the
-        head camera -> settle -> query the centroid."""
-        if self.track_object(query) is None:
-            return None
-        if self.update_beliefs(CAMERA_NS) is None:
-            return None
-        self.get_clock().sleep_for(RclpyDuration(seconds=DETECT_SETTLE_SEC))
-        centroid = self.query_centroid(query, target_frame)
-        if centroid is not None:
-            cx, cy, cz = centroid
-            self.get_logger().info(
-                f'{query!r} centroid ({target_frame}): ({cx:.3f}, {cy:.3f}, {cz:.3f})')
-        return centroid
-
-    def query_cloud_points(self, query, target_frame='pelvis'):
-        """Points of the best detection of `query` as an (N, 3) array in
-        `target_frame` (best = centroid nearest the robot, like query_centroid)."""
-        req = Query.Request()
-        req.query = query
-        req.confidence_threshold = 0.3
-        req.pc_name = ''
-        result = self._call_service(self.query_cli, req, 'Query')
-        if not result or not result.success or not result.clouds:
-            return None
-        ref = np.asarray(
-            self._frame_origin_in(target_frame, 'pelvis') or (0.0, 0.0, 0.1))
-        best_pts, best_dist = None, None
-        for cloud in result.clouds:
-            pts = _cloud_to_xyz(cloud)
-            if pts is None:
-                continue
-            try:
-                tfm = self.tf_buffer.lookup_transform(
-                    target_frame, cloud.header.frame_id, cloud.header.stamp,
-                    timeout=RclpyDuration(seconds=1.0))
-            except TransformException as e:
-                self.get_logger().error(
-                    f'TF lookup {cloud.header.frame_id!r} -> {target_frame!r} '
-                    f'failed: {e}')
-                continue
-            rot, trans = _transform_to_rt(tfm)
-            pts = pts @ rot.T + trans
-            dist = float(np.sum((pts.mean(axis=0) - ref) ** 2))
-            if best_dist is None or dist < best_dist:
-                best_dist, best_pts = dist, pts
-        return best_pts
-
-    def detect_grasp(self, query, target_frame='pelvis'):
-        """detect_object's recipe, but planning an antipodal grasp from the
-        full detection cloud. Returns ((x, y, z) centroid, wrist roll [rad],
-        grasp width [mm]) or None."""
-        if self.track_object(query) is None:
-            return None
-        if self.update_beliefs(CAMERA_NS) is None:
-            return None
-        self.get_clock().sleep_for(RclpyDuration(seconds=DETECT_SETTLE_SEC))
-        pts = self.query_cloud_points(query, target_frame)
-        if pts is None:
-            return None
-        centroid = tuple(float(v) for v in pts.mean(axis=0))
-        roll, width_mm = _antipodal_in_yz(pts)
-        self.get_logger().info(
-            f'{query!r} grasp plan ({target_frame}): centroid '
-            f'({centroid[0]:.3f}, {centroid[1]:.3f}, {centroid[2]:.3f}), '
-            f'roll {math.degrees(roll):.0f} deg, width {width_mm:.0f} mm '
-            f'({len(pts)} pts)')
-        return centroid, roll, width_mm
-
-    def _transform_point(self, xyz, source_frame, stamp, target_frame):
-        pt = PointStamped()
-        pt.header.frame_id = source_frame
-        pt.header.stamp = stamp
-        pt.point.x, pt.point.y, pt.point.z = xyz
+        mask = (np.frombuffer(bytes(mask_msg.data), dtype=np.uint8)
+                .reshape(mask_msg.height, mask_msg.width) > 127)
         try:
-            transform = self.tf_buffer.lookup_transform(
-                target_frame, source_frame, stamp,
-                timeout=RclpyDuration(seconds=1.0))
+            depth = decode_compressed_depth_image(depth_msg).astype(np.float32) / 1000.0
+        except (ValueError, TypeError) as e:
+            self.get_logger().error(f'mask_to_cloud: depth decode failed: {e}')
+            return None
+        if depth.shape != mask.shape:
+            self.get_logger().error(
+                f'mask_to_cloud: mask {mask.shape} != depth {depth.shape}')
+            return None
+        fx, fy, cx, cy = info.k[0], info.k[4], info.k[2], info.k[5]
+        pts_cam = deproject_mask(mask, depth, fx, fy, cx, cy, DEPTH_MIN_M, DEPTH_MAX_M)
+        if len(pts_cam) < MIN_GRASP_POINTS:
+            self.get_logger().warn(f'mask_to_cloud: only {len(pts_cam)} valid points')
+            return None
+        cam_frame = depth_msg.header.frame_id or info.header.frame_id
+        try:
+            tf = self.tf_buffer.lookup_transform(
+                target_frame, cam_frame, Time(), timeout=RclpyDuration(seconds=1.0))
         except TransformException as e:
             self.get_logger().error(
-                f'TF lookup {source_frame!r} -> {target_frame!r} failed: {e}')
+                f'mask_to_cloud: TF {cam_frame!r} -> {target_frame!r} failed: {e}')
             return None
-        transformed = do_transform_point(pt, transform)
-        return (float(transformed.point.x), float(transformed.point.y),
-                float(transformed.point.z))
+        pts = transform_points(pts_cam, transform_to_matrix(tf.transform))
+        return pts.astype(np.float32)
 
-    def _frame_origin_in(self, target_frame, source_frame):
-        """Origin of `source_frame` expressed in `target_frame`, or None."""
-        try:
-            tfm = self.tf_buffer.lookup_transform(
-                target_frame, source_frame, rclpy.time.Time(),
-                timeout=RclpyDuration(seconds=1.0))
-        except TransformException:
+    def plan_grasp(self, cloud, frame='pelvis', gripper_name=''):
+        """Send an (N, 3) object cloud to the graspgen service. Returns the
+        GraspGen response (ranked `grasps` PoseStamped[], `scores`,
+        `gripper_width`) in `frame`, or None."""
+        if cloud is None or len(cloud) < MIN_GRASP_POINTS:
+            self.get_logger().error('plan_grasp: empty/too-small cloud')
             return None
-        t = tfm.transform.translation
-        return (float(t.x), float(t.y), float(t.z))
+        header = Header()
+        header.frame_id = frame
+        header.stamp = self.get_clock().now().to_msg()
+        cloud_msg = point_cloud2.create_cloud_xyz32(
+            header, np.asarray(cloud, dtype=np.float32))
+        req = GraspGen.Request()
+        req.object_cloud = cloud_msg
+        req.gripper_name = gripper_name
+        resp = self._call_service(self.graspgen_cli, req, 'GraspGen', timeout_sec=60.0)
+        if resp is None or not resp.success or not resp.grasps:
+            if resp is not None and resp.message:
+                self.get_logger().error(f'plan_grasp: {resp.message}')
+            return None
+        return resp
 
     # ------------------------------------------------------- motion primitives
     def move_frame_to(self, arm, x, y, z, duration_sec=3, quat=(0.0, 0.0, 0.0, 1.0),
                       outer_gh=None):
         """Send the arm's grip-site frame to (x, y, z) in the pelvis frame via
-        /frame_task (open_fridge.py's move_frame_to, retargeted from the wrist
-        to the gripper closure point, orientation added).
-        Pass the skill's goal handle as outer_gh so a skill cancel promptly
-        cancels the in-flight frame_task goal too."""
+        /frame_task. Pass the skill's goal handle as outer_gh so a skill cancel
+        promptly cancels the in-flight frame_task goal too."""
         goal = FrameTask.Goal()
         goal.frame_names = [ARM_FRAMES[arm]]
         pose = Pose()
@@ -686,64 +478,8 @@ class SkillsBase(Node):
             return False
         return self._trigger_gripper(self.gripper_close_clis[arm], f'gripper/close({arm})')
 
-    def navigate_to(self, x, y, yaw=0.0, frame='map', timeout_sec=120.0, outer_gh=None):
-        goal = NavigateToPose.Goal()
-        goal.pose = PoseStamped()
-        goal.pose.header.frame_id = frame
-        goal.pose.header.stamp = self.get_clock().now().to_msg()
-        goal.pose.pose.position = Point(x=float(x), y=float(y), z=0.0)
-        half = 0.5 * float(yaw)
-        goal.pose.pose.orientation = Quaternion(
-            x=0.0, y=0.0, z=float(math.sin(half)), w=float(math.cos(half)))
-
-        self.get_logger().info(
-            f'navigate_to_pose -> ({x:.3f}, {y:.3f}, yaw={yaw:.3f}) in {frame!r}')
-        response = self._send_action(self.nav_cli, goal, result_timeout=timeout_sec,
-                                     outer_gh=outer_gh)
-        return response is not None and response.status == GoalStatus.STATUS_SUCCEEDED
-
     def _validated_arm(self, run, goal):
         arm = (goal.arm or 'right').strip().lower()
         if arm not in ARM_FRAMES:
             return None
         return arm
-
-    # ---------------------------------------------------------- skill clients
-    # Client-side callbacks for the skill actions (used when composing skills
-    # or invoking them from this node; bind the skill name with partial()).
-    def skill_feedback_cb(self, skill, feedback_msg):
-        fb = feedback_msg.feedback
-        self.get_logger().info(
-            f'[{skill}] feedback: phase={fb.phase} progress={fb.progress:.2f}')
-
-    def skill_goal_response_cb(self, skill, future):
-        handle = future.result()
-        accepted = handle is not None and handle.accepted
-        self.get_logger().info(f'[{skill}] goal {"accepted" if accepted else "REJECTED"}')
-
-    def skill_result_cb(self, skill, future):
-        response = future.result()
-        if response is None:
-            self.get_logger().error(f'[{skill}] result unavailable')
-            return
-        r = response.result
-        self.get_logger().info(f'[{skill}] result: success={r.success} ({r.message})')
-
-    def _call_grasp_skill(self, gh, run, target_object, arm):
-        """Compose: run the SkillGrasp action (detect + antipodal grasp) through
-        this node's own client, budgeted to the caller's remaining time.
-        Returns (ok, message)."""
-        rem = run.remaining()
-        grasp_goal = SkillGrasp.Goal()
-        grasp_goal.target_object = target_object
-        grasp_goal.arm = arm
-        grasp_goal.timeout = Duration(sec=int(rem), nanosec=int((rem % 1.0) * 1e9))
-        response = self._send_action(
-            self.skill_clients['grasp'], grasp_goal,
-            feedback_cb=partial(self.skill_feedback_cb, 'grasp'),
-            result_timeout=rem, outer_gh=gh)
-        if response is None:
-            return False, ('no response' if run.remaining() > 0 else 'skill timeout')
-        if response.status != GoalStatus.STATUS_SUCCEEDED or not response.result.success:
-            return False, response.result.message or 'grasp action did not succeed'
-        return True, response.result.message

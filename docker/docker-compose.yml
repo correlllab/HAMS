@@ -98,10 +98,23 @@ services:
       # Gemini API key for the vision pipeline's gemini backbone + h12_skills.
       # Passed through from the host shell: export GEMINI_API_KEY before running.
       - GEMINI_API_KEY=${GEMINI_API_KEY:-}
+      # GraspGenX released checkpoints ship in the repo (git-LFS) and reach the
+      # container via the core_ws bind mount below. The image's
+      # GRASPGENX_CHECKPOINT_DIR defaults to an empty /opt staging dir, so point
+      # it at the real weights here (runtime override, no rebuild needed).
+      - GRASPGENX_CHECKPOINT_DIR=/home/code/core_ws/src/h12_skills/weights
+      # Default GraspGenX planning gripper. The magpie description is bind-mounted
+      # into the GraspGenX assets below; switch to a shipped gripper (e.g.
+      # parallel_2f_v1_1002) here or pass gripper_name per request to override.
+      - GRASPGENX_GRIPPER=magpie
     volumes:
       - /tmp/.X11-unix:/tmp/.X11-unix:rw
       - ${XAUTHORITY:-$HOME/.Xauthority}:/root/.Xauthority:ro
       - ../core_ws:/home/code/core_ws
       - ../CL_Assets:/home/code/CL_Assets:ro
+      # Stage the magpie GraspGenX gripper description into the (image-baked)
+      # GraspGenX assets so gripper_name=magpie resolves. Mount the LEAF dir only —
+      # mounting all of assets/ would shadow the baked proc_grippers/ + sample_data/.
+      - ../CL_Assets/grasp_assets/magpie:/opt/graspgenx/assets/x_grippers/magpie:ro
       - ./scripts:/home/code/h12_sim_scripts
     command: /home/code/h12_sim_scripts/launch_ros.sh

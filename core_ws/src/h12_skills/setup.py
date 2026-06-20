@@ -25,6 +25,7 @@ setup(
     entry_points={
         'console_scripts': [
             'skills = h12_skills.node:main',
+            'graspgen_server = h12_skills.graspgen_server:main',
         ],
     },
 )
