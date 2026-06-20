@@ -20,11 +20,11 @@
 [submodule "core_ws/src/vision_pipeline"]
 	path = core_ws/src/vision_pipeline
 	url = git@github.com:correlllab/vision_pipeline.git
-	branch = unified_sim
+	branch = hams_vision
 [submodule "core_ws/src/custom_ros_messages"]
 	path = core_ws/src/custom_ros_messages
 	url = git@github.com:correlllab/custom_ros_messages.git
-	branch = unified_sim
+	branch = main
 [submodule "core_ws/src/magpie_msgs"]
 	path = core_ws/src/magpie_msgs
 	url = git@github.com:correlllab/magpie_msgs.git

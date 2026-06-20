@@ -9,6 +9,7 @@ from launch.actions import (
 from launch.conditions import IfCondition
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
+from launch_ros.parameter_descriptions import ParameterValue
 
 # IMPORTANT: ROS_DOMAIN_ID must be exported in the launching shell. The safety
 # layer uses unitree_sdk2py's DDS ChannelSubscriber (which honours
@@ -31,6 +32,20 @@ def generate_launch_description():
     # TF lookups and sensor timestamps are coherent with the simulation.
     sim_time_param = {'use_sim_time': False}
 
+    # Per-model debug logging + visualization toggles, shared by the graspgen,
+    # gemini, sam, and skills nodes. Both on by default; disable with
+    # `model_logging:=false model_visualization:=false` at launch. clear_logs (on
+    # by default) wipes each model's dir on startup so every run begins fresh.
+    # Output lands in each package's logs/<model>/ (bind-mounted to host).
+    model_log_params = {
+        'enable_logging': ParameterValue(
+            LaunchConfiguration('model_logging'), value_type=bool),
+        'enable_visualization': ParameterValue(
+            LaunchConfiguration('model_visualization'), value_type=bool),
+        'clear_logs': ParameterValue(
+            LaunchConfiguration('model_clear_logs'), value_type=bool),
+    }
+
     return LaunchDescription([
         
         # Engage the FAME lower-body standing policy only once the operator has
@@ -39,20 +54,23 @@ def generate_launch_description():
         # never auto-commands the legs on the real robot.
         DeclareLaunchArgument('start_position_verified', default_value='false'),
         DeclareLaunchArgument('use_skills', default_value='true'),
+        DeclareLaunchArgument('model_logging', default_value='true'),
+        DeclareLaunchArgument('model_visualization', default_value='true'),
+        DeclareLaunchArgument('model_clear_logs', default_value='true'),
 
         # vision foundation-model services (replaces the vision_pipeline vp node)
         Node(
             package='vision_pipeline',
             executable='gemini_server',
             name='gemini_server',
-            parameters=[sim_time_param],
+            parameters=[sim_time_param, model_log_params],
             output='screen',
         ),
         Node(
             package='vision_pipeline',
             executable='sam_server',
             name='sam_server',
-            parameters=[sim_time_param],
+            parameters=[sim_time_param, model_log_params],
             output='screen',
         ),
 
@@ -66,7 +84,7 @@ def generate_launch_description():
             package='h12_skills',
             executable='graspgen_server',
             name='graspgen_server',
-            parameters=[sim_time_param],
+            parameters=[sim_time_param, model_log_params],
             output='screen',
             condition=IfCondition(LaunchConfiguration('use_skills')),
         ),
@@ -74,7 +92,7 @@ def generate_launch_description():
             package='h12_skills',
             executable='skills',
             name='h12_skills',
-            parameters=[sim_time_param],
+            parameters=[sim_time_param, model_log_params],
             output='screen',
             condition=IfCondition(LaunchConfiguration('use_skills')),
         ),

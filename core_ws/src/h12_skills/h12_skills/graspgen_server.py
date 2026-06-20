@@ -23,6 +23,7 @@ from sensor_msgs_py import point_cloud2
 
 from custom_ros_messages.srv import GraspGen
 
+from .model_logging import ModelLogger, declare_logging_params
 from .perception_utils import mat_to_quat
 
 
@@ -63,6 +64,9 @@ def _sampler_width(sampler):
 class GraspGenServer(Node):
     def __init__(self):
         super().__init__('graspgen_server')
+        log, viz, clear = declare_logging_params(self)
+        self.logger = ModelLogger(self, 'graspgen', 'h12_skills', __file__,
+                                  log=log, visualize=viz, clear=clear)
         from graspgenx.samplers import run_planner_on_object
         from graspgenx.utils.checkpoint_io import load_model_cfg
         self._run_planner = run_planner_on_object
@@ -106,16 +110,22 @@ class GraspGenServer(Node):
         return self._samplers[name]
 
     def _plan_cb(self, request, response):
+        rec = self.logger.start()
         frame = request.object_cloud.header.frame_id
+        rec.set(gripper_name=request.gripper_name or DEFAULT_GRIPPER, frame=frame)
         try:
             pts = point_cloud2.read_points_numpy(
                 request.object_cloud, field_names=('x', 'y', 'z'), skip_nans=True)
         except Exception as e:                       # malformed cloud
             response.success, response.message = False, f'bad cloud: {e}'
+            rec.finish(success=False, message=response.message)
             return response
         pts = np.asarray(pts, dtype=np.float32).reshape(-1, 3)
+        rec.set(n_input_points=int(pts.shape[0]))
+        rec.save_array('input_cloud', pts)
         if pts.shape[0] < MIN_OBJECT_POINTS:
             response.success, response.message = False, f'too few points ({pts.shape[0]})'
+            rec.finish(success=False, message=response.message)
             return response
 
         try:
@@ -123,6 +133,7 @@ class GraspGenServer(Node):
         except Exception as e:
             response.success, response.message = False, f'sampler load failed: {e}'
             self.get_logger().error(response.message)
+            rec.finish(success=False, message=response.message)
             return response
 
         mean = pts.mean(axis=0)
@@ -132,6 +143,7 @@ class GraspGenServer(Node):
         except Exception as e:
             response.success, response.message = False, f'planner failed: {e}'
             self.get_logger().error(response.message)
+            rec.finish(success=False, message=response.message)
             return response
 
         grasps = np.asarray(out[0] if isinstance(out, (tuple, list)) else out)
@@ -139,6 +151,7 @@ class GraspGenServer(Node):
         # cleanly, not crash the service thread (grasps.ndim is safe on 0-d).
         if grasps.ndim != 3 or grasps.shape[0] == 0:
             response.success, response.message = False, 'no grasps produced'
+            rec.finish(success=False, message=response.message)
             return response
         n = grasps.shape[0]
         confs = (np.asarray(out[1]).reshape(-1)
@@ -163,7 +176,70 @@ class GraspGenServer(Node):
         response.gripper_width = float(width)
         response.success = True
         response.message = f'{len(response.grasps)} grasps'
+        rec.set(n_grasps=len(response.grasps), gripper_width=float(width))
+        rec.save_array('grasps', grasps)            # raw (M, 4, 4) in centered frame
+        rec.save_array('scores', confs)
+        self._save_grasp_viz(rec, pts, grasps, mean, width)
+        rec.finish(success=True, message=response.message)
         return response
+
+    def _save_grasp_viz(self, rec, pts, grasps, mean, width):
+        """Render an orthographic 'photo' of the object cloud + the generated
+        grasps, drawn with cv2 (the ros image's matplotlib 3D backend is broken).
+        Two views (front Y-Z, side X-Z) side by side; the top grasps are drawn as
+        gripper frames — red = finger-opening axis, blue = approach axis."""
+        if not self.logger.visualize:
+            return
+        try:
+            import cv2
+        except Exception as e:
+            self.get_logger().warn(f'grasp viz needs cv2: {e}')
+            return
+        try:
+            G = np.asarray([np.asarray(g, dtype=np.float64).reshape(4, 4) for g in grasps])
+            centers = G[:, :3, 3] + mean          # un-center back to the input frame
+            # GraspGenX pose: +Z approaches the object, +X is the finger-closing
+            # axis (see GraspGen.srv). Build line segments for the top grasps.
+            topk = min(5, len(G))
+            half = max(0.01, float(width) / 2.0)
+            approach_len = 0.06
+            segments = []                          # (p_a[3], p_b[3], bgr)
+            for i in range(topk):
+                R, p = G[i, :3, :3], centers[i]
+                segments.append((p - half * R[:, 0], p + half * R[:, 0], (0, 0, 255)))
+                segments.append((p - approach_len * R[:, 2], p, (255, 0, 0)))
+            panels = [
+                self._render_grasp_panel(cv2, pts, centers, segments, ai, bi,
+                                         f'{label}  (top {topk}/{len(G)})')
+                for (ai, bi), label in (((1, 2), 'front Y-Z'), ((0, 2), 'side X-Z'))
+            ]
+            cv2.imwrite(rec.path('grasps', 'png'), np.hstack(panels))
+        except Exception as e:
+            self.get_logger().warn(f'grasp viz failed: {e}')
+
+    @staticmethod
+    def _render_grasp_panel(cv2, pts, centers, segments, ai, bi, label,
+                            size=520, pad=36):
+        """One orthographic view (axes ai=horizontal, bi=vertical, up = up): gray
+        cloud dots + colored grasp segments on a white canvas. Uniform scale so the
+        two panels share geometry sense."""
+        view = np.vstack([pts[:, [ai, bi]], centers[:, [ai, bi]]])
+        mins, maxs = view.min(axis=0), view.max(axis=0)
+        c = (mins + maxs) / 2.0
+        scale = (size - 2 * pad) / (float((maxs - mins).max()) or 0.1)
+
+        def to_px(h, v):
+            return (int((h - c[0]) * scale + size / 2.0),
+                    int(size / 2.0 - (v - c[1]) * scale))   # flip y so up is up
+
+        img = np.full((size, size, 3), 255, np.uint8)
+        for h, v in pts[:, [ai, bi]]:
+            cv2.circle(img, to_px(h, v), 1, (170, 170, 170), -1)
+        for a, b, color in segments:
+            cv2.line(img, to_px(a[ai], a[bi]), to_px(b[ai], b[bi]), color, 2)
+        cv2.putText(img, label, (8, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.55,
+                    (0, 0, 0), 1, cv2.LINE_AA)
+        return img
 
 
 def main():

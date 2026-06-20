@@ -68,8 +68,14 @@ GRIPPER_NS = {'left': '/left/gripper', 'right': '/right/gripper'}
 
 # Grip-force limit (N) applied via set_force before closing on an object.
 GRIP_FORCE_N = 30.0
-# Used when goal.timeout is zero [s].
-DEFAULT_SKILL_TIMEOUT = 120.0
+# Used when goal.timeout is zero [s]. Generous because the grasp skill's Gemini
+# detection alone (gemini-robotics-er) can take ~3 min; this deadline is a safety
+# ceiling checked at phase boundaries, not a target — most skills finish far sooner.
+DEFAULT_SKILL_TIMEOUT = 300.0
+# Gemini query-service call timeout [s]. The gemini-robotics-er model used for
+# grasp detection can take ~3 min to answer — far beyond _call_service's 30s
+# default — so give GeminiQuery its own generous ceiling.
+GEMINI_TIMEOUT_SEC = 240.0
 # Depth back-projection range [m] and the floor on usable object points.
 # Keep MIN_GRASP_POINTS in sync with graspgen_server.MIN_OBJECT_POINTS so a cloud
 # the server would reject is dropped client-side with an accurate message.
@@ -320,9 +326,11 @@ class SkillsBase(Node):
         return response
 
     # ------------------------------------------------- perception (gemini/sam)
-    def query_gemini(self, prompt, image=None):
+    def query_gemini(self, prompt, image=None, timeout_sec=GEMINI_TIMEOUT_SEC):
         """Ask the gemini_query service `prompt` about `image` (defaults to the
-        latest head-camera frame). Returns Gemini's text response, or None."""
+        latest head-camera frame). Returns Gemini's text response, or None.
+        `timeout_sec` defaults high (GEMINI_TIMEOUT_SEC) because the grasp model
+        is slow; pass a smaller value for latency-sensitive callers."""
         img = image if image is not None else self.latest_image()
         if img is None:
             self.get_logger().error('query_gemini: no head-camera image yet')
@@ -330,7 +338,8 @@ class SkillsBase(Node):
         req = GeminiQuery.Request()
         req.image = img
         req.prompt = prompt
-        resp = self._call_service(self.gemini_cli, req, 'GeminiQuery')
+        resp = self._call_service(self.gemini_cli, req, 'GeminiQuery',
+                                  timeout_sec=timeout_sec)
         if resp is None or not resp.success:
             return None
         return resp.response

@@ -15,9 +15,10 @@ GEMINI_GRASP_PROMPT = (
     'Find the single best place to grasp the {obj} with a two-finger parallel '
     'gripper: a graspable part such as a handle, knob, stem, neck, rim, or narrow '
     'protrusion — or the center of mass for a small simple object. Return a JSON '
-    'array with one TIGHT bounding box around that grasp region only (not the '
-    'whole {obj}): [{{"box_2d": [y1, x1, y2, x2], "label": "{obj} grasp point", '
+    'array with exactly one TIGHT bounding box around that grasp region only (not '
+    'the whole {obj}): [{{"box_2d": [y1, x1, y2, x2], "label": "{obj} grasp point", '
     '"score": 0.9}}], integer coordinates normalized to 0-1000 with y first. '
+    'Always return a 4-number "box_2d" bounding box — never a single point. '
     'If the {obj} is not visible, return [].'
 )
 
