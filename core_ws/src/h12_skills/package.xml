@@ -16,6 +16,7 @@
   <depend>sensor_msgs</depend>
   <depend>sensor_msgs_py</depend>
   <depend>geometry_msgs</depend>
+  <depend>visualization_msgs</depend>
   <depend>cv_bridge</depend>
   <depend>python3-numpy</depend>
   <!-- Gemini Robotics client: pip package google-genai (no rosdep key); install
