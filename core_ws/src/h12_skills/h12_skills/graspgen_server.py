@@ -17,9 +17,12 @@ import os
 import numpy as np
 import rclpy
 from rclpy.node import Node
+from rclpy.qos import QoSProfile, DurabilityPolicy
 
-from geometry_msgs.msg import PoseStamped
+from geometry_msgs.msg import Point, PoseStamped
+from sensor_msgs.msg import PointCloud2
 from sensor_msgs_py import point_cloud2
+from visualization_msgs.msg import Marker, MarkerArray
 
 from custom_ros_messages.srv import GraspGen
 
@@ -33,6 +36,14 @@ from .perception_utils import mat_to_quat
 # the GraspGen.srv `gripper_name` field overrides per request.
 DEFAULT_GRIPPER = os.environ.get('GRASPGENX_GRIPPER', 'parallel_2f_v1_1002')
 MIN_OBJECT_POINTS = 100
+# RViz grasp markers: how many of the ranked grasps to draw. Each is drawn as an
+# arrow from the GraspGenX pose ORIGIN (the gripper base, where the IK pins
+# *_graspgen_site) along +Z (approach) to the CONTACT point where the fingers
+# close — so the arrow TIP sits on the object, i.e. "where the gripper point is".
+# GRASP_TCP_DEPTH_M is that base->contact distance; magpie = 0.193 m (its config
+# fingertip = [0,0,0.193]). Env-overridable for a different gripper.
+N_GRASP_MARKERS = 5
+GRASP_TCP_DEPTH_M = float(os.environ.get('GRASPGEN_TCP_DEPTH_M', '0.193'))
 # Candidate planner kwargs (filtered to run_planner_on_object's real signature,
 # exactly as graspgenx_smoke_test.py does).
 PLANNER_KWARGS = dict(
@@ -94,6 +105,18 @@ class GraspGenServer(Node):
                 f'default gripper {DEFAULT_GRIPPER!r} failed to load ({e}); set '
                 f'GRASPGENX_GRIPPER or pass gripper_name in the request')
 
+        # Latched (TRANSIENT_LOCAL) so RViz still gets the last grasp markers even
+        # if it subscribes after a plan was served. One arrow per ranked grasp, in
+        # the request's frame (pelvis), drawn along the GraspGenX approach axis.
+        self._marker_pub = self.create_publisher(
+            MarkerArray, 'graspgen_markers',
+            QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL))
+        # Republish the object cloud we planned on, so it can be inspected in RViz
+        # against the grasp markers (same frame). Also latched.
+        self._cloud_pub = self.create_publisher(
+            PointCloud2, 'grasp_cloud',
+            QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL))
+
         self.create_service(GraspGen, 'graspgen', self._plan_cb)
         self.get_logger().info("graspgen_server ready on 'graspgen'")
 
@@ -123,6 +146,7 @@ class GraspGenServer(Node):
         pts = np.asarray(pts, dtype=np.float32).reshape(-1, 3)
         rec.set(n_input_points=int(pts.shape[0]))
         rec.save_array('input_cloud', pts)
+        self._cloud_pub.publish(request.object_cloud)   # republish for RViz
         if pts.shape[0] < MIN_OBJECT_POINTS:
             response.success, response.message = False, f'too few points ({pts.shape[0]})'
             rec.finish(success=False, message=response.message)
@@ -179,9 +203,78 @@ class GraspGenServer(Node):
         rec.set(n_grasps=len(response.grasps), gripper_width=float(width))
         rec.save_array('grasps', grasps)            # raw (M, 4, 4) in centered frame
         rec.save_array('scores', confs)
+        self._publish_grasp_markers(frame, grasps, mean)
         self._save_grasp_viz(rec, pts, grasps, mean, width)
         rec.finish(success=True, message=response.message)
         return response
+
+    def _publish_grasp_markers(self, frame, grasps, mean):
+        """Publish the generated grasps as RViz markers on 'graspgen_markers'
+        (latched), in `frame` (pelvis). For each ranked grasp:
+          - an ARROW from the GraspGenX pose ORIGIN (gripper base, where the IK
+            pins *_graspgen_site) along +Z to the CONTACT point, so the arrow TIP
+            lands on the object = where the fingers close ("the gripper point");
+          - a small SPHERE at that contact point.
+        The base (arrow tail) is where the driven frame — and ~8 cm behind it, the
+        wrist — ends up; the tip is where the gripper actually grasps. This makes
+        the base-vs-contact distinction visible so the wrist sitting near the base
+        isn't mistaken for the gripper being short. Best grasp (grasps[0], the one
+        the skill executes) is bright green; the rest are dim. Mirrors
+        _save_grasp_viz's un-centering so the markers match the PNG."""
+        try:
+            G = np.asarray(
+                [np.asarray(g, dtype=np.float64).reshape(4, 4) for g in grasps])
+            centers = G[:, :3, 3] + mean          # un-center back to the input frame
+            topk = min(N_GRASP_MARKERS, len(G))
+            stamp = self.get_clock().now().to_msg()
+
+            arr = MarkerArray()
+            # Clear any markers from a previous plan so stale ones don't linger.
+            clear = Marker()
+            clear.header.frame_id = frame
+            clear.action = Marker.DELETEALL
+            arr.markers.append(clear)
+
+            for i in range(topk):
+                R, base = G[i, :3, :3], centers[i]
+                contact = base + GRASP_TCP_DEPTH_M * R[:, 2]   # +Z approach -> TCP
+                best = (i == 0)
+                r, g, b = (0.0, 1.0, 0.0) if best else (0.5, 0.5, 0.0)
+                a = 1.0 if best else 0.5
+
+                arrow = Marker()
+                arrow.header.frame_id = frame
+                arrow.header.stamp = stamp
+                arrow.ns = 'graspgen_approach'
+                arrow.id = i
+                arrow.type = Marker.ARROW
+                arrow.action = Marker.ADD
+                arrow.points = [
+                    Point(x=float(base[0]), y=float(base[1]), z=float(base[2])),
+                    Point(x=float(contact[0]), y=float(contact[1]),
+                          z=float(contact[2]))]
+                arrow.scale.x = 0.008                  # shaft diameter
+                arrow.scale.y = 0.018                  # head diameter
+                arrow.scale.z = 0.03                   # head length
+                arrow.color.r, arrow.color.g, arrow.color.b, arrow.color.a = r, g, b, a
+                arr.markers.append(arrow)
+
+                dot = Marker()
+                dot.header.frame_id = frame
+                dot.header.stamp = stamp
+                dot.ns = 'graspgen_contact'
+                dot.id = i
+                dot.type = Marker.SPHERE
+                dot.action = Marker.ADD
+                dot.pose.position = Point(
+                    x=float(contact[0]), y=float(contact[1]), z=float(contact[2]))
+                dot.pose.orientation.w = 1.0
+                dot.scale.x = dot.scale.y = dot.scale.z = 0.02
+                dot.color.r, dot.color.g, dot.color.b, dot.color.a = r, g, b, a
+                arr.markers.append(dot)
+            self._marker_pub.publish(arr)
+        except Exception as e:                          # viz must never break planning
+            self.get_logger().warn(f'grasp marker publish failed: {e}')
 
     def _save_grasp_viz(self, rec, pts, grasps, mean, width):
         """Render an orthographic 'photo' of the object cloud + the generated

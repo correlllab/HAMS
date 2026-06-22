@@ -62,6 +62,11 @@ CAMERA_INFO_TOPIC = f'{CAMERA_NS}/color/camera_info'
 # yaw links pushed forward to the fingertips, so frame_task targets are the
 # grasp point itself (no reach offset needed).
 ARM_FRAMES = {'left': 'left_grip_site', 'right': 'right_grip_site'}
+# GraspGenX gripper-BASE frames (URDF frames whose axes match the GraspGenX
+# planning convention: +Z approach, +X finger-close, origin at the magpie gripper
+# base). A raw GraspGenX grasp pose is sent straight to frame_task targeting these
+# — no axis-permutation / TCP-depth correction needed. See skills/grasp.py.
+GRASP_FRAMES = {'left': 'left_graspgen_site', 'right': 'right_graspgen_site'}
 # Per-arm gripper service namespace; the magpie driver/sim expose
 # <ns>/set_position, <ns>/set_force, <ns>/open and <ns>/close under each.
 GRIPPER_NS = {'left': '/left/gripper', 'right': '/right/gripper'}
@@ -421,12 +426,15 @@ class SkillsBase(Node):
 
     # ------------------------------------------------------- motion primitives
     def move_frame_to(self, arm, x, y, z, duration_sec=3, quat=(0.0, 0.0, 0.0, 1.0),
-                      outer_gh=None):
-        """Send the arm's grip-site frame to (x, y, z) in the pelvis frame via
-        /frame_task. Pass the skill's goal handle as outer_gh so a skill cancel
-        promptly cancels the in-flight frame_task goal too."""
+                      outer_gh=None, frame=None):
+        """Send a frame to (x, y, z) in the pelvis frame via /frame_task. Defaults
+        to the arm's grip-site frame; pass `frame` to drive a different URDF frame
+        (e.g. GRASP_FRAMES[arm], the GraspGenX gripper-base frame, for grasping).
+        Pass the skill's goal handle as outer_gh so a skill cancel promptly cancels
+        the in-flight frame_task goal too."""
+        frame_name = frame or ARM_FRAMES[arm]
         goal = FrameTask.Goal()
-        goal.frame_names = [ARM_FRAMES[arm]]
+        goal.frame_names = [frame_name]
         pose = Pose()
         pose.position = Point(x=float(x), y=float(y), z=float(z))
         pose.orientation = Quaternion(
@@ -435,7 +443,7 @@ class SkillsBase(Node):
         goal.duration = Duration(sec=int(duration_sec), nanosec=0)
 
         self.get_logger().info(
-            f'frame_task: {ARM_FRAMES[arm]} -> ({x:.3f}, {y:.3f}, {z:.3f}) '
+            f'frame_task: {frame_name} -> ({x:.3f}, {y:.3f}, {z:.3f}) '
             f'in {duration_sec}s')
         response = self._send_action(
             self.frame_task_cli, goal, result_timeout=float(duration_sec) + 10.0,
