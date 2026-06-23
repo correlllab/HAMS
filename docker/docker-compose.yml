@@ -113,8 +113,11 @@ services:
       - ../core_ws:/home/code/core_ws
       - ../CL_Assets:/home/code/CL_Assets:ro
       # Stage the magpie GraspGenX gripper description into the (image-baked)
-      # GraspGenX assets so gripper_name=magpie resolves. Mount the LEAF dir only —
+      # GraspGenX assets so gripper_name=magpie resolves. Mount the LEAF dirs only —
       # mounting all of assets/ would shadow the baked proc_grippers/ + sample_data/.
-      - ../CL_Assets/grasp_assets/magpie:/opt/graspgenx/assets/x_grippers/magpie:ro
+      # gripper.urdf references ../meshes/magpie/, so the meshes leaf is mounted at
+      # x_grippers/meshes/magpie (one level up from the gripper dir).
+      - ../CL_Assets/graspgenx/assets/magpie:/opt/graspgenx/assets/x_grippers/magpie:ro
+      - ../CL_Assets/graspgenx/assets/meshes/magpie:/opt/graspgenx/assets/x_grippers/meshes/magpie:ro
       - ./scripts:/home/code/h12_sim_scripts
     command: /home/code/h12_sim_scripts/launch_ros.sh
