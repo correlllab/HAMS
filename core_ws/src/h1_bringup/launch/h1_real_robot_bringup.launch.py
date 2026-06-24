@@ -20,9 +20,9 @@ from launch_ros.actions import Node
 ASSETS_DIR = '/home/unitree/Humanoid_Simulation/CL_Assets'
 
 def generate_launch_description():
-    # The included h12_ros2_controller/full_launch.py and vision_pipeline/vp.launch.py
-    # both start their own rviz2. We can't patch those upstream packages, so this
-    # bringup inlines their non-rviz nodes and runs a single rviz with sim.rviz.
+    # The included h12_ros2_controller/full_launch.py starts its own rviz2. We
+    # can't patch that upstream package, so this bringup inlines its non-rviz
+    # nodes (plus the model_server vision services) and runs a single rviz with sim.rviz.
     bringup_share = get_package_share_directory('h1_bringup')
 
     with open(os.path.join(ASSETS_DIR, 'ros_assets', 'h1_2_magpie_ros.urdf'), 'r') as urdf_file:

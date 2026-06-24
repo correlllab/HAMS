@@ -22,9 +22,9 @@ ASSETS_DIR = '/home/code/CL_Assets'
 
 
 def generate_launch_description():
-    # The included h12_ros2_controller/full_launch.py and vision_pipeline/vp.launch.py
-    # both start their own rviz2. We can't patch those upstream packages, so this
-    # bringup inlines their non-rviz nodes and runs a single rviz with sim.rviz.
+    # The included h12_ros2_controller/full_launch.py starts its own rviz2. We
+    # can't patch that upstream package, so this bringup inlines its non-rviz
+    # nodes (plus the model_server vision services) and runs a single rviz with sim.rviz.
     bringup_share = get_package_share_directory('h1_bringup')
     default_rviz = os.path.join(bringup_share, 'rviz', 'sim.rviz')
 
@@ -58,16 +58,16 @@ def generate_launch_description():
         DeclareLaunchArgument('model_visualization', default_value='true'),
         DeclareLaunchArgument('model_clear_logs', default_value='true'),
 
-        # vision foundation-model services (replaces the vision_pipeline vp node)
+        # vision foundation-model services (gemini + sam, served by model_server)
         Node(
-            package='vision_pipeline',
+            package='model_server',
             executable='gemini_server',
             name='gemini_server',
             parameters=[sim_time_param, model_log_params],
             output='screen',
         ),
         Node(
-            package='vision_pipeline',
+            package='model_server',
             executable='sam_server',
             name='sam_server',
             parameters=[sim_time_param, model_log_params],
@@ -81,7 +81,7 @@ def generate_launch_description():
         # fatal) on gemini/sam/graspgen, the grippers, and frame_task — the
         # latter two arrive over DDS from the robot/driver bringup.
         Node(
-            package='h12_skills',
+            package='model_server',
             executable='graspgen_server',
             name='graspgen_server',
             parameters=[sim_time_param, model_log_params],

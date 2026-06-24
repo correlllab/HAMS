@@ -1,11 +1,9 @@
 """Small, dependency-light perception helpers for the grasp skill.
 
-Vendored (rather than imported) from vision_pipeline to avoid a cross-package
-Python dependency on it:
-  - `decode_compressed_depth_image` / `transform_to_matrix` are copied verbatim
-    from vision_pipeline/utils/ros_utils.py.
-  - `deproject_mask` is the back-projection kernel from
-    vision_pipeline/core/SAM.py:_build_pcds.
+Self-contained geometry/IO helpers used by the skills:
+  - `decode_compressed_depth_image` / `transform_to_matrix` decode a ROS2
+    compressedDepth image and convert a geometry_msgs/Transform to a 4x4 matrix.
+  - `deproject_mask` is the pinhole back-projection kernel (mask + depth -> XYZ).
 Plus the rotation/quaternion helpers and a Gemini-JSON extractor the skill needs.
 """
 
@@ -19,7 +17,7 @@ import cv2
 # --------------------------------------------------------------- depth + cloud
 def decode_compressed_depth_image(msg) -> np.ndarray:
     """Decode a ROS2 compressedDepth image (format '16UC1; compressedDepth') to a
-    uint16 depth array (millimetres). Copied from vision_pipeline ros_utils."""
+    uint16 depth array (millimetres)."""
     if not msg.format.lower().endswith("compresseddepth"):
         raise ValueError(f"Unsupported depth format: {msg.format}")
     header_size = 12  # 12-byte compressedDepth header precedes the PNG payload
@@ -37,8 +35,8 @@ def decode_compressed_depth_image(msg) -> np.ndarray:
 
 def deproject_mask(mask, depth_m, fx, fy, cx, cy, min_d=0.1, max_d=3.0):
     """Back-project the True pixels of `mask` (bool HxW) with finite depth into a
-    (N, 3) float32 XYZ array in the camera optical frame. Mirrors the pinhole
-    projection in vision_pipeline SAM._build_pcds; drops invalid/out-of-range depth.
+    (N, 3) float32 XYZ array in the camera optical frame. Standard pinhole
+    back-projection; drops invalid/out-of-range depth.
     `depth_m` is HxW depth in metres aligned to the mask's pixel grid."""
     valid = mask & (depth_m > min_d) & (depth_m < max_d)
     vs, us = np.nonzero(valid)              # vs = rows (y), us = cols (x)
@@ -55,8 +53,7 @@ def transform_points(pts, T):
 
 # ----------------------------------------------------------- rotations / poses
 def transform_to_matrix(tf_msg):
-    """Convert a geometry_msgs/Transform into a 4x4 numpy array. Copied from
-    vision_pipeline ros_utils."""
+    """Convert a geometry_msgs/Transform into a 4x4 numpy array."""
     tx, ty, tz = tf_msg.translation.x, tf_msg.translation.y, tf_msg.translation.z
     qx, qy, qz, qw = (tf_msg.rotation.x, tf_msg.rotation.y,
                       tf_msg.rotation.z, tf_msg.rotation.w)
@@ -111,8 +108,8 @@ def pose_to_matrix(pose):
 # ------------------------------------------------------------------- gemini io
 def extract_json(text):
     """Best-effort extraction of a JSON value from a Gemini text response: strips
-    ```json fences (per vision_pipeline parse_gemini_json), else falls back to the
-    outermost [...] / {...} span. Returns the parsed object, or None."""
+    ```json fences, else falls back to the outermost [...] / {...} span. Returns
+    the parsed object, or None."""
     if not text:
         return None
     lines = text.splitlines()
