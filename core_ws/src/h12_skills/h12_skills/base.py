@@ -34,7 +34,7 @@ from sensor_msgs.msg import CameraInfo, CompressedImage
 from std_msgs.msg import Header
 
 from sensor_msgs_py import point_cloud2
-from tf2_ros import Buffer, TransformListener, TransformException
+from tf2_ros import Buffer, TransformBroadcaster, TransformListener, TransformException
 
 from custom_ros_messages.srv import GeminiQuery, SamSegment, GraspGen
 from custom_ros_messages.action import FrameTask
@@ -83,6 +83,10 @@ GEMINI_TIMEOUT_SEC = 240.0
 DEPTH_MIN_M = 0.1
 DEPTH_MAX_M = 3.0
 MIN_GRASP_POINTS = 100
+
+# Debug/visualization TF frames (e.g. the grasp target) are re-broadcast at this
+# period so they stay alive in RViz instead of expiring after a single send.
+TF_REPUBLISH_PERIOD_SEC = 0.1
 
 # Skill action clients: name -> (action type, action server name). The same
 # table drives the action servers SkillsNode provides.
@@ -220,9 +224,17 @@ class SkillsBase(Node):
         self.frame_task_cli = ActionClient(
             self, FrameTask, '/frame_task', callback_group=self._cb_group)
 
-        # --- TF listener ------------------------------------------------------
+        # --- TF listener + broadcaster ----------------------------------------
         self.tf_buffer = Buffer()
         self.tf_listener = TransformListener(self.tf_buffer, self)
+        # Broadcast planned grasp targets (graspgenx_target_frame) for RViz. These
+        # are re-sent on a timer (publish_tf / _republish_tfs) so the frames stay
+        # alive in RViz instead of expiring after a single one-shot send.
+        self.tf_broadcaster = TransformBroadcaster(self)
+        self._persistent_tfs = {}            # child_frame_id -> TransformStamped
+        self._tf_lock = threading.Lock()
+        self.create_timer(TF_REPUBLISH_PERIOD_SEC, self._republish_tfs,
+                          callback_group=self._cb_group)
 
         # --- head-camera caches (color for the services, depth+info for lifting
         #     a 2-D mask to a 3-D cloud) -----------------------------------------
@@ -270,6 +282,34 @@ class SkillsBase(Node):
     def latest_caminfo(self):
         """Most recent color CameraInfo, or None."""
         return self._latest_caminfo
+
+    # --------------------------------------------------------------- debug TF
+    def publish_tf(self, transform):
+        """Register a TransformStamped to be CONTINUOUSLY re-broadcast (re-stamped
+        on a timer) so the frame stays alive in RViz instead of expiring after a
+        single send. Keyed by child_frame_id: call again with the same child to
+        move it, or drop_tf(child) to stop publishing it. Sends once immediately
+        so the frame appears without waiting for the next tick."""
+        with self._tf_lock:
+            self._persistent_tfs[transform.child_frame_id] = transform
+        self.tf_broadcaster.sendTransform(transform)
+
+    def drop_tf(self, child_frame_id):
+        """Stop continuously broadcasting a frame previously registered via publish_tf."""
+        with self._tf_lock:
+            self._persistent_tfs.pop(child_frame_id, None)
+
+    def _republish_tfs(self):
+        """Timer: re-stamp every registered debug frame to 'now' and re-broadcast,
+        so RViz keeps showing them instead of dropping them as stale."""
+        with self._tf_lock:
+            tfs = list(self._persistent_tfs.values())
+        if not tfs:
+            return
+        stamp = self.get_clock().now().to_msg()
+        for t in tfs:
+            t.header.stamp = stamp
+        self.tf_broadcaster.sendTransform(tfs)
 
     # ------------------------------------------------------------------ utils
     def _on_skill_cancel(self, _cancel_request):
@@ -482,10 +522,32 @@ class SkillsBase(Node):
         self.get_logger().info(
             f'frame_task: {frame_name} -> ({x:.3f}, {y:.3f}, {z:.3f}) '
             f'in {duration_sec}s')
+
+        # Log the frame_task server's streamed IK convergence (errors_linear /
+        # errors_angular, one entry per driven frame) so a skill's approach/contact
+        # motion shows whether it actually reached the target instead of just a
+        # final pass/fail. Throttled — the server publishes every control step.
+        # `last` retains the most recent values for a one-line summary on resolve.
+        last = {}
+
+        def _log_feedback(feedback_msg):
+            fb = feedback_msg.feedback
+            last['lin'] = max(fb.errors_linear) if fb.errors_linear else 0.0
+            last['ang'] = max(fb.errors_angular) if fb.errors_angular else 0.0
+            self.get_logger().info(
+                f'frame_task[{frame_name}] converging: '
+                f'lin={last["lin"] * 1000:.1f}mm ang={last["ang"]:.3f}rad',
+                throttle_duration_sec=0.5)
+
         response = self._send_action(
-            self.frame_task_cli, goal, result_timeout=float(duration_sec) + 10.0,
-            outer_gh=outer_gh)
-        return response is not None and response.status == GoalStatus.STATUS_SUCCEEDED
+            self.frame_task_cli, goal, feedback_cb=_log_feedback,
+            result_timeout=float(duration_sec) + 10.0, outer_gh=outer_gh)
+        ok = response is not None and response.status == GoalStatus.STATUS_SUCCEEDED
+        if last:
+            self.get_logger().info(
+                f'frame_task[{frame_name}] done: lin={last["lin"] * 1000:.1f}mm '
+                f'ang={last["ang"]:.3f}rad success={ok}')
+        return ok
 
     def set_gripper(self, arm, position_mm, speed=1.0):
         """Direct position command (mm); used to pre-open to a measured grasp

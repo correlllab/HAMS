@@ -2,6 +2,8 @@
 
 import copy
 
+from geometry_msgs.msg import TransformStamped
+
 from custom_ros_messages.action import SkillGrasp
 
 from ..base import _Run, GRASP_FRAMES, GEMINI_TIMEOUT_SEC
@@ -35,6 +37,10 @@ GEMINI_GRASP_PROMPT = (
 # How many of the ranked GraspGenX grasps to try (best-first) before giving up:
 # the top grasp may be IK-unreachable, so fall through to the next one.
 MAX_GRASP_ATTEMPTS = 5
+
+# Single TF frame the planned pre-grasp approach is broadcast to, updated as the
+# loop walks the ranked candidates, so RViz shows the target currently being tried.
+TARGET_FRAME = 'graspgenx_target_frame'
 
 
 
@@ -97,10 +103,16 @@ class GraspSkill:
         grasp_pose = None
         for i in range(n):
             grasp_pose = resp.grasps[i].pose
-            approach_pose = get_approach_pose(grasp_pose, approach_dist=0.05)
+            approach_pose = get_approach_pose(grasp_pose, approach_dist=-0.05)
+            # Register the candidate we're about to drive to as TARGET_FRAME (one
+            # frame, updated each iteration). publish_tf keeps re-broadcasting it
+            # so RViz shows the live target instead of it expiring between sends.
+            self.publish_tf(_approach_target_tf(
+                resp.grasps[i].header.frame_id, approach_pose,
+                self.get_clock().now().to_msg()))
             self.get_logger().info(
                 f'grasp {i} for {obj!r}: score {resp.scores[i]:.2f}, width {width_mm:.1f}mm, \n approach {approach_pose}')
-            if self.move_frame_to(GRASP_FRAMES[arm], approach_pose, duration_sec=4, outer_gh=gh):
+            if self.move_frame_to(GRASP_FRAMES[arm], approach_pose, duration_sec=100, outer_gh=gh):
                 idx = i
                 break
             if gh.is_cancel_requested or run.remaining() <= 0.0:
@@ -114,7 +126,7 @@ class GraspSkill:
         # --- grasp: move to contact + close ------------------------------------
         if not run.phase('grasp', 0.75):
             return run.result
-        if not self.move_frame_to(GRASP_FRAMES[arm], grasp_pose, duration_sec=3, outer_gh=gh):
+        if not self.move_frame_to(GRASP_FRAMES[arm], grasp_pose, duration_sec=100, outer_gh=gh):
             return run.abort('contact motion failed')
         if not self.close_gripper(arm):
             return run.abort('gripper close failed')
@@ -149,6 +161,21 @@ class GraspSkill:
         px1, px2 = sorted((x1 / 1000.0 * w, x2 / 1000.0 * w))
         py1, py2 = sorted((y1 / 1000.0 * h, y2 / 1000.0 * h))
         return [px1, py1, px2, py2]
+
+
+def _approach_target_tf(parent_frame, pose, stamp):
+    """Build the TARGET_FRAME TransformStamped for `pose` (a Pose in
+    `parent_frame`, stamped `stamp`) so the base node's broadcaster can publish
+    the currently-targeted pre-grasp approach for RViz."""
+    t = TransformStamped()
+    t.header.stamp = stamp
+    t.header.frame_id = parent_frame
+    t.child_frame_id = TARGET_FRAME
+    t.transform.translation.x = pose.position.x
+    t.transform.translation.y = pose.position.y
+    t.transform.translation.z = pose.position.z
+    t.transform.rotation = pose.orientation
+    return t
 
 
 def get_approach_pose(pose, approach_dist):
