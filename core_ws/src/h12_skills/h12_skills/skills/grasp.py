@@ -112,7 +112,7 @@ class GraspSkill:
                 self.get_clock().now().to_msg()))
             self.get_logger().info(
                 f'grasp {i} for {obj!r}: score {resp.scores[i]:.2f}, width {width_mm:.1f}mm, \n approach {approach_pose}')
-            if self.move_frame_to(GRASP_FRAMES[arm], approach_pose, duration_sec=100, outer_gh=gh):
+            if self.move_frame_to(GRASP_FRAMES[arm], approach_pose, duration_sec=10, outer_gh=gh):
                 idx = i
                 break
             if gh.is_cancel_requested or run.remaining() <= 0.0:
@@ -126,7 +126,7 @@ class GraspSkill:
         # --- grasp: move to contact + close ------------------------------------
         if not run.phase('grasp', 0.75):
             return run.result
-        if not self.move_frame_to(GRASP_FRAMES[arm], grasp_pose, duration_sec=100, outer_gh=gh):
+        if not self.move_frame_to(GRASP_FRAMES[arm], grasp_pose, duration_sec=10, outer_gh=gh):
             return run.abort('contact motion failed')
         if not self.close_gripper(arm):
             return run.abort('gripper close failed')

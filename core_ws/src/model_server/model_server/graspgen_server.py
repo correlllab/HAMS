@@ -117,7 +117,7 @@ _Gripper = namedtuple('_Gripper', 'sampler width info surf_pts')
 # Candidate planner kwargs (filtered to run_planner_on_object's real signature).
 PLANNER_KWARGS = dict(
     planner='graspmoe', grasp_threshold=-1.0, num_grasps=1024,
-    topk_num_grasps=128, moe_num_yaws=36, moe_z_offsets_cm=(-2.0, 0.0),
+    topk_num_grasps=1024, moe_num_yaws=36, moe_z_offsets_cm=(-2.0, 0.0),
     moe_outlier_threshold=0.014, moe_outlier_k=20, moe_obb_mode='advanced',
     moe_skip_obb_rule='auto', moe_obb_density='dense-topandside',
     moe_obb_position_spacing_cm=1.0,
