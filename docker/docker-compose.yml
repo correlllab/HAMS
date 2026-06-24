@@ -102,11 +102,10 @@ services:
       # container via the core_ws bind mount below. The image's
       # GRASPGENX_CHECKPOINT_DIR defaults to an empty /opt staging dir, so point
       # it at the real weights here (runtime override, no rebuild needed).
-      - GRASPGENX_CHECKPOINT_DIR=/home/code/core_ws/src/h12_skills/weights
-      # Default GraspGenX planning gripper. The magpie description is bind-mounted
-      # into the GraspGenX assets below; switch to a shipped gripper (e.g.
-      # parallel_2f_v1_1002) here or pass gripper_name per request to override.
-      - GRASPGENX_GRIPPER=magpie
+      - GRASPGENX_CHECKPOINT_DIR=/home/code/core_ws/src/model_server/weights/graspgen
+      # GraspGenX gripper assets root — the dir the magpie description is staged
+      # into via the bind mounts below. graspgen_server requires this explicitly.
+      - GRASPGENX_ASSETS_DIR=/opt/graspgenx/assets
     volumes:
       - /tmp/.X11-unix:/tmp/.X11-unix:rw
       - ${XAUTHORITY:-$HOME/.Xauthority}:/root/.Xauthority:ro

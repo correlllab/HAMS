@@ -66,7 +66,7 @@ ARM_FRAMES = {'left': 'left_grip_site', 'right': 'right_grip_site'}
 # planning convention: +Z approach, +X finger-close, origin at the magpie gripper
 # base). A raw GraspGenX grasp pose is sent straight to frame_task targeting these
 # — no axis-permutation / TCP-depth correction needed. See skills/grasp.py.
-GRASP_FRAMES = {'left': 'left_graspgen_site', 'right': 'right_graspgen_site'}
+GRASP_FRAMES = {'left': 'left_graspgenx_frame', 'right': 'right_graspgenx_frame'}
 # Per-arm gripper service namespace; the magpie driver/sim expose
 # <ns>/set_position, <ns>/set_force, <ns>/open and <ns>/close under each.
 GRIPPER_NS = {'left': '/left/gripper', 'right': '/right/gripper'}
@@ -300,11 +300,15 @@ class SkillsBase(Node):
             event.wait(timeout=min(0.1, remaining))
         return future.result()
 
-    def _call_service(self, client, request, name, timeout_sec=30.0):
+    def _call_service(self, client, request, name, timeout_sec=30.0, outer_gh=None):
+        """Call `client` and block (executor-safe) for the result. Pass the
+        skill's goal handle as `outer_gh` so a cancel of that goal aborts the
+        wait promptly instead of blocking on the in-flight call."""
         if not client.service_is_ready():
             self.get_logger().error(f'{name} service not available')
             return None
-        result = self._wait_future(client.call_async(request), timeout_sec)
+        result = self._wait_future(
+            client.call_async(request), timeout_sec, outer_gh)
         if result is None:
             self.get_logger().error(f'{name} call failed or timed out')
         return result
@@ -331,11 +335,14 @@ class SkillsBase(Node):
         return response
 
     # ------------------------------------------------- perception (gemini/sam)
-    def query_gemini(self, prompt, image=None, timeout_sec=GEMINI_TIMEOUT_SEC):
+    def query_gemini(self, prompt, image=None, timeout_sec=GEMINI_TIMEOUT_SEC,
+                     outer_gh=None):
         """Ask the gemini_query service `prompt` about `image` (defaults to the
         latest head-camera frame). Returns Gemini's text response, or None.
         `timeout_sec` defaults high (GEMINI_TIMEOUT_SEC) because the grasp model
-        is slow; pass a smaller value for latency-sensitive callers."""
+        is slow; pass a smaller value (e.g. the skill's remaining budget) for
+        latency-sensitive callers. Pass the skill goal handle as `outer_gh` so a
+        cancel aborts the (possibly minutes-long) call promptly."""
         img = image if image is not None else self.latest_image()
         if img is None:
             self.get_logger().error('query_gemini: no head-camera image yet')
@@ -344,15 +351,17 @@ class SkillsBase(Node):
         req.image = img
         req.prompt = prompt
         resp = self._call_service(self.gemini_cli, req, 'GeminiQuery',
-                                  timeout_sec=timeout_sec)
+                                  timeout_sec=timeout_sec, outer_gh=outer_gh)
         if resp is None or not resp.success:
             return None
         return resp.response
 
-    def segment(self, text='', positive_boxes=None, negative_boxes=None, image=None):
+    def segment(self, text='', positive_boxes=None, negative_boxes=None,
+                image=None, outer_gh=None):
         """Run the sam_segment service on `image` (defaults to the latest
         head-camera frame) with a text prompt and/or flattened pixel-xyxy box
-        exemplars. Returns the mono8 mask (sensor_msgs/Image), or None."""
+        exemplars. Returns the mono8 mask (sensor_msgs/Image), or None. Pass the
+        skill goal handle as `outer_gh` so a cancel aborts the wait promptly."""
         img = image if image is not None else self.latest_image()
         if img is None:
             self.get_logger().error('segment: no head-camera image yet')
@@ -362,50 +371,73 @@ class SkillsBase(Node):
         req.text = text or ''
         req.positive_boxes = [float(v) for v in (positive_boxes or [])]
         req.negative_boxes = [float(v) for v in (negative_boxes or [])]
-        resp = self._call_service(self.sam_cli, req, 'SamSegment')
+        resp = self._call_service(self.sam_cli, req, 'SamSegment',
+                                  outer_gh=outer_gh)
         if resp is None or not resp.success:
             return None
         return resp.mask
 
-    def mask_to_cloud(self, mask_msg, target_frame='pelvis'):
-        """Back-project a mono8 mask + the latest aligned depth/intrinsics into an
-        (N, 3) object point cloud in `target_frame`, or None. Depth and mask must
-        share the color pixel grid (the realsense publishes aligned depth)."""
+    def _depth_to_cloud(self, mask, target_frame):
+        """Back-project `mask` (bool HxW over the color grid, or None for every
+        valid pixel) with the latest aligned depth/intrinsics into (N, 3) points
+        in `target_frame`, or None. Shared by mask_to_cloud (object) and
+        scene_to_cloud (whole frame)."""
         depth_msg, info = self._latest_depth, self._latest_caminfo
-        if mask_msg is None or depth_msg is None or info is None:
-            self.get_logger().error('mask_to_cloud: missing mask, depth, or caminfo')
+        if depth_msg is None or info is None:
+            self.get_logger().error('_depth_to_cloud: missing depth or caminfo')
             return None
-        mask = (np.frombuffer(bytes(mask_msg.data), dtype=np.uint8)
-                .reshape(mask_msg.height, mask_msg.width) > 127)
         try:
             depth = decode_compressed_depth_image(depth_msg).astype(np.float32) / 1000.0
         except (ValueError, TypeError) as e:
-            self.get_logger().error(f'mask_to_cloud: depth decode failed: {e}')
+            self.get_logger().error(f'_depth_to_cloud: depth decode failed: {e}')
             return None
-        if depth.shape != mask.shape:
+        if mask is None:
+            mask = np.ones(depth.shape, dtype=bool)
+        elif depth.shape != mask.shape:
             self.get_logger().error(
-                f'mask_to_cloud: mask {mask.shape} != depth {depth.shape}')
+                f'_depth_to_cloud: mask {mask.shape} != depth {depth.shape}')
             return None
         fx, fy, cx, cy = info.k[0], info.k[4], info.k[2], info.k[5]
         pts_cam = deproject_mask(mask, depth, fx, fy, cx, cy, DEPTH_MIN_M, DEPTH_MAX_M)
-        if len(pts_cam) < MIN_GRASP_POINTS:
-            self.get_logger().warn(f'mask_to_cloud: only {len(pts_cam)} valid points')
-            return None
         cam_frame = depth_msg.header.frame_id or info.header.frame_id
         try:
             tf = self.tf_buffer.lookup_transform(
                 target_frame, cam_frame, Time(), timeout=RclpyDuration(seconds=1.0))
         except TransformException as e:
             self.get_logger().error(
-                f'mask_to_cloud: TF {cam_frame!r} -> {target_frame!r} failed: {e}')
+                f'_depth_to_cloud: TF {cam_frame!r} -> {target_frame!r} failed: {e}')
             return None
-        pts = transform_points(pts_cam, transform_to_matrix(tf.transform))
-        return pts.astype(np.float32)
+        return transform_points(pts_cam, transform_to_matrix(tf.transform)).astype(np.float32)
 
-    def plan_grasp(self, cloud, frame='pelvis', gripper_name=''):
-        """Send an (N, 3) object cloud to the graspgen service. Returns the
-        GraspGen response (ranked `grasps` PoseStamped[], `scores`,
-        `gripper_width`) in `frame`, or None."""
+    def mask_to_cloud(self, mask_msg, target_frame='pelvis'):
+        """Back-project a mono8 mask + the latest aligned depth/intrinsics into an
+        (N, 3) object point cloud in `target_frame`, or None. Depth and mask must
+        share the color pixel grid (the realsense publishes aligned depth)."""
+        if mask_msg is None:
+            self.get_logger().error('mask_to_cloud: missing mask')
+            return None
+        mask = (np.frombuffer(bytes(mask_msg.data), dtype=np.uint8)
+                .reshape(mask_msg.height, mask_msg.width) > 127)
+        pts = self._depth_to_cloud(mask, target_frame)
+        if pts is None:
+            return None
+        if len(pts) < MIN_GRASP_POINTS:
+            self.get_logger().warn(f'mask_to_cloud: only {len(pts)} valid points')
+            return None
+        return pts
+
+    def scene_to_cloud(self, target_frame='pelvis'):
+        """Back-project the whole latest depth frame (every valid pixel, no mask)
+        into an (N, 3) scene cloud in `target_frame` — obstacle context for grasp
+        collision filtering. Returns None if depth/caminfo/TF are unavailable."""
+        return self._depth_to_cloud(None, target_frame)
+
+    def plan_grasp(self, cloud, frame='pelvis', gripper_name='', scene_cloud=None):
+        """Send an (N, 3) object cloud to the graspgen service. Pass an optional
+        (M, 3) `scene_cloud` (same frame) to have the server collision-filter
+        grasps against surrounding obstacles. Returns the GraspGen response
+        (ranked `grasps` PoseStamped[], `scores`, `gripper_width`) in `frame`, or
+        None."""
         if cloud is None or len(cloud) < MIN_GRASP_POINTS:
             self.get_logger().error('plan_grasp: empty/too-small cloud')
             return None
@@ -416,6 +448,9 @@ class SkillsBase(Node):
             header, np.asarray(cloud, dtype=np.float32))
         req = GraspGen.Request()
         req.object_cloud = cloud_msg
+        if scene_cloud is not None and len(scene_cloud):
+            req.scene_cloud = point_cloud2.create_cloud_xyz32(
+                header, np.asarray(scene_cloud, dtype=np.float32))
         req.gripper_name = gripper_name
         resp = self._call_service(self.graspgen_cli, req, 'GraspGen', timeout_sec=60.0)
         if resp is None or not resp.success or not resp.grasps:
@@ -440,7 +475,11 @@ class SkillsBase(Node):
         pose.orientation = Quaternion(
             x=float(quat[0]), y=float(quat[1]), z=float(quat[2]), w=float(quat[3]))
         goal.frame_targets = [pose]
-        goal.duration = Duration(sec=int(duration_sec), nanosec=0)
+        # Preserve fractional seconds (int() truncation silently shortened the
+        # motion budget, e.g. 1.8s -> 1s).
+        whole = int(duration_sec)
+        goal.duration = Duration(
+            sec=whole, nanosec=int(round((float(duration_sec) - whole) * 1e9)))
 
         self.get_logger().info(
             f'frame_task: {frame_name} -> ({x:.3f}, {y:.3f}, {z:.3f}) '

@@ -10,15 +10,16 @@ Panels:
         - /HeadDepthImage1/Topic1
         - /HeadColorImage1/Topic1
         - /LeftDepthImage1/Topic1
-        - /LeftColorImage1
         - /LeftColorImage1/Topic1
         - /RightDepthImage1/Topic1
-        - /RightColorImage1
         - /RightColorImage1/Topic1
+        - /PoseArray1
+        - /PoseArray1/Status1
         - /PoseArray1/Topic1
-        - /GraspGenMarkers1
+        - /GraspGenMarkers1/Status1
         - /GraspGenMarkers1/Topic1
         - /GraspClolud1
+        - /Scene cloud1
       Splitter Ratio: 0.5
     Tree Height: 1085
   - Class: rviz_common/Selection
@@ -38,7 +39,7 @@ Panels:
     Experimental: false
     Name: Time
     SyncMode: 0
-    SyncSource: LaserMap
+    SyncSource: Scene cloud
 Visualization Manager:
   Class: ""
   Displays:
@@ -61,19 +62,210 @@ Visualization Manager:
       Reference Frame: <Fixed Frame>
       Value: true
     - Class: rviz_default_plugins/TF
-      Enabled: false
+      Enabled: true
       Frame Timeout: 15
       Frames:
         All Enabled: false
+        body:
+          Value: false
+        camera_color_optical_frame:
+          Value: false
+        camera_init:
+          Value: false
+        camera_link:
+          Value: true
+        graspgenx_target_frame:
+          Value: true
+        imu_link:
+          Value: false
+        left_ankle_pitch_link:
+          Value: false
+        left_ankle_roll_link:
+          Value: false
+        left_elbow_link:
+          Value: false
+        left_grasp_frame:
+          Value: false
+        left_graspgenx_frame:
+          Value: true
+        left_hip_pitch_link:
+          Value: false
+        left_hip_roll_link:
+          Value: false
+        left_hip_yaw_link:
+          Value: false
+        left_knee_link:
+          Value: false
+        left_shoulder_pitch_link:
+          Value: false
+        left_shoulder_roll_link:
+          Value: false
+        left_shoulder_yaw_link:
+          Value: false
+        left_wrist_pitch_link:
+          Value: false
+        left_wrist_roll_link:
+          Value: false
+        left_wrist_yaw_link:
+          Value: false
+        lg_base_bot:
+          Value: false
+        lg_base_top:
+          Value: false
+        lg_left_crank:
+          Value: false
+        lg_left_finger:
+          Value: false
+        lg_left_rocker:
+          Value: false
+        lg_mount:
+          Value: false
+        lg_right_crank:
+          Value: false
+        lg_right_finger:
+          Value: false
+        lg_right_rocker:
+          Value: false
+        livox_link:
+          Value: true
+        logo_link:
+          Value: false
+        map:
+          Value: true
+        pelvis:
+          Value: true
+        rg_base_bot:
+          Value: false
+        rg_base_top:
+          Value: false
+        rg_left_crank:
+          Value: false
+        rg_left_finger:
+          Value: false
+        rg_left_rocker:
+          Value: false
+        rg_mount:
+          Value: false
+        rg_right_crank:
+          Value: false
+        rg_right_finger:
+          Value: false
+        rg_right_rocker:
+          Value: false
+        right_ankle_pitch_link:
+          Value: false
+        right_ankle_roll_link:
+          Value: false
+        right_elbow_link:
+          Value: false
+        right_grasp_frame:
+          Value: false
+        right_graspgenx_frame:
+          Value: true
+        right_hip_pitch_link:
+          Value: false
+        right_hip_roll_link:
+          Value: false
+        right_hip_yaw_link:
+          Value: false
+        right_knee_link:
+          Value: false
+        right_shoulder_pitch_link:
+          Value: false
+        right_shoulder_roll_link:
+          Value: false
+        right_shoulder_yaw_link:
+          Value: false
+        right_wrist_pitch_link:
+          Value: false
+        right_wrist_roll_link:
+          Value: false
+        right_wrist_yaw_link:
+          Value: false
+        torso_link:
+          Value: false
       Marker Scale: 1
       Name: TF
       Show Arrows: true
       Show Axes: true
-      Show Names: false
+      Show Names: true
       Tree:
-        {}
+        map:
+          camera_init:
+            body:
+              pelvis:
+                graspgenx_target_frame:
+                  {}
+                left_hip_yaw_link:
+                  left_hip_pitch_link:
+                    left_hip_roll_link:
+                      left_knee_link:
+                        left_ankle_pitch_link:
+                          left_ankle_roll_link:
+                            {}
+                right_hip_yaw_link:
+                  right_hip_pitch_link:
+                    right_hip_roll_link:
+                      right_knee_link:
+                        right_ankle_pitch_link:
+                          right_ankle_roll_link:
+                            {}
+                torso_link:
+                  camera_link:
+                    camera_color_optical_frame:
+                      {}
+                  imu_link:
+                    {}
+                  left_shoulder_pitch_link:
+                    left_shoulder_roll_link:
+                      left_shoulder_yaw_link:
+                        left_elbow_link:
+                          left_wrist_roll_link:
+                            left_wrist_pitch_link:
+                              left_wrist_yaw_link:
+                                left_grasp_frame:
+                                  {}
+                                left_graspgenx_frame:
+                                  {}
+                                lg_mount:
+                                  lg_base_bot:
+                                    lg_base_top:
+                                      lg_left_crank:
+                                        lg_left_finger:
+                                          lg_left_rocker:
+                                            {}
+                                      lg_right_crank:
+                                        lg_right_finger:
+                                          lg_right_rocker:
+                                            {}
+                  livox_link:
+                    {}
+                  logo_link:
+                    {}
+                  right_shoulder_pitch_link:
+                    right_shoulder_roll_link:
+                      right_shoulder_yaw_link:
+                        right_elbow_link:
+                          right_wrist_roll_link:
+                            right_wrist_pitch_link:
+                              right_wrist_yaw_link:
+                                rg_mount:
+                                  rg_base_bot:
+                                    rg_base_top:
+                                      rg_left_crank:
+                                        rg_left_finger:
+                                          rg_left_rocker:
+                                            {}
+                                      rg_right_crank:
+                                        rg_right_finger:
+                                          rg_right_rocker:
+                                            {}
+                                right_grasp_frame:
+                                  {}
+                                right_graspgenx_frame:
+                                  {}
       Update Interval: 0
-      Value: false
+      Value: true
     - Alpha: 1
       Autocompute Intensity Bounds: true
       Autocompute Value Bounds:
@@ -692,8 +884,8 @@ Visualization Manager:
       Axis: Z
       Channel Name: intensity
       Class: rviz_default_plugins/PointCloud2
-      Color: 255; 255; 255
-      Color Transformer: Intensity
+      Color: 85; 85; 255
+      Color Transformer: FlatColor
       Decay Time: 0
       Enabled: true
       Invert Rainbow: false
@@ -714,6 +906,40 @@ Visualization Manager:
         History Policy: Keep Last
         Reliability Policy: Reliable
         Value: /grasp_cloud
+      Use Fixed Frame: true
+      Use rainbow: true
+      Value: true
+    - Alpha: 0.25
+      Autocompute Intensity Bounds: true
+      Autocompute Value Bounds:
+        Max Value: 10
+        Min Value: -10
+        Value: true
+      Axis: Z
+      Channel Name: intensity
+      Class: rviz_default_plugins/PointCloud2
+      Color: 255; 0; 0
+      Color Transformer: FlatColor
+      Decay Time: 0
+      Enabled: true
+      Invert Rainbow: false
+      Max Color: 255; 255; 255
+      Max Intensity: 4096
+      Min Color: 0; 0; 0
+      Min Intensity: 0
+      Name: Scene cloud
+      Position Transformer: XYZ
+      Selectable: true
+      Size (Pixels): 3
+      Size (m): 0.0010000000474974513
+      Style: Flat Squares
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        Filter size: 10
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /scene_cloud
       Use Fixed Frame: true
       Use rainbow: true
       Value: true
@@ -763,25 +989,25 @@ Visualization Manager:
   Views:
     Current:
       Class: rviz_default_plugins/Orbit
-      Distance: 3.991208553314209
+      Distance: 0.0030348466243594885
       Enable Stereo Rendering:
         Stereo Eye Separation: 0.05999999865889549
         Stereo Focal Distance: 1
         Swap Stereo Eyes: false
         Value: false
       Focal Point:
-        X: 0.7084649801254272
-        Y: 0.2550608515739441
-        Z: 0.026419728994369507
+        X: 0.025274991989135742
+        Y: 1.2700588703155518
+        Z: 1.2890868186950684
       Focal Shape Fixed Size: false
       Focal Shape Size: 0.05000000074505806
       Invert Z Axis: false
       Name: Current View
       Near Clip Distance: 0.009999999776482582
-      Pitch: 0.5647963881492615
+      Pitch: 0.6987269520759583
       Target Frame: <Fixed Frame>
       Value: Orbit (rviz)
-      Yaw: 4.9835710525512695
+      Yaw: 1.8402451276779175
     Saved: ~
 Window Geometry:
   Displays:
@@ -811,5 +1037,5 @@ Window Geometry:
   Views:
     collapsed: false
   Width: 1685
-  X: 1755
-  Y: 1168
+  X: 3676
+  Y: 1512

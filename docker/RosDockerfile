@@ -266,8 +266,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # graspgenx.grasp_server.GraspGenXSampler imports. Only huggingface-hub moves;
 # everything else stays pinned.
 #
-# Still NOT installed (not needed for grasp inference): pyrender/PyOpenGL, viser,
-# scene-synthesizer (rendering/viz), urdfpy (yourdfpy is used instead). Running an
+# Still NOT installed (not needed for grasp inference): pyrender/PyOpenGL,
+# scene-synthesizer (rendering/viz), urdfpy (yourdfpy is used instead). viser IS
+# installed below for graspgen_server's live grasp visualizer. Running an
 # actual grasp additionally needs the checkpoints + gripper_descriptions assets
 # (staged dirs below; see .claude/plans). Appended last so iterating here can't
 # bust the heavy layers above.
@@ -328,6 +329,24 @@ RUN grep -viE '^huggingface[-_]hub==' /opt/graspgenx-constraints.txt \
     && PIP_CONSTRAINT=/opt/graspgenx-constraints-nohf.txt pip install --no-cache-dir \
         "huggingface-hub==0.25.2" \
         "diffusers==0.11.1"
+
+# viser — web 3D visualizer for graspgen_server's live grasp view
+# (http://localhost:8080: scene + object clouds + ranked grasps). Viz-only.
+# PINNED to 0.2.23: it's the newest viser compatible with the frozen rich==15.0.0
+# (every viser >=0.3 caps rich<15.0.0) and it exposes the modern server.scene API
+# (add_point_cloud / add_line_segments / add_mesh_simple) that graspgenx's
+# viser_utils requires. Leaving it unpinned is a TRAP — pip 22.0.2 backtracks past
+# all the rich-incompatible releases and silently lands on the ancient 0.0.11,
+# which has no .scene API and breaks the visualizer at runtime.
+# 0.2.23's one conflict with the freeze is psutil (it needs >=5.9.5; the freeze
+# pins 5.9.0), so — like the hf-hub block above — install under the freeze MINUS
+# psutil and bump psutil by a minimal patch. Everything else (torch/torchvision/
+# numpy/Pillow/setuptools/trimesh) stays pinned; viser's remaining deps (msgspec,
+# tyro, plyfile, ...) are purely additive.
+RUN grep -viE '^psutil==' /opt/graspgenx-constraints.txt \
+        > /opt/graspgenx-constraints-viser.txt \
+    && PIP_CONSTRAINT=/opt/graspgenx-constraints-viser.txt pip install --no-cache-dir \
+        "viser==0.2.23" "psutil==5.9.8"
 
 # Asset staging is deferred to integration (install-only scope). We just create
 # the empty target dirs that GRASPGENX_*_DIR point at; populate them later.
