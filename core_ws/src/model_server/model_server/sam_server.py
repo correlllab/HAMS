@@ -140,6 +140,7 @@ LOCK_ACQUIRE_TIMEOUT_SEC = 20.0
 class SamServer(Node):
     def __init__(self):
         super().__init__("sam_server")
+        self.get_logger().info("\n\n\nsam_server beginning SAM3 initialization ...\n\n\n")
         self.bridge = CvBridge()
         log, viz, clear = declare_logging_params(self)
         self.logger = ModelLogger(self, 'sam', 'model_server', __file__,

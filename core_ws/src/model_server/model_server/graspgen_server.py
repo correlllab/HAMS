@@ -24,11 +24,11 @@ from rclpy.qos import QoSProfile, DurabilityPolicy
 from rclpy.callback_groups import ReentrantCallbackGroup
 from rclpy.executors import MultiThreadedExecutor
 
-from geometry_msgs.msg import Point, PoseStamped, TransformStamped
+from builtin_interfaces.msg import Time
+from geometry_msgs.msg import Point, PoseStamped
 from sensor_msgs.msg import PointCloud2
 from sensor_msgs_py import point_cloud2
 from visualization_msgs.msg import Marker, MarkerArray
-from tf2_ros import TransformBroadcaster
 
 import trimesh
 from graspgenx.samplers import run_planner_on_object
@@ -62,14 +62,10 @@ MIN_OBJECT_POINTS = 100
 # arrow from the GraspGenX pose ORIGIN (the gripper base, where the IK pins
 # *_graspgenx_frame) along +Z (approach) to the CONTACT point where the fingers
 # close — so the arrow TIP sits on the object, i.e. "where the gripper point is".
-# GRASPGEN_MARKER_LENGTH_M is that base->contact arrow length; magpie = 0.193 m
-# (its config fingertip = [0,0,0.193]).
+# GRASPGEN_MARKER_LENGTH_M is that base->contact arrow length; magpie = 0.1146 m
+# (its config fingertip = [~0, 0.0022, 0.1146]).
 N_GRASP_MARKERS = 5
-GRASPGEN_MARKER_LENGTH_M = 0.193
-# TF frame broadcast for the best (top-ranked) grasp pose, parented to the request
-# cloud's frame (e.g. pelvis). Lets RViz / other nodes see and look up the planned
-# grasp target. This is the pose the IK's *_graspgenx_frame is driven to.
-TARGET_FRAME_ID = 'graspgenx_target_frame'
+GRASPGEN_MARKER_LENGTH_M = 0.1146
 
 # Collision filtering against an optional scene cloud (obstacles), done only when
 # the request carries a non-empty scene_cloud. A grasp is dropped when the gripper
@@ -84,7 +80,7 @@ TARGET_FRAME_ID = 'graspgenx_target_frame'
 # when the gripper sweep volume comes within this distance of an obstacle, so a big
 # value (e.g. 5 cm) rejects grasps that merely pass NEAR the scene and can filter
 # everything; keep it small (near-contact only). Tune up only if grasps clip obstacles.
-COLLISION_THRESHOLD_M = 0.01
+COLLISION_THRESHOLD_M = 0.005
 # Scene points within this radius of the object cloud are treated as the object
 # (not obstacles) and dropped before the collision check. MUST be >=
 # COLLISION_THRESHOLD_M: a grasp brings the gripper within COLLISION_THRESHOLD_M
@@ -101,6 +97,13 @@ NUM_COLLISION_SAMPLES = 2000
 # more (parallel-jaw / magpie fingers reach ~0.11-0.19 m from the base).
 DUMMY_MESH_MIN_EXTENT_M = 0.05
 
+# Approach-direction filter: drop grasps whose +Z approach axis points back toward
+# the robot. Grasps are expressed in the cloud frame (pelvis), where +X is robot-
+# forward, so cos(approach, frame +x) == the x-component of the grasp's +Z column.
+# Keep a grasp iff that cosine exceeds this threshold. 0.0 = "any forward component";
+# larger = STRICTER (requires a more head-on approach).
+APPROACH_MIN_FORWARD_COS = 0.0
+
 # viser visualizer: a web GUI (http://localhost:VISER_PORT) that renders the scene
 # cloud, object cloud, and ranked grasps live alongside the RViz markers. The ros
 # service runs with network_mode: host, so the port is reachable on the host.
@@ -113,8 +116,8 @@ _Gripper = namedtuple('_Gripper', 'sampler width info surf_pts')
 
 # Candidate planner kwargs (filtered to run_planner_on_object's real signature).
 PLANNER_KWARGS = dict(
-    planner='graspmoe', grasp_threshold=-1.0, num_grasps=200,
-    topk_num_grasps=100, moe_num_yaws=36, moe_z_offsets_cm=(-2.0, 0.0),
+    planner='graspmoe', grasp_threshold=-1.0, num_grasps=1024,
+    topk_num_grasps=128, moe_num_yaws=36, moe_z_offsets_cm=(-2.0, 0.0),
     moe_outlier_threshold=0.014, moe_outlier_k=20, moe_obb_mode='advanced',
     moe_skip_obb_rule='auto', moe_obb_density='dense-topandside',
     moe_obb_position_spacing_cm=1.0,
@@ -210,14 +213,6 @@ class GraspGenServer(Node):
         self._scene_pub = self.create_publisher(
             PointCloud2, 'scene_cloud',
             QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL))
-        # Broadcast the best grasp as a TF frame (TARGET_FRAME_ID). Dynamic (on /tf,
-        # NOT /tf_static): the parent is the cloud frame (pelvis), the robot's moving
-        # floating base, so the target must carry a live timestamp. A re-publish timer
-        # keeps the latest grasp's frame fresh + visible in RViz until the next plan
-        # replaces it.
-        self._tf_broadcaster = TransformBroadcaster(self)
-        self._target_tf = None      # latest TransformStamped (set per plan)
-        self._target_tf_timer = self.create_timer(0.1, self._republish_target_frame)
 
         # Live viser visualizer (web GUI). Started once; each plan resets and
         # redraws its scene. Optional — degrade to RViz markers if viser is absent.
@@ -351,10 +346,11 @@ class GraspGenServer(Node):
             return response
         width = gr.width
 
-        mean = pts.mean(axis=0)
-        pc_centered = (pts - mean).astype(np.float32)
+        # GraspGenX centers the cloud internally and restores the input frame
+        # before returning, so feed it the raw cloud: grasps come back already in
+        # `frame` (pelvis) — no server-side centering / un-centering needed.
         try:
-            out = self._run_planner(pc_centered, gr.sampler, **self._kwargs)
+            out = self._run_planner(pts, gr.sampler, **self._kwargs)
         except Exception as e:
             response.success, response.message = False, f'planner failed: {e}'
             self.get_logger().error(response.message)
@@ -382,12 +378,33 @@ class GraspGenServer(Node):
         order = np.argsort(-confs)
         grasps, confs = grasps[order], confs[order]
 
+        # Drop grasps whose +Z approach points back toward the robot (negative forward
+        # cosine). Grasps are in `frame` (pelvis), so the cosine vs frame +x is just the
+        # x-component of each grasp's approach column (col 2). Done before collision
+        # filtering — cheaper to discard wrong-direction grasps before the GPU cdist.
+        forward_cos = grasps[:, 0, 2]
+        keep = forward_cos > APPROACH_MIN_FORWARD_COS
+        n_before = len(grasps)
+        rec.set(n_approach_kept=int(keep.sum()),
+                n_approach_rejected=int(n_before - keep.sum()))
+        self.get_logger().info(
+            f'approach filter: {int(keep.sum())}/{n_before} kept '
+            f'(cos>+{APPROACH_MIN_FORWARD_COS} vs frame +x)')
+        if not keep.any():
+            # Mirror the collision-filter empty path so the failure is inspectable:
+            # render the rejected grasps (no obstacles) before returning.
+            self._render_viser(pts, np.empty((0, 3)), grasps, confs, gr.info, obb_dict)
+            self._save_grasp_viz(rec, pts, grasps, width)
+            response.success, response.message = False, \
+                'all grasps approach toward the robot (+x cos <= 0)'
+            rec.finish(success=False, message=response.message)
+            return response
+        grasps, confs = grasps[keep], confs[keep]
+
         # Collision filtering against the scene cloud, in `frame`. The planner
-        # returns grasps in the server-centered frame, so un-center to `frame`
-        # (matching scene_pts) before the check.
+        # already returns grasps in `frame`, so they line up with scene_pts directly.
         if scene_pts is not None and len(scene_pts) and gr.surf_pts is not None:
-            grasps_world = grasps.copy().astype(np.float64)
-            grasps_world[:, :3, 3] += mean
+            grasps_world = grasps.astype(np.float64)
             scene_obstacles = self._scene_minus_object(scene_pts, pts)
             rec.save_array('scene_obstacles', scene_obstacles)   # scene minus object (collision input)
             rec.save_array('grasps_world', grasps_world)         # poses fed to the filter (debug)
@@ -408,9 +425,9 @@ class GraspGenServer(Node):
                 # skip it, leaving the all-collision failure un-inspectable. Render
                 # the REJECTED grasps against the obstacle cloud the filter actually
                 # used so viser (:8080) / the PNG show WHY everything collided.
-                self._render_viser(pts, scene_obstacles, grasps, confs, mean,
+                self._render_viser(pts, scene_obstacles, grasps, confs,
                                    gr.info, obb_dict)
-                self._save_grasp_viz(rec, pts, grasps, mean, width)
+                self._save_grasp_viz(rec, pts, grasps, width)
                 response.success, response.message = False, \
                     'all grasps in collision with scene'
                 rec.finish(success=False, message=response.message)
@@ -418,8 +435,7 @@ class GraspGenServer(Node):
             grasps, confs = kept, kept_confs
 
         for g, c in zip(grasps, confs):
-            g = np.asarray(g, dtype=np.float64).reshape(4, 4).copy()
-            g[:3, 3] += mean                         # un-center back to the input frame
+            g = np.asarray(g, dtype=np.float64).reshape(4, 4)
             qx, qy, qz, qw = mat_to_quat(g[:3, :3])
             ps = PoseStamped()
             ps.header.frame_id = frame
@@ -434,8 +450,6 @@ class GraspGenServer(Node):
         response.gripper_width = float(width)
         response.success = True
         response.message = f'{len(response.grasps)} grasps'
-        # Publish the best grasp (grasps[0], best-first) as the target TF frame.
-        self._set_target_frame(frame, response.grasps[0].pose)
         # Grasp metrics: count, confidence spread (confs are sorted best-first),
         # gripper opening, and the input sizes the plan was made from.
         best = float(confs[0]) if len(confs) else 0.0
@@ -448,43 +462,14 @@ class GraspGenServer(Node):
             f"score best={best:.3f} worst={worst:.3f}, width={width * 1000:.0f}mm, "
             f"object_pts={pts.shape[0]}, "
             f"scene_pts={0 if scene_pts is None else len(scene_pts)})")
-        rec.save_array('grasps', grasps)            # raw (M, 4, 4) in centered frame
+        rec.save_array('grasps', grasps)            # raw (M, 4, 4) in the cloud frame
         rec.save_array('scores', confs)
-        self._publish_grasp_markers(frame, grasps, mean)
-        self._save_grasp_viz(rec, pts, grasps, mean, width)
-        self._render_viser(pts, scene_pts, grasps, confs, mean, gr.info, obb_dict)
+        self._publish_grasp_markers(frame, grasps)
+        self._save_grasp_viz(rec, pts, grasps, width)
+        self._render_viser(pts, scene_pts, grasps, confs, gr.info, obb_dict)
         rec.finish(success=True, message=response.message)
         return response
 
-    def _set_target_frame(self, parent_frame, pose):
-        """Stash the best grasp `pose` (in `parent_frame`) as the TARGET_FRAME_ID
-        transform; _republish_target_frame broadcasts it on /tf with a live stamp
-        until the next plan replaces it. No-op if the cloud frame_id is missing."""
-        if not parent_frame:
-            self.get_logger().warn(
-                'object_cloud has no frame_id; skipping target-frame broadcast')
-            return
-        t = TransformStamped()
-        t.header.frame_id = parent_frame
-        t.child_frame_id = TARGET_FRAME_ID
-        t.transform.translation.x = pose.position.x
-        t.transform.translation.y = pose.position.y
-        t.transform.translation.z = pose.position.z
-        t.transform.rotation = pose.orientation
-        self._target_tf = t
-
-    def _republish_target_frame(self):
-        """Re-broadcast the latest grasp target with a fresh stamp so it stays live
-        in TF / visible in RViz (a dynamic transform goes stale if not refreshed).
-        Best-effort, like the other viz helpers — never let it break the node."""
-        t = self._target_tf
-        if t is None:
-            return
-        try:
-            t.header.stamp = self.get_clock().now().to_msg()
-            self._tf_broadcaster.sendTransform(t)
-        except Exception as e:
-            self.get_logger().warn(f'target-frame broadcast failed: {e}')
 
     def _scene_minus_object(self, scene_pts, object_pts):
         """Scene cloud with the target object removed (any scene point within
@@ -500,12 +485,12 @@ class GraspGenServer(Node):
             scene_pts = scene_pts[idx]
         return scene_pts.astype(np.float32)
 
-    def _render_viser(self, object_pts, scene_pts, grasps, confs, mean,
+    def _render_viser(self, object_pts, scene_pts, grasps, confs,
                       gripper_info, obb_dict=None):
         """Redraw the live viser scene: gray scene cloud, blue object cloud, the
         OBB wireframe, and the ranked grasps (best = thick blue, rest colored by
-        score). `grasps` are in the server-centered frame; un-center with `mean`
-        to match the clouds. No-op when viser isn't running."""
+        score). `grasps` are already in the cloud frame, matching the clouds.
+        No-op when viser isn't running."""
         if self._vis is None:
             return
         try:
@@ -518,8 +503,7 @@ class GraspGenServer(Node):
                                  color=[0, 150, 255], size=0.004)
             if not len(grasps):
                 return
-            G = grasps.copy().astype(np.float64)
-            G[:, :3, 3] += mean                       # centered frame -> world
+            G = np.asarray(grasps, dtype=np.float64)   # already in the cloud frame
             # OBB wireframe is best-effort and must NEVER block the grasps: this
             # viser's add_box() has no `wireframe` kwarg (which visualize_bbox
             # passes), so an un-guarded call here raises and aborts the whole
@@ -528,7 +512,7 @@ class GraspGenServer(Node):
                 try:
                     T = np.eye(4)
                     T[:3, :3] = obb_dict['R']
-                    T[:3, 3] = np.asarray(obb_dict['center']) + mean
+                    T[:3, 3] = np.asarray(obb_dict['center'])
                     visualize_bbox(vis, 'obb',
                                    2.0 * np.asarray(obb_dict['half_extent']),
                                    T=T, color=[255, 130, 0])
@@ -546,7 +530,7 @@ class GraspGenServer(Node):
         except Exception as e:                          # viz must never break planning
             self.get_logger().warn(f'viser render failed: {e}')
 
-    def _publish_grasp_markers(self, frame, grasps, mean):
+    def _publish_grasp_markers(self, frame, grasps):
         """Publish the generated grasps as RViz markers on 'graspgen_markers'
         (latched), in `frame` (pelvis). For each ranked grasp:
           - an ARROW from the GraspGenX pose ORIGIN (gripper base, where the IK
@@ -558,13 +542,16 @@ class GraspGenServer(Node):
         the base-vs-contact distinction visible so the wrist sitting near the base
         isn't mistaken for the gripper being short. Best grasp (grasps[0], the one
         the skill executes) is bright green; the rest are dim. Mirrors
-        _save_grasp_viz's un-centering so the markers match the PNG."""
+        _save_grasp_viz so the markers match the PNG."""
         try:
             G = np.asarray(
                 [np.asarray(g, dtype=np.float64).reshape(4, 4) for g in grasps])
-            centers = G[:, :3, 3] + mean          # un-center back to the input frame
+            centers = G[:, :3, 3]                  # already in the cloud frame
             topk = min(N_GRASP_MARKERS, len(G))
-            stamp = self.get_clock().now().to_msg()
+            # Zero stamp = "use the latest available transform". The markers live in
+            # the moving `pelvis` frame, so a now() stamp races ahead of the latest
+            # pelvis->map TF and RViz drops them ("extrapolation into the future").
+            stamp = Time()
 
             arr = MarkerArray()
             # Clear any markers from a previous plan so stale ones don't linger.
@@ -614,7 +601,7 @@ class GraspGenServer(Node):
         except Exception as e:                          # viz must never break planning
             self.get_logger().warn(f'grasp marker publish failed: {e}')
 
-    def _save_grasp_viz(self, rec, pts, grasps, mean, width):
+    def _save_grasp_viz(self, rec, pts, grasps, width):
         """Render an orthographic 'photo' of the object cloud + the generated
         grasps, drawn with cv2 (the ros image's matplotlib 3D backend is broken).
         Two views (front Y-Z, side X-Z) side by side; the top grasps are drawn as
@@ -624,7 +611,7 @@ class GraspGenServer(Node):
         
         try:
             G = np.asarray([np.asarray(g, dtype=np.float64).reshape(4, 4) for g in grasps])
-            centers = G[:, :3, 3] + mean          # un-center back to the input frame
+            centers = G[:, :3, 3]                  # already in the cloud frame
             # GraspGenX pose: +Z approaches the object, +X is the finger-closing
             # axis (see GraspGen.srv). Build line segments for the top grasps.
             topk = min(5, len(G))
