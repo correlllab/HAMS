@@ -1,10 +1,20 @@
 #!/usr/bin/env python3
 """Live slider GUI for the H1 sim's frame_task_server and magpie grippers.
 
-Twelve sliders (XYZ + RPY for each wrist) drive the `/frame_task` action
-targeting `left_wrist_yaw_link` and `right_wrist_yaw_link`. Two more sliders
-drive the left/right magpie `gripper/set_position` services (0 = closed,
-1 = fully open, mapped to millimetres via the `gripper_max_mm` param).
+Twelve sliders (XYZ + RPY for each arm) drive the `/frame_task` action targeting
+the GraspGenX gripper-base frames `left_graspgenx_frame` / `right_graspgenx_frame`
+— i.e. the exact frames the grasp skill commands — so you can replay a grasp pose
+by hand and watch the IK converge or contort. Two more sliders drive the
+left/right magpie `gripper/set_position` services (0 = closed, 1 = fully open,
+mapped to millimetres via the `gripper_max_mm` param).
+
+The driven frames default to the graspgenx frames but can be overridden at runtime
+(e.g. back to the wrists) without editing this file:
+    -p target_frames:="['left_wrist_yaw_link','right_wrist_yaw_link']"
+
+Note on orientation: RPY is the xyz-euler of the DRIVEN frame in `pelvis`. For the
+graspgenx frames, +Z is the approach axis (the home RPY 0,0,0 points it along
+pelvis +Z); set RPY = 1.5708 0 1.5708 to match the wrist's identity orientation.
 
 Usage:
     ros2 run h1_bringup slider_debugger.py
@@ -28,7 +38,10 @@ from custom_ros_messages.action import FrameTask
 from magpie_msgs.srv import SetGripperPosition
 
 
-WRIST_FRAMES = ('left_wrist_yaw_link', 'right_wrist_yaw_link')
+# Frames the sliders drive via /frame_task. Default to the GraspGenX gripper-base
+# frames so the slider commands exactly what the grasp skill commands; override at
+# runtime with -p target_frames:="[...]" (e.g. the wrist_yaw_link frames).
+TARGET_FRAMES = ('left_graspgenx_frame', 'right_graspgenx_frame')
 SPIN_PERIOD_MS = 100
 GOAL_DURATION_SEC = 30
 
@@ -40,14 +53,17 @@ class SliderDebugger(Node):
         self.declare_parameter('left_gripper_service', '/left/gripper/set_position')
         self.declare_parameter('right_gripper_service', '/right/gripper/set_position')
         self.declare_parameter('gripper_max_mm', 85.0)
+        self.declare_parameter('target_frames', list(TARGET_FRAMES))
         self.left_gripper_srv_name = self.get_parameter('left_gripper_service').value
         self.right_gripper_srv_name = self.get_parameter('right_gripper_service').value
         self.gripper_max_mm = float(self.get_parameter('gripper_max_mm').value)
+        self.target_frames = list(self.get_parameter('target_frames').value)
 
         self.frame_task_cli = ActionClient(self, FrameTask, '/frame_task')
         self.left_gripper_cli = self.create_client(SetGripperPosition, self.left_gripper_srv_name)
         self.right_gripper_cli = self.create_client(SetGripperPosition, self.right_gripper_srv_name)
 
+        # XYZ in pelvis + RPY (xyz-euler) of the driven frame.
         self._initial_left = (0.3, 0.2, 0.1, 0.0, 0.0, 0.0)
         self._initial_right = (0.3, -0.2, 0.1, 0.0, 0.0, 0.0)
 
@@ -62,7 +78,7 @@ class SliderDebugger(Node):
             orientation=Quaternion(x=float(qx), y=float(qy), z=float(qz), w=float(qw)),
         )
 
-    def send_wrist_targets(self, left_xyzrpy, right_xyzrpy):
+    def send_targets(self, left_xyzrpy, right_xyzrpy):
         if not self.frame_task_cli.server_is_ready():
             return
         if self._goal_handle is not None:
@@ -73,7 +89,7 @@ class SliderDebugger(Node):
             self._goal_handle = None
 
         goal = FrameTask.Goal()
-        goal.frame_names = list(WRIST_FRAMES)
+        goal.frame_names = list(self.target_frames)
         goal.frame_targets = [
             self._build_pose(*left_xyzrpy),
             self._build_pose(*right_xyzrpy),
@@ -151,8 +167,10 @@ def main():
     root = tk.Tk()
     root.title('H1 Slider Debugger')
 
-    left_frame = tk.LabelFrame(root, text='Left wrist + gripper', padx=8, pady=8)
-    right_frame = tk.LabelFrame(root, text='Right wrist + gripper', padx=8, pady=8)
+    left_frame = tk.LabelFrame(root, text=f'{node.target_frames[0]} + gripper',
+                               padx=8, pady=8)
+    right_frame = tk.LabelFrame(root, text=f'{node.target_frames[1]} + gripper',
+                                padx=8, pady=8)
     left_frame.pack(side=tk.LEFT, padx=10, pady=10, anchor='n')
     right_frame.pack(side=tk.RIGHT, padx=10, pady=10, anchor='n')
 
@@ -175,7 +193,7 @@ def main():
             return
         left_xyzrpy = _read_wrist(left_sliders)
         right_xyzrpy = _read_wrist(right_sliders)
-        node.send_wrist_targets(left_xyzrpy, right_xyzrpy)
+        node.send_targets(left_xyzrpy, right_xyzrpy)
         node.send_gripper('left', left_grip.get())
         node.send_gripper('right', right_grip.get())
 

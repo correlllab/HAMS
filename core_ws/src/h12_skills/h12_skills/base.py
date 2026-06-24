@@ -58,10 +58,6 @@ COLOR_IMAGE_TOPIC = f'{CAMERA_NS}/color/image_raw/compressed'
 DEPTH_IMAGE_TOPIC = f'{CAMERA_NS}/aligned_depth_to_color/image_raw/compressedDepth'
 CAMERA_INFO_TOPIC = f'{CAMERA_NS}/color/camera_info'
 
-# Grip-site frames at the gripper closure point: fixed children of the wrist
-# yaw links pushed forward to the fingertips, so frame_task targets are the
-# grasp point itself (no reach offset needed).
-ARM_FRAMES = {'left': 'left_grip_site', 'right': 'right_grip_site'}
 # GraspGenX gripper-BASE frames (URDF frames whose axes match the GraspGenX
 # planning convention: +Z approach, +X finger-close, origin at the magpie gripper
 # base). A raw GraspGenX grasp pose is sent straight to frame_task targeting these
@@ -432,7 +428,7 @@ class SkillsBase(Node):
         collision filtering. Returns None if depth/caminfo/TF are unavailable."""
         return self._depth_to_cloud(None, target_frame)
 
-    def plan_grasp(self, cloud, frame='pelvis', gripper_name='', scene_cloud=None):
+    def plan_grasp(self, cloud, frame, gripper_name, scene_cloud=None):
         """Send an (N, 3) object cloud to the graspgen service. Pass an optional
         (M, 3) `scene_cloud` (same frame) to have the server collision-filter
         grasps against surrounding obstacles. Returns the GraspGen response
@@ -460,16 +456,18 @@ class SkillsBase(Node):
         return resp
 
     # ------------------------------------------------------- motion primitives
-    def move_frame_to(self, arm, x, y, z, duration_sec=3, quat=(0.0, 0.0, 0.0, 1.0),
-                      outer_gh=None, frame=None):
+    def move_frame_to(self, frame, pose,
+                      outer_gh=None, duration_sec=3,):
         """Send a frame to (x, y, z) in the pelvis frame via /frame_task. Defaults
         to the arm's grip-site frame; pass `frame` to drive a different URDF frame
         (e.g. GRASP_FRAMES[arm], the GraspGenX gripper-base frame, for grasping).
         Pass the skill's goal handle as outer_gh so a skill cancel promptly cancels
         the in-flight frame_task goal too."""
-        frame_name = frame or ARM_FRAMES[arm]
+        frame_name = frame
         goal = FrameTask.Goal()
         goal.frame_names = [frame_name]
+        x, y, z = pose.position.x, pose.position.y, pose.position.z
+        quat = (pose.orientation.x, pose.orientation.y, pose.orientation.z, pose.orientation.w)
         pose = Pose()
         pose.position = Point(x=float(x), y=float(y), z=float(z))
         pose.orientation = Quaternion(
@@ -534,8 +532,8 @@ class SkillsBase(Node):
             return False
         return self._trigger_gripper(self.gripper_close_clis[arm], f'gripper/close({arm})')
 
-    def _validated_arm(self, run, goal):
-        arm = (goal.arm or 'right').strip().lower()
-        if arm not in ARM_FRAMES:
+    def _validated_arm(self, goal):
+        arm = goal.arm.strip().lower()
+        if arm not in GRASP_FRAMES:
             return None
         return arm

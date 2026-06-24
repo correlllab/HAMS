@@ -1,6 +1,6 @@
 """SkillGrasp: gemini (box) -> sam (mask) -> graspgen (6-DOF) -> frame_task."""
 
-import numpy as np
+import copy
 
 from custom_ros_messages.action import SkillGrasp
 
@@ -30,18 +30,12 @@ GEMINI_GRASP_PROMPT = (
 # (GRASP_FRAMES[arm] = left/right_graspgenx_frame) placed at exactly that
 # gripper-base pose, so a grasp is executed by driving that frame to the RAW
 # GraspGenX pose — no axis permutation or base->fingertip (TCP-depth) fix-up here.
-# STANDOFF_M backs the pre-grasp off along the approach axis (graspgen +Z).
-STANDOFF_M = 0.08
+
 
 # How many of the ranked GraspGenX grasps to try (best-first) before giving up:
 # the top grasp may be IK-unreachable, so fall through to the next one.
 MAX_GRASP_ATTEMPTS = 5
 
-
-def _translate(x, y, z):
-    T = np.eye(4)
-    T[:3, 3] = [x, y, z]
-    return T
 
 
 class GraspSkill:
@@ -52,7 +46,7 @@ class GraspSkill:
         drives the grip_site there."""
         goal = gh.request
         run = _Run(self, gh, SkillGrasp, 'grasp')
-        arm = self._validated_arm(run, goal)
+        arm = self._validated_arm(goal)
         if arm is None:
             return run.abort(f'invalid arm {goal.arm!r}')
         obj = goal.target_object
@@ -75,8 +69,8 @@ class GraspSkill:
         mask = self.segment(text=obj, positive_boxes=box, outer_gh=gh)
         if mask is None:
             return run.abort(f'no mask for {obj!r}')
-        cloud = self.mask_to_cloud(mask, target_frame='pelvis')
-        if cloud is None:
+        obj_cloud = self.mask_to_cloud(mask, target_frame='pelvis')
+        if obj_cloud is None:
             return run.abort(f'{obj!r} mask produced no usable cloud')
         # Whole-frame cloud as obstacle context so graspgen can collision-filter
         # grasps against the surroundings (optional — None just skips filtering).
@@ -85,7 +79,7 @@ class GraspSkill:
         # --- plan: graspgen on the object cloud --------------------------------
         if not run.phase('approach', 0.4):
             return run.result
-        resp = self.plan_grasp(cloud, frame='pelvis', scene_cloud=scene)
+        resp = self.plan_grasp(obj_cloud, gripper_name = "magpie", frame='pelvis', scene_cloud=scene)
         if resp is None:
             return run.abort(f'no grasp planned for {obj!r}')
         width_mm = float(resp.gripper_width) * 1000.0
@@ -99,13 +93,14 @@ class GraspSkill:
         # real convergence, walk the ranked list and commit to the first pre-grasp
         # approach that actually lands, instead of blindly closing on the top one.
         n = min(len(resp.grasps), MAX_GRASP_ATTEMPTS)
-        target = quat = None
         idx = -1
+        grasp_pose = None
         for i in range(n):
-            target, pre, quat = self._grasp_to_targets(resp.grasps[i].pose)
-            if self.move_frame_to(arm, pre[0], pre[1], pre[2],
-                                  duration_sec=4, quat=quat, outer_gh=gh,
-                                  frame=GRASP_FRAMES[arm]):
+            grasp_pose = resp.grasps[i].pose
+            approach_pose = get_approach_pose(grasp_pose, approach_dist=0.05)
+            self.get_logger().info(
+                f'grasp {i} for {obj!r}: score {resp.scores[i]:.2f}, width {width_mm:.1f}mm, \n approach {approach_pose}')
+            if self.move_frame_to(GRASP_FRAMES[arm], approach_pose, duration_sec=4, outer_gh=gh):
                 idx = i
                 break
             if gh.is_cancel_requested or run.remaining() <= 0.0:
@@ -119,9 +114,7 @@ class GraspSkill:
         # --- grasp: move to contact + close ------------------------------------
         if not run.phase('grasp', 0.75):
             return run.result
-        if not self.move_frame_to(arm, target[0], target[1], target[2],
-                                  duration_sec=2, quat=quat, outer_gh=gh,
-                                  frame=GRASP_FRAMES[arm]):
+        if not self.move_frame_to(GRASP_FRAMES[arm], grasp_pose, duration_sec=3, outer_gh=gh):
             return run.abort('contact motion failed')
         if not self.close_gripper(arm):
             return run.abort('gripper close failed')
@@ -157,14 +150,19 @@ class GraspSkill:
         py1, py2 = sorted((y1 / 1000.0 * h, y2 / 1000.0 * h))
         return [px1, py1, px2, py2]
 
-    def _grasp_to_targets(self, grasp_pose):
-        """Raw GraspGenX grasp Pose (pelvis) -> (target_xyz, pre_xyz, quat) for the
-        *_graspgenx_frame frame. GraspGenX plans in this exact frame convention
-        (+Z approach, +X close, origin at the gripper base), so the orientation is
-        passed through unchanged and the grasp position is the pose origin; the
-        pre-grasp is backed off STANDOFF_M along the approach axis (graspgen +Z)."""
-        t = pose_to_matrix(grasp_pose)
-        t_pre = t @ _translate(0.0, 0.0, -STANDOFF_M)
-        quat = (grasp_pose.orientation.x, grasp_pose.orientation.y,
-                grasp_pose.orientation.z, grasp_pose.orientation.w)
-        return t[:3, 3], t_pre[:3, 3], quat
+
+def get_approach_pose(pose, approach_dist):
+    """Translate `pose` along its OWN local +Z axis by `approach_dist` metres,
+    returning a NEW Pose with the orientation unchanged (input left untouched).
+
+    GraspGenX poses use +Z as the approach axis (into the object), so a POSITIVE
+    `approach_dist` slides the pose forward along that approach (deeper toward the
+    object) and a NEGATIVE value backs it off — e.g. pass a negative standoff to
+    get a pre-grasp pose behind the grasp. The pose's local +Z, expressed in the
+    parent frame, is the third column of its rotation matrix."""
+    z_axis = pose_to_matrix(pose)[:3, 2]          # pose's local +Z in the parent frame
+    out = copy.deepcopy(pose)
+    out.position.x += approach_dist * float(z_axis[0])
+    out.position.y += approach_dist * float(z_axis[1])
+    out.position.z += approach_dist * float(z_axis[2])
+    return out
