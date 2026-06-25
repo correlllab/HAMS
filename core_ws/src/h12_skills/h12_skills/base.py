@@ -48,7 +48,7 @@ from std_srvs.srv import Trigger
 
 from .perception_utils import (
     decode_compressed_depth_image, deproject_mask, transform_points,
-    transform_to_matrix,
+    transform_to_matrix, pose_to_matrix, matrix_to_pose, quat_geodesic,
 )
 
 
@@ -87,6 +87,16 @@ MIN_GRASP_POINTS = 100
 # Debug/visualization TF frames (e.g. the grasp target) are re-broadcast at this
 # period so they stay alive in RViz instead of expiring after a single send.
 TF_REPUBLISH_PERIOD_SEC = 0.1
+
+# World-frame grasp servo (servo_frame_to_world): the grasp is anchored in a
+# world-fixed frame and re-resolved into the live pelvis frame each iteration so
+# pelvis drift during the arm motion is cancelled. WORLD_FRAME is FAST-LIO's
+# odometry origin (camera_init -> body -> pelvis); switch to 'map' for the
+# slam_toolbox frame (globally consistent but jumps on loop closure).
+WORLD_FRAME = 'camera_init'   # FAST-LIO odometry world frame; switch to 'map' for slam_toolbox
+SERVO_ITER = 3                # max world-frame servo refinement iterations
+SERVO_LIN_TOL = 0.005         # 5 mm world-position convergence tolerance
+SERVO_ANG_TOL = 0.02          # ~1.15 deg world-orientation convergence tolerance
 
 # Skill action clients: name -> (action type, action server name). The same
 # table drives the action servers SkillsNode provides.
@@ -468,12 +478,13 @@ class SkillsBase(Node):
         collision filtering. Returns None if depth/caminfo/TF are unavailable."""
         return self._depth_to_cloud(None, target_frame)
 
-    def plan_grasp(self, cloud, frame, gripper_name, scene_cloud=None):
+    def plan_grasp(self, cloud, frame, gripper_name, scene_cloud=None, arm=''):
         """Send an (N, 3) object cloud to the graspgen service. Pass an optional
         (M, 3) `scene_cloud` (same frame) to have the server collision-filter
-        grasps against surrounding obstacles. Returns the GraspGen response
-        (ranked `grasps` PoseStamped[], `scores`, `gripper_width`) in `frame`, or
-        None."""
+        grasps against surrounding obstacles. Pass `arm` ('left'/'right') so the
+        server keeps only that arm's approach-direction sector (right: forward..+y,
+        left: forward..-y). Returns the GraspGen response (ranked `grasps`
+        PoseStamped[], `scores`, `gripper_width`) in `frame`, or None."""
         if cloud is None or len(cloud) < MIN_GRASP_POINTS:
             self.get_logger().error('plan_grasp: empty/too-small cloud')
             return None
@@ -488,6 +499,7 @@ class SkillsBase(Node):
             req.scene_cloud = point_cloud2.create_cloud_xyz32(
                 header, np.asarray(scene_cloud, dtype=np.float32))
         req.gripper_name = gripper_name
+        req.arm = arm
         resp = self._call_service(self.graspgen_cli, req, 'GraspGen', timeout_sec=60.0)
         if resp is None or not resp.success or not resp.grasps:
             if resp is not None and resp.message:
@@ -543,11 +555,110 @@ class SkillsBase(Node):
             self.frame_task_cli, goal, feedback_cb=_log_feedback,
             result_timeout=float(duration_sec) + 10.0, outer_gh=outer_gh)
         ok = response is not None and response.status == GoalStatus.STATUS_SUCCEEDED
+        # The frame_task server reports success even when it times out before
+        # converging, so its status alone can't tell a reached target from an
+        # unreachable one. Gate on the last streamed pelvis-frame error instead
+        # (loose vs the server's 1mm/2mrad to absorb feedback-vs-break jitter).
+        if ok and last:
+            ok = last['lin'] < 0.01 and last['ang'] < 0.05
         if last:
             self.get_logger().info(
                 f'frame_task[{frame_name}] done: lin={last["lin"] * 1000:.1f}mm '
                 f'ang={last["ang"]:.3f}rad success={ok}')
         return ok
+
+    def _transform_pose(self, pose, source_frame, target_frame):
+        """Express `pose` (a geometry_msgs/Pose given in `source_frame`) in
+        `target_frame` via live TF. Returns a new Pose, or None if the transform
+        is unavailable. Uses Time() (latest available) — like _depth_to_cloud — to
+        avoid extrapolation-into-the-future errors on a lagging SLAM/odom link."""
+        try:
+            tf = self.tf_buffer.lookup_transform(
+                target_frame, source_frame, Time(), timeout=RclpyDuration(seconds=1.0))
+        except TransformException as e:
+            self.get_logger().warn(
+                f'_transform_pose: TF {source_frame!r} -> {target_frame!r} failed: {e}')
+            return None
+        # transform_to_matrix(lookup_transform(target, source)) == T^target_source,
+        # mapping source coords -> target coords (same convention as _depth_to_cloud).
+        return matrix_to_pose(transform_to_matrix(tf.transform) @ pose_to_matrix(pose))
+
+    def _world_frame_error(self, frame, target_pos, target_quat):
+        """Measured (lin_m, ang_rad) between `frame`'s ACTUAL pose in WORLD_FRAME
+        and a world target (np.array xyz, (x,y,z,w) quat), or (None, None) on TF
+        failure. lookup_transform(WORLD_FRAME, frame) IS the frame's world pose."""
+        try:
+            tf = self.tf_buffer.lookup_transform(
+                WORLD_FRAME, frame, Time(), timeout=RclpyDuration(seconds=0.5))
+        except TransformException as e:
+            self.get_logger().warn(f'servo: lookup {WORLD_FRAME} -> {frame!r}: {e}')
+            return None, None
+        t, q = tf.transform.translation, tf.transform.rotation
+        lin = float(np.linalg.norm(np.array([t.x, t.y, t.z]) - target_pos))
+        ang = quat_geodesic((q.x, q.y, q.z, q.w), target_quat)
+        return lin, ang
+
+    def servo_frame_to_world(self, frame, world_pose, fallback_pose, outer_gh=None,
+                             duration_sec=10.0, max_iter=SERVO_ITER,
+                             lin_tol=SERVO_LIN_TOL, ang_tol=SERVO_ANG_TOL):
+        """Drive `frame` to `world_pose` (a Pose in WORLD_FRAME), compensating for
+        pelvis drift during the motion. Each iteration re-resolves the fixed world
+        target into the LIVE pelvis frame, commands frame_task there, then MEASURES
+        the frame's actual world pose and stops once within (lin_tol m, ang_tol rad).
+
+        Returns True on world convergence (or best-effort after max_iter on a
+        reachable target); False if the first move leaves the frame far from the
+        world target (unreachable -> the caller tries the next grasp candidate).
+
+        If `world_pose` is None (no world anchor — navigation/odom down) or the
+        world TF drops mid-servo, falls back to ONE direct pelvis move to
+        `fallback_pose` so the skill still works without drift compensation."""
+        if world_pose is None:
+            self.get_logger().warn(
+                f'servo[{frame}]: no {WORLD_FRAME} anchor; direct pelvis move '
+                '(pelvis-drift compensation OFF)')
+            return self.move_frame_to(frame, fallback_pose, outer_gh=outer_gh,
+                                      duration_sec=duration_sec)
+        tp = np.array([world_pose.position.x, world_pose.position.y,
+                       world_pose.position.z])
+        tq = (world_pose.orientation.x, world_pose.orientation.y,
+              world_pose.orientation.z, world_pose.orientation.w)
+        ok, lin, ang = False, None, None
+        for i in range(int(max_iter)):
+            if outer_gh is not None and outer_gh.is_cancel_requested:
+                return False
+            pelvis_pose = self._transform_pose(world_pose, WORLD_FRAME, 'pelvis')
+            if pelvis_pose is None:            # lost world TF mid-servo -> fallback
+                self.get_logger().warn(
+                    f'servo[{frame}]: lost {WORLD_FRAME} TF; pelvis fallback')
+                return self.move_frame_to(frame, fallback_pose, outer_gh=outer_gh,
+                                          duration_sec=duration_sec)
+            dur = duration_sec if i == 0 else 3.0   # iter 0 = full approach; later = drift fixes
+            ok = self.move_frame_to(frame, pelvis_pose, outer_gh=outer_gh,
+                                    duration_sec=dur)
+            lin, ang = self._world_frame_error(frame, tp, tq)
+            if lin is None:                    # could not measure -> pelvis-frame result
+                return ok
+            self.get_logger().info(
+                f'servo[{frame}] iter {i}: {WORLD_FRAME} err lin={lin * 1000:.1f}mm '
+                f'ang={ang:.3f}rad (tol {lin_tol * 1000:.0f}mm/{ang_tol:.3f}rad, '
+                f'reached={ok})')
+            if lin <= lin_tol and ang <= ang_tol:
+                return True
+            # First move both failed to converge in pelvis AND left a large world
+            # error => genuinely unreachable; bail so the caller tries the next grasp.
+            if i == 0 and not ok and (lin > 0.05 or ang > 0.20):
+                self.get_logger().warn(
+                    f'servo[{frame}]: unreachable; caller tries next grasp')
+                return False
+        # Ran the full iteration budget without hitting tolerance. This is NOT a
+        # failure: return best-effort success so the caller proceeds with the
+        # near-converged pose rather than aborting on non-convergence. Genuine
+        # unreachability is already caught by the iter-0 fast-fail above.
+        self.get_logger().warn(
+            f'servo[{frame}]: tol not met in {max_iter} iters; proceeding '
+            f'best-effort (last lin={lin * 1000:.1f}mm ang={ang:.3f}rad)')
+        return True
 
     def set_gripper(self, arm, position_mm, speed=1.0):
         """Direct position command (mm); used to pre-open to a measured grasp
