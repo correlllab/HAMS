@@ -103,7 +103,7 @@ class GraspSkill:
         grasp_pose = None
         for i in range(n):
             grasp_pose = resp.grasps[i].pose
-            approach_pose = get_approach_pose(grasp_pose, approach_dist=-0.05)
+            approach_pose = get_approach_pose(grasp_pose, approach_dist=-0.15)
             # Register the candidate we're about to drive to as TARGET_FRAME (one
             # frame, updated each iteration). publish_tf keeps re-broadcasting it
             # so RViz shows the live target instead of it expiring between sends.
@@ -126,6 +126,9 @@ class GraspSkill:
         # --- grasp: move to contact + close ------------------------------------
         if not run.phase('grasp', 0.75):
             return run.result
+        self.publish_tf(_approach_target_tf(
+                resp.grasps[i].header.frame_id, grasp_pose,
+                self.get_clock().now().to_msg()))
         if not self.move_frame_to(GRASP_FRAMES[arm], grasp_pose, duration_sec=10, outer_gh=gh):
             return run.abort('contact motion failed')
         if not self.close_gripper(arm):
