@@ -13,6 +13,8 @@ import math
 import numpy as np
 import cv2
 
+from geometry_msgs.msg import Pose
+
 
 # --------------------------------------------------------------- depth + cloud
 def decode_compressed_depth_image(msg) -> np.ndarray:
@@ -96,6 +98,14 @@ def mat_to_quat(R):
     return (x, y, z, w)
 
 
+def quat_geodesic(q1, q2):
+    """Geodesic angle [rad] in [0, pi] between two (x, y, z, w) quaternions;
+    sign-invariant via abs(dot). Mirrors the existing _quat_geodesic in
+    plot/repeatability_report_viewer.py."""
+    dot = min(1.0, abs(q1[0] * q2[0] + q1[1] * q2[1] + q1[2] * q2[2] + q1[3] * q2[3]))
+    return 2.0 * math.acos(dot)
+
+
 def pose_to_matrix(pose):
     """geometry_msgs/Pose -> 4x4 homogeneous matrix."""
     p, q = pose.position, pose.orientation
@@ -103,6 +113,17 @@ def pose_to_matrix(pose):
     T[:3, :3] = quat_to_rot(q.x, q.y, q.z, q.w)
     T[:3, 3] = [p.x, p.y, p.z]
     return T
+
+
+def matrix_to_pose(T):
+    """4x4 homogeneous matrix -> geometry_msgs/Pose (inverse of pose_to_matrix)."""
+    pose = Pose()
+    pose.position.x, pose.position.y, pose.position.z = (
+        float(T[0, 3]), float(T[1, 3]), float(T[2, 3]))
+    qx, qy, qz, qw = mat_to_quat(T[:3, :3])
+    pose.orientation.x, pose.orientation.y, pose.orientation.z, pose.orientation.w = (
+        float(qx), float(qy), float(qz), float(qw))
+    return pose
 
 
 # ------------------------------------------------------------------- gemini io

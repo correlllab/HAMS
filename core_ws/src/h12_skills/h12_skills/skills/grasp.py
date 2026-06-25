@@ -6,7 +6,7 @@ from geometry_msgs.msg import TransformStamped
 
 from custom_ros_messages.action import SkillGrasp
 
-from ..base import _Run, GRASP_FRAMES, GEMINI_TIMEOUT_SEC
+from ..base import _Run, GRASP_FRAMES, GEMINI_TIMEOUT_SEC, WORLD_FRAME
 from ..perception_utils import extract_json, pose_to_matrix
 
 
@@ -38,6 +38,8 @@ GEMINI_GRASP_PROMPT = (
 # the top grasp may be IK-unreachable, so fall through to the next one.
 MAX_GRASP_ATTEMPTS = 5
 
+
+APPROACH_DIST = 0.1  # metres to back off along the grasp's +Z approach axis for pre-grasp
 # Single TF frame the planned pre-grasp approach is broadcast to, updated as the
 # loop walks the ranked candidates, so RViz shows the target currently being tried.
 TARGET_FRAME = 'graspgenx_target_frame'
@@ -85,7 +87,8 @@ class GraspSkill:
         # --- plan: graspgen on the object cloud --------------------------------
         if not run.phase('approach', 0.4):
             return run.result
-        resp = self.plan_grasp(obj_cloud, gripper_name = "magpie", frame='pelvis', scene_cloud=scene)
+        resp = self.plan_grasp(obj_cloud, gripper_name="magpie", frame='pelvis',
+                               scene_cloud=scene, arm=arm)
         if resp is None:
             return run.abort(f'no grasp planned for {obj!r}')
         width_mm = float(resp.gripper_width) * 1000.0
@@ -94,25 +97,42 @@ class GraspSkill:
         if not self.set_gripper(arm, width_mm):
             return run.abort('gripper pre-open failed')
 
-        # GraspGenX returns grasps ranked best-first. The top grasp can be
-        # IK-unreachable (out of arm range / singular). Now that frame_task reports
-        # real convergence, walk the ranked list and commit to the first pre-grasp
-        # approach that actually lands, instead of blindly closing on the top one.
+        # GraspGenX returns grasps ranked best-first; the top grasp can be
+        # IK-unreachable, so we walk the ranked list. Snapshot every candidate's
+        # pre-grasp + grasp pose from the CURRENT (static) pelvis frame into the
+        # world (WORLD_FRAME) frame ONCE, up front. World-anchored, these targets
+        # stay correct as the pelvis drifts during the arm motions:
+        # servo_frame_to_world re-resolves them into the live pelvis frame each
+        # iteration. If the world TF is unavailable (navigation/odom not running)
+        # we drive the raw pelvis poses with no drift compensation.
         n = min(len(resp.grasps), MAX_GRASP_ATTEMPTS)
+        grasps_p = [resp.grasps[i].pose for i in range(n)]
+        approaches_p = [get_approach_pose(g, approach_dist=-APPROACH_DIST) for g in grasps_p]
+        grasps_w = [self._transform_pose(g, 'pelvis', WORLD_FRAME) for g in grasps_p]
+        approaches_w = [self._transform_pose(a, 'pelvis', WORLD_FRAME)
+                        for a in approaches_p]
+        have_world = all(p is not None for p in grasps_w + approaches_w)
+        if not have_world:
+            self.get_logger().warn(
+                f'grasp: {WORLD_FRAME} TF unavailable; pelvis-drift servoing OFF, '
+                'driving raw pelvis poses (start navigation/FAST-LIO to enable)')
+
         idx = -1
-        grasp_pose = None
         for i in range(n):
-            grasp_pose = resp.grasps[i].pose
-            approach_pose = get_approach_pose(grasp_pose, approach_dist=-0.15)
             # Register the candidate we're about to drive to as TARGET_FRAME (one
-            # frame, updated each iteration). publish_tf keeps re-broadcasting it
-            # so RViz shows the live target instead of it expiring between sends.
+            # frame, updated each iteration). publish_tf keeps re-broadcasting it so
+            # RViz shows the live target instead of it expiring between sends. When
+            # servoing it is the stable world goal (parented to WORLD_FRAME).
+            parent, dbg = ((WORLD_FRAME, approaches_w[i]) if have_world
+                           else (resp.grasps[i].header.frame_id, approaches_p[i]))
             self.publish_tf(_approach_target_tf(
-                resp.grasps[i].header.frame_id, approach_pose,
-                self.get_clock().now().to_msg()))
+                parent, dbg, self.get_clock().now().to_msg()))
             self.get_logger().info(
-                f'grasp {i} for {obj!r}: score {resp.scores[i]:.2f}, width {width_mm:.1f}mm, \n approach {approach_pose}')
-            if self.move_frame_to(GRASP_FRAMES[arm], approach_pose, duration_sec=10, outer_gh=gh):
+                f'grasp {i} for {obj!r}: score {resp.scores[i]:.2f}, '
+                f'width {width_mm:.1f}mm')
+            if self.servo_frame_to_world(
+                    GRASP_FRAMES[arm], approaches_w[i] if have_world else None,
+                    approaches_p[i], outer_gh=gh, duration_sec=10):
                 idx = i
                 break
             if gh.is_cancel_requested or run.remaining() <= 0.0:
@@ -126,11 +146,17 @@ class GraspSkill:
         # --- grasp: move to contact + close ------------------------------------
         if not run.phase('grasp', 0.75):
             return run.result
+        parent, dbg = ((WORLD_FRAME, grasps_w[idx]) if have_world
+                       else (resp.grasps[idx].header.frame_id, grasps_p[idx]))
         self.publish_tf(_approach_target_tf(
-                resp.grasps[i].header.frame_id, grasp_pose,
-                self.get_clock().now().to_msg()))
-        if not self.move_frame_to(GRASP_FRAMES[arm], grasp_pose, duration_sec=10, outer_gh=gh):
-            return run.abort('contact motion failed')
+            parent, dbg, self.get_clock().now().to_msg()))
+        # Drive to contact, then close even if the servo never reaches tolerance:
+        # we've already committed to a reachable grasp, so a best-effort contact
+        # pose is still worth closing on. servo_frame_to_world logs the residual
+        # world error; we deliberately don't abort on non-convergence here.
+        self.servo_frame_to_world(
+            GRASP_FRAMES[arm], grasps_w[idx] if have_world else None,
+            grasps_p[idx], outer_gh=gh, duration_sec=10)
         if not self.close_gripper(arm):
             return run.abort('gripper close failed')
 

@@ -97,11 +97,13 @@ NUM_COLLISION_SAMPLES = 2000
 # more (parallel-jaw / magpie fingers reach ~0.11-0.19 m from the base).
 DUMMY_MESH_MIN_EXTENT_M = 0.05
 
-# Approach-direction filter: drop grasps whose +Z approach axis points back toward
-# the robot. Grasps are expressed in the cloud frame (pelvis), where +X is robot-
-# forward, so cos(approach, frame +x) == the x-component of the grasp's +Z column.
-# Keep a grasp iff that cosine exceeds this threshold. 0.0 = "any forward component";
-# larger = STRICTER (requires a more head-on approach).
+# Approach-direction filter: keep grasps whose +Z approach axis stays in the
+# executing arm's forward quadrant. Grasps are in the cloud frame (pelvis): +X
+# robot-forward, +Y robot-left, +Z up. The approach's forward cosine is the
+# x-component of the grasp's +Z column; keep a grasp iff it is >= this threshold
+# (0.0 = "not pointing back toward the robot"; larger = STRICTER / more head-on).
+# The lateral (+Y) side is gated per-arm (see _plan_cb); the vertical (+Z)
+# component is never constrained, so top-down / bottom-up approaches are kept.
 APPROACH_MIN_FORWARD_COS = 0.0
 
 # viser visualizer: a web GUI (http://localhost:VISER_PORT) that renders the scene
@@ -382,28 +384,47 @@ class GraspGenServer(Node):
         # print(f"{type(grasps)=}")
         # print(f"{grasps.shape=}")
         # print("\n\n\n")
-        # Drop grasps whose +Z approach points back toward the robot (negative forward
-        # cosine). Grasps are in `frame` (pelvis), so the cosine vs frame +x is just the
-        # x-component of each grasp's approach column (col 2). Done before collision
-        # filtering — cheaper to discard wrong-direction grasps before the GPU cdist.
-        forward_cos = grasps[:, 0, 2]
-        keep_forward = forward_cos > APPROACH_MIN_FORWARD_COS        
+        # Approach-direction filter, in `frame` (pelvis: +x forward, +y left, +z up).
+        # Keep grasps whose +Z approach axis (col 2) lies in the executing arm's
+        # forward quadrant: forward (ax >= threshold, i.e. not back toward the robot)
+        # AND on the arm's lateral side — right arm sweeps forward..+y(left) so ay>=0,
+        # left arm sweeps forward..-y(right) so ay<=0. The vertical component (az) is
+        # never constrained, so a near-vertical (top-down / bottom-up) approach has
+        # ax,ay ~ 0 and passes for either arm. Done before collision filtering —
+        # cheaper to discard wrong-direction grasps before the GPU cdist.
+        arm = (request.arm or '').strip().lower()
+        ax = grasps[:, 0, 2]            # approach forward (+x) component
+        ay = grasps[:, 1, 2]            # approach lateral (+y = robot-left) component
+        keep_forward = ax >= APPROACH_MIN_FORWARD_COS
+        if arm == 'right':
+            keep_side = ay >= 0.0       # forward..+y (left) sector
+            side_desc = 'forward..+y(left)'
+        elif arm == 'left':
+            keep_side = ay <= 0.0       # forward..-y (right) sector
+            side_desc = 'forward..-y(right)'
+        else:                          # unknown/empty arm -> forward half, no lateral cut
+            keep_side = np.ones(len(grasps), dtype=bool)
+            side_desc = 'forward-half'
+            self.get_logger().warn(
+                f'approach filter: unknown arm {request.arm!r}; lateral cut skipped')
+        keep_approach = keep_forward & keep_side
         n_before = len(grasps)
-        rec.set(n_approach_kept=int(keep_forward.sum()),
-                n_approach_rejected=int(n_before - keep_forward.sum()))
+        rec.set(arm=arm or 'unknown',
+                n_approach_kept=int(keep_approach.sum()),
+                n_approach_rejected=int(n_before - keep_approach.sum()))
         self.get_logger().info(
-            f'approach filter: {int(keep_forward.sum())}/{n_before} kept '
-            f'(cos>+{APPROACH_MIN_FORWARD_COS} vs frame +x)')
-        if not keep_forward.any():
+            f'approach filter [{arm or "unknown"}]: {int(keep_approach.sum())}/{n_before} '
+            f'kept (ax>={APPROACH_MIN_FORWARD_COS}, {side_desc})')
+        if not keep_approach.any():
             # Mirror the collision-filter empty path so the failure is inspectable:
             # render the rejected grasps (no obstacles) before returning.
             self._render_viser(pts, np.empty((0, 3)), grasps, confs, gr.info, obb_dict)
             self._save_grasp_viz(rec, pts, grasps, width)
             response.success, response.message = False, \
-                'all grasps approach toward the robot (+x cos <= 0)'
+                f'no grasps in the {arm or "forward"} approach sector ({side_desc})'
             rec.finish(success=False, message=response.message)
             return response
-        grasps, confs = grasps[keep_forward], confs[keep_forward]
+        grasps, confs = grasps[keep_approach], confs[keep_approach]
 
 
         # Flip grasps whose gripper +Y points down so it points up. Grasps are in
