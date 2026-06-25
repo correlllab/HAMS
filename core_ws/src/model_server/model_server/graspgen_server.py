@@ -378,19 +378,23 @@ class GraspGenServer(Node):
         order = np.argsort(-confs)
         grasps, confs = grasps[order], confs[order]
 
+        # print("\n\n\n")
+        # print(f"{type(grasps)=}")
+        # print(f"{grasps.shape=}")
+        # print("\n\n\n")
         # Drop grasps whose +Z approach points back toward the robot (negative forward
         # cosine). Grasps are in `frame` (pelvis), so the cosine vs frame +x is just the
         # x-component of each grasp's approach column (col 2). Done before collision
         # filtering — cheaper to discard wrong-direction grasps before the GPU cdist.
         forward_cos = grasps[:, 0, 2]
-        keep = forward_cos > APPROACH_MIN_FORWARD_COS
+        keep_forward = forward_cos > APPROACH_MIN_FORWARD_COS        
         n_before = len(grasps)
-        rec.set(n_approach_kept=int(keep.sum()),
-                n_approach_rejected=int(n_before - keep.sum()))
+        rec.set(n_approach_kept=int(keep_forward.sum()),
+                n_approach_rejected=int(n_before - keep_forward.sum()))
         self.get_logger().info(
-            f'approach filter: {int(keep.sum())}/{n_before} kept '
+            f'approach filter: {int(keep_forward.sum())}/{n_before} kept '
             f'(cos>+{APPROACH_MIN_FORWARD_COS} vs frame +x)')
-        if not keep.any():
+        if not keep_forward.any():
             # Mirror the collision-filter empty path so the failure is inspectable:
             # render the rejected grasps (no obstacles) before returning.
             self._render_viser(pts, np.empty((0, 3)), grasps, confs, gr.info, obb_dict)
@@ -399,7 +403,24 @@ class GraspGenServer(Node):
                 'all grasps approach toward the robot (+x cos <= 0)'
             rec.finish(success=False, message=response.message)
             return response
-        grasps, confs = grasps[keep], confs[keep]
+        grasps, confs = grasps[keep_forward], confs[keep_forward]
+
+
+        # Flip grasps whose gripper +Y points down so it points up. Grasps are in
+        # the cloud frame (pelvis), where +Z is up, so "Y up/down" is the z-component
+        # (row 2) of the grasp's local +Y column (col 1) — mirroring the approach
+        # filter above (grasps[:, 0, 2] = x-component of the +Z column). A 180° turn
+        # about the local +Z (approach) axis negates local X and Y, swinging a
+        # down-pointing Y up while leaving the approach direction and origin intact.
+        needs_flip = grasps[:, 2, 1] < 0.0
+        T_flip = np.eye(4)
+        T_flip[:3, :3] = np.diag([-1.0, -1.0, 1.0])  # 180° about local Z
+        grasps[needs_flip] = grasps[needs_flip] @ T_flip
+        self.get_logger().info(
+            f'flipped: {int(needs_flip.sum())} grasps with Y down (cloud frame +Z up)')
+
+
+
 
         # Collision filtering against the scene cloud, in `frame`. The planner
         # already returns grasps in `frame`, so they line up with scene_pts directly.
@@ -447,6 +468,7 @@ class GraspGenServer(Node):
             ps.pose.orientation.w = float(qw)
             response.grasps.append(ps)
             response.scores.append(float(c))
+
         response.gripper_width = float(width)
         response.success = True
         response.message = f'{len(response.grasps)} grasps'
