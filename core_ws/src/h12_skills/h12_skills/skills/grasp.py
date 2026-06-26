@@ -39,10 +39,20 @@ GEMINI_GRASP_PROMPT = (
 MAX_GRASP_ATTEMPTS = 5
 
 
-APPROACH_DIST = 0.1  # metres to back off along the grasp's +Z approach axis for pre-grasp
+APPROACH_DIST = 0.075  # metres to back off along the grasp's +Z approach axis for pre-grasp
 # Single TF frame the planned pre-grasp approach is broadcast to, updated as the
 # loop walks the ranked candidates, so RViz shows the target currently being tried.
 TARGET_FRAME = 'graspgenx_target_frame'
+
+# How hard to try to physically REACH each candidate pose before falling through
+# to the next ranked grasp. These push past servo_frame_to_world's defaults
+# (10s primary move / SERVO_ITER refinement passes): give a near-but-not-yet
+# reached pose MORE TIME on the main IK move and MORE ITERATIONS of world-frame
+# drift correction to settle within tolerance. The iter-0 unreachable fast-fail
+# in servo_frame_to_world still bails genuinely out-of-reach candidates quickly,
+# so the extra budget is only spent on poses that are actually close to reachable.
+SERVO_DURATION_SEC = 15   # primary (iter-0) approach/contact IK move budget [s]
+SERVO_MAX_ITER = 6        # world-frame servo refinement passes per pose
 
 
 
@@ -132,7 +142,8 @@ class GraspSkill:
                 f'width {width_mm:.1f}mm')
             if self.servo_frame_to_world(
                     GRASP_FRAMES[arm], approaches_w[i] if have_world else None,
-                    approaches_p[i], outer_gh=gh, duration_sec=10):
+                    approaches_p[i], outer_gh=gh,
+                    duration_sec=SERVO_DURATION_SEC, max_iter=SERVO_MAX_ITER):
                 idx = i
                 break
             if gh.is_cancel_requested or run.remaining() <= 0.0:
@@ -156,7 +167,8 @@ class GraspSkill:
         # world error; we deliberately don't abort on non-convergence here.
         self.servo_frame_to_world(
             GRASP_FRAMES[arm], grasps_w[idx] if have_world else None,
-            grasps_p[idx], outer_gh=gh, duration_sec=10)
+            grasps_p[idx], outer_gh=gh,
+            duration_sec=SERVO_DURATION_SEC, max_iter=SERVO_MAX_ITER)
         if not self.close_gripper(arm):
             return run.abort('gripper close failed')
 
