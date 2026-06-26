@@ -1,2 +1,5 @@
 # HuggingFace downloader scratch dir (created by huggingface-cli --local-dir)
 .cache/
+
+# SAM3 checkpoint — too large for the repo; download it yourself (see README.md)
+sam3.pt

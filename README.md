@@ -18,6 +18,20 @@ and Isaac Sim running in separate containers and sharing a CycloneDDS ROS domain
 - `git submodule update --init --recursive` to populate `core_ws/src`.
 - Copy `docker/.env.example` to `docker/.env` and fill in your `GEMINI_API_KEY`
   and `ROS_DOMAIN_ID` (see [Configuration](#configuration)).
+- SAM3 weights (`sam3.pt`) — needed by the perception/`sam_server` pipeline.
+  They are **not** tracked in git; download them from the gated
+  [`facebook/sam3`](https://huggingface.co/facebook/sam3) repo and place the
+  file at `core_ws/src/model_server/weights/sam3.pt`:
+
+  ```bash
+  huggingface-cli login                         # one-time; accept the facebook/sam3 license
+  cd core_ws/src/model_server/weights
+  huggingface-cli download facebook/sam3 --local-dir .cache
+  mv .cache/sam3.pt sam3.pt                      # name it exactly sam3.pt
+  ```
+
+  See `core_ws/src/model_server/weights/README.md` for details and the
+  auto-download fallback.
 
 A few things worth knowing before you run anything:
 
@@ -132,7 +146,7 @@ terminal C via the already-running container), so there's nothing to export.
 
 ```bash
 # terminal A — RoboCasa (start first so /clock is publishing)
-docker/scripts/docker_run.sh robocasa
+./docker/scripts/docker_run.sh robocasa --task OpenFridge --layout 1 --style 1 --seed 42
 
 # terminal B — ROS workspace shell, then launch bringup
 docker/scripts/docker_run.sh ros
@@ -142,5 +156,7 @@ ros2 launch h1_bringup h1_sim_bringup.launch.py
 docker exec -it hams_ros bash
 source /opt/ros/humble/setup.bash
 source /home/code/core_ws/install/setup.bash
-ros2 run h1_bringup open_fridge.py
+ros2 action send_goal /skill/grasp custom_ros_messages/action/SkillGrasp \
+  "{target_object: 'vertical fridge handle', arm: 'right', timeout: {sec: 60, nanosec: 0}}" \
+  --feedback
 ```

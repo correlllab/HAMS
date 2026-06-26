@@ -6,7 +6,22 @@ Config YAMLs and this README stay as normal git text.
 ## SAM3 — `sam3.pt`
 
 Promptable segmentation model loaded by `sam_server` (`SAM3_MODEL`).
-Source: https://huggingface.co/facebook/sam3
+Source (gated): https://huggingface.co/facebook/sam3
+
+Not tracked in git — it's too large, so download it yourself and place it at:
+
+    core_ws/src/model_server/weights/sam3.pt
+
+Accept the model license on the HuggingFace page, authenticate, then fetch the
+checkpoint into this directory:
+
+    huggingface-cli login                         # one-time; accept the facebook/sam3 license
+    cd core_ws/src/model_server/weights
+    huggingface-cli download facebook/sam3 --local-dir .cache
+    mv .cache/sam3.pt sam3.pt                      # name it exactly sam3.pt (what SAM3_MODEL expects)
+
+Alternatively, set `SAM3_MODEL = None` in `sam_server.py` to let SAM3
+auto-download from HuggingFace on first run (also requires HF auth).
 
 ## GraspGenX — `graspgen/release/`
 
