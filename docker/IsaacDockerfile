@@ -1,11 +1,11 @@
 # ==============================
 # Isaac Sim 5.1.0 + IsaacLab v2.3.2 + CL_isaaclab_sim runtime.
-# Self-contained image — does NOT inherit from humanoid_sim_base, because Sim 5.x
-# requires Python 3.11 while humanoid_sim_base pins 3.10 for ROS 2 Humble apt
+# Self-contained image — does NOT inherit from hams_base, because Sim 5.x
+# requires Python 3.11 while hams_base pins 3.10 for ROS 2 Humble apt
 # packages. ROS publishing in this container is done via OmniGraph using the
 # bundled isaacsim.ros2.bridge extension; rclpy is NOT installed and not used.
 #
-# Mujoco/Ros containers continue to inherit from humanoid_sim_base unchanged.
+# RoboCasa/Ros containers continue to inherit from hams_base unchanged.
 #
 # Structure: two-stage build (builder → runtime) modeled on upstream
 # correlllab/CL_isaaclab_sim. Python lives in a conda env (Miniconda) instead

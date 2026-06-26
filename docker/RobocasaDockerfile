@@ -1,10 +1,10 @@
 # ==============================
-# MuJoCo 3.3.1 sim on humanoid_sim_base.
+# MuJoCo 3.3.1 sim on hams_base.
 # Single-stage: base image already has ROS + Python + torch + unitree_sdk2py.
-# Source tree bind-mounted at runtime (docker-compose.yml -> /home/code/h1_mujoco).
+# Source tree bind-mounted at runtime (docker-compose.yml -> /home/code/h1_robocasa).
 # Robocasa (kitchen scenes) is installed from git; pins MuJoCo to 3.3.1.
 # ==============================
-FROM humanoid_sim_base:latest
+FROM hams_base:latest
 
 ARG http_proxy
 ARG https_proxy
@@ -79,7 +79,7 @@ RUN git clone --depth 1 https://github.com/ARISE-Initiative/robosuite_models /op
 # check_folder_exists=False.
 RUN echo y | python -m robocasa.scripts.download_kitchen_assets --type all
 
-WORKDIR /home/code/h1_mujoco
+WORKDIR /home/code/h1_robocasa
 
 CMD ["/bin/bash"]
 

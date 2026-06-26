@@ -17,7 +17,7 @@ from launch_ros.actions import Node
 # DDS half and the rclpy half can end up on different domains and the safety
 # layer will see no commands.
 ""
-ASSETS_DIR = '/home/unitree/Humanoid_Simulation/CL_Assets'
+ASSETS_DIR = '/home/unitree/HAMS/CL_Assets'
 
 def generate_launch_description():
     # The included h12_ros2_controller/full_launch.py starts its own rviz2. We

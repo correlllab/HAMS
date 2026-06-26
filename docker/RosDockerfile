@@ -1,5 +1,5 @@
 # ==============================
-# ROS 2 Humble workspace image on humanoid_sim_base.
+# ROS 2 Humble workspace image on hams_base.
 #
 # Inherits base's CUDA, Python 3.10, ROS 2 Humble, CycloneDDS 0.10.x (from
 # source), uv, unitree_sdk2_python, torch cu130, and pin/pink/mink, then
@@ -16,7 +16,7 @@
 # bust the apt and Livox-SDK2 cmake layers above. Within pip, the controller /
 # IK stack comes before the volatile vision ML stack for the same reason.
 # ==============================
-FROM humanoid_sim_base:latest
+FROM hams_base:latest
 
 ARG http_proxy
 ARG https_proxy

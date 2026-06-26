@@ -2,20 +2,20 @@
 # Build Docker images.
 #
 # Usage: docker_build.sh [profile ...]
-#   Profiles: isaac, mujoco, ros
+#   Profiles: isaac, robocasa, ros
 #   With no args, all three are built.
 #   Examples:
 #     docker_build.sh                  # build all
 #     docker_build.sh isaac            # build isaac only
-#     docker_build.sh mujoco ros       # build mujoco + ros
+#     docker_build.sh robocasa ros     # build robocasa + ros
 #
-# Mujoco and Ros inherit from humanoid_sim_base; the base image is built first
+# RoboCasa and Ros inherit from hams_base; the base image is built first
 # whenever either of those profiles is selected. Isaac is self-contained
-# (Sim 5.1 / Lab v2.3.2 / Python 3.11) and does not use humanoid_sim_base.
+# (Sim 5.1 / Lab v2.3.2 / Python 3.11) and does not use hams_base.
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 
-VALID_PROFILES=(isaac mujoco ros)
+VALID_PROFILES=(isaac robocasa ros)
 
 if [ "$#" -eq 0 ]; then
     PROFILES=("${VALID_PROFILES[@]}")
@@ -35,7 +35,7 @@ fi
 
 needs_base=0
 for p in "${PROFILES[@]}"; do
-    if [ "$p" = "mujoco" ] || [ "$p" = "ros" ]; then
+    if [ "$p" = "robocasa" ] || [ "$p" = "ros" ]; then
         needs_base=1
         break
     fi
@@ -43,7 +43,7 @@ done
 
 if [ "$needs_base" -eq 1 ]; then
     echo "Building base..."
-    docker build -t humanoid_sim_base:latest -f docker/BaseDockerfile .
+    docker build -t hams_base:latest -f docker/BaseDockerfile .
 fi
 
 PROFILE_ARGS=()

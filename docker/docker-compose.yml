@@ -1,11 +1,11 @@
 services:
   isaac:
     profiles: [isaac]
-    container_name: humanoid_sim_isaac
+    container_name: hams_sim_isaac
     build:
       context: ..
       dockerfile: docker/IsaacDockerfile
-    image: humanoid_sim_isaac:latest
+    image: hams_sim_isaac:latest
     runtime: nvidia
     privileged: true
     shm_size: 16g
@@ -33,13 +33,13 @@ services:
       - ../CL_isaaclab_sim/.isaac_cache/isaacsim:/root/.isaacsim
     command: /home/code/h12_sim_scripts/launch_isaac.sh
 
-  mujoco:
-    profiles: [mujoco]
-    container_name: humanoid_sim_mujoco
+  robocasa:
+    profiles: [robocasa]
+    container_name: hams_sim_robocasa
     build:
       context: ..
-      dockerfile: docker/MujocoDockerfile
-    image: humanoid_sim_mujoco:latest
+      dockerfile: docker/RobocasaDockerfile
+    image: hams_sim_robocasa:latest
     runtime: nvidia
     privileged: true
     shm_size: 16g
@@ -61,7 +61,7 @@ services:
       - ${XAUTHORITY:-$HOME/.Xauthority}:/root/.Xauthority:ro
       - /dev/input:/dev/input:ro
       - /dev/dri:/dev/dri:rw
-      - ../h1_mujoco:/home/code/h1_mujoco
+      - ../h1_robocasa:/home/code/h1_robocasa
       - ../CL_Assets:/home/code/CL_Assets:ro
       - ./scripts:/home/code/h12_sim_scripts
       # Only the message packages the magpi sim needs — keeps the rest of
@@ -74,15 +74,15 @@ services:
       - ../container_cache/msgs_ws:/home/code/msgs_ws:rw
       - ../core_ws/src/magpie_msgs:/home/code/msgs_ws/src/magpie_msgs:ro
       - ../core_ws/src/custom_ros_messages:/home/code/msgs_ws/src/custom_ros_messages:ro
-    command: /home/code/h12_sim_scripts/launch_mujoco.sh
+    command: /home/code/h12_sim_scripts/launch_robocasa.sh
 
   ros:
     profiles: [ros]
-    container_name: humanoid_ros
+    container_name: hams_ros
     build:
       context: ..
       dockerfile: docker/RosDockerfile
-    image: humanoid_ros:latest
+    image: hams_ros:latest
     runtime: nvidia
     privileged: true
     shm_size: 4g

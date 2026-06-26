@@ -1,14 +1,14 @@
 #!/bin/bash
 # Usage:
-#   ./docker_run.sh [isaac|mujoco|ros]                -> auto-starts the simulation/workspace
-#   ./docker_run.sh [isaac|mujoco|ros] bash           -> drops to a shell instead
-#   ./docker_run.sh [isaac|mujoco|ros] <exec> <args>  -> runs any command inside the container
+#   ./docker_run.sh [isaac|robocasa|ros]                -> auto-starts the simulation/workspace
+#   ./docker_run.sh [isaac|robocasa|ros] bash           -> drops to a shell instead
+#   ./docker_run.sh [isaac|robocasa|ros] <exec> <args>  -> runs any command inside the container
 #
-# To change the Isaac task or MuJoCo flags, either:
-#   - Drop to bash and invoke launch_isaac.sh / launch_mujoco.sh with your args, or
+# To change the Isaac task or RoboCasa flags, either:
+#   - Drop to bash and invoke launch_isaac.sh / launch_robocasa.sh with your args, or
 #   - Invoke the launcher directly: ./docker_run.sh isaac /home/code/h12_sim_scripts/launch_isaac.sh TASKNAME
 
-SIM=${1:?Usage: ./docker_run.sh [isaac|mujoco|ros] [override command/args...]}
+SIM=${1:?Usage: ./docker_run.sh [isaac|robocasa|ros] [override command/args...]}
 shift
 cd "$(dirname "$0")/../.."
 
@@ -29,7 +29,7 @@ fi
 mkdir -p container_cache/msgs_ws
 
 # ROS_DOMAIN_ID handling. Domain 0 is the real robot's DDS command bus.
-#   - Sims (isaac/mujoco) must never run on it: reject an explicit 0 loudly.
+#   - Sims (isaac/robocasa) must never run on it: reject an explicit 0 loudly.
 #   - The ros profile may use it (real robot), but only after confirming the
 #     interactive prompt below.
 #   - An unset/empty value defaults to 1, the simulation domain.
@@ -59,9 +59,10 @@ if [ $# -gt 0 ] && [ "${1#-}" != "$1" ]; then
     set -- "/home/code/h12_sim_scripts/launch_${SIM}.sh" "$@"
 fi
 
-# Stable container name per sim profile so `docker exec`/`docker logs` work
-# without copy-pasting a generated UUID. --rm cleans it up on exit; if a
-# previous run was killed without cleanup, force-remove the stale name first.
-NAME="humanoid_sim_${SIM}"
+# Stable container name per profile so `docker exec`/`docker logs` work without
+# copy-pasting a generated UUID. The ros profile is the real-robot workspace and
+# drops the "sim" infix; the sims (isaac, robocasa) keep it. --rm cleans it up on
+# exit; if a previous run was killed without cleanup, force-remove the stale name.
+if [ "$SIM" = "ros" ]; then NAME="hams_ros"; else NAME="hams_sim_${SIM}"; fi
 docker rm -f "$NAME" >/dev/null 2>&1 || true
 docker compose -f docker/docker-compose.yml --profile "$SIM" run --rm --remove-orphans --name "$NAME" "$SIM" "$@"

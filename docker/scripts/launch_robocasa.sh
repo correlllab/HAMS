@@ -1,5 +1,5 @@
 #!/bin/bash
-# Usage: ./launch_mujoco.sh [--headless]
+# Usage: ./launch_robocasa.sh [--headless]
 # Windowed MuJoCo sim by default; pass --headless to disable the passive viewer
 # (auto-applied when no DISPLAY is reachable, e.g. SSH without X11 / CI).
 # Sim publishes:
@@ -9,8 +9,8 @@
 set -e
 
 source /opt/ros/humble/setup.bash
-# livox_ros_driver2 (CustomMsg/CustomPoint) is baked into the mujoco image at
-# /opt/livox_ws by MujocoDockerfile. Source it so mujoco_ros_bridge.py can
+# livox_ros_driver2 (CustomMsg/CustomPoint) is baked into the robocasa image at
+# /opt/livox_ws by RobocasaDockerfile. Source it so mujoco_ros_bridge.py can
 # import livox_ros_driver2.msg.
 source /opt/livox_ws/install/setup.bash
 
@@ -19,7 +19,7 @@ source /opt/livox_ws/install/setup.bash
 # (see docker-compose.yml), so they persist across `docker compose run --rm`
 # cycles. Wipe that host directory if you need a clean rebuild.
 MSGS_WS=/home/code/msgs_ws
-echo "[launch_mujoco] building $MSGS_WS"
+echo "[launch_robocasa] building $MSGS_WS"
 (cd "$MSGS_WS" && colcon build --symlink-install \
     --packages-select magpie_msgs custom_ros_messages)
 source "$MSGS_WS/install/setup.bash"
@@ -31,7 +31,7 @@ case " $* " in
     *" --headless "*) ;;
     *)
         if [ -z "${DISPLAY:-}" ]; then
-            echo "[launch_mujoco] no DISPLAY set — forcing --headless"
+            echo "[launch_robocasa] no DISPLAY set — forcing --headless"
             set -- "$@" --headless
         fi
         ;;
@@ -43,5 +43,5 @@ case " $* " in
     *) export MUJOCO_GL=glfw ;;
 esac
 
-cd /home/code/h1_mujoco
+cd /home/code/h1_robocasa
 python h12_mujoco.py "$@"
