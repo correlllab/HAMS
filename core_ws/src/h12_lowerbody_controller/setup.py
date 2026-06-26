@@ -35,8 +35,6 @@ setup(
         'console_scripts': [
             'walking_node = h12_lowerbody_controller.scripts.walking_node:main',
             'fame_node = h12_lowerbody_controller.scripts.fame_node:main',
-            'lowerbody_controller_node = '
-            'h12_lowerbody_controller.scripts.lowerbody_controller_node:main',
         ],
     },
 )

@@ -1,49 +1,82 @@
-# FAME standing/squatting policy (RMA) — ROS deployment config.
-#
-# Consumed by h12_lowerbody_controller.policy.FamePolicy. Paths are relative to
-# this file. The standalone-sim-only fields from the original training config
-# (xml_path, simulation_*, kps_arms, arm-swing perturbations, video) are dropped
-# — in the ROS pipeline the arms are driven by the upper-body IK and observed via
-# /lowstate.
-#
-# Checkpoints: rma_magpie Jun10 run, step 3600 (policy_3600 / encoder_3600),
-# trained with the torso (waist-yaw) nominal at -0.35 rad (see default_angles_arms).
-
 policy_path: "policy_3600.pt"
 encoder_path: "encoder_3600.pt"
+xml_path: "../HomieRL/legged_gym/resources/robots/h1_2/magpie/h1_2_magpie.xml"
 
-# PD gains for the 12 leg joints (the only joints this policy commands).
+# Simulation parameters
+simulation_duration: 60.0
+simulation_dt: 0.002
+control_decimation: 10
+
+# PD gains legs
 kps: [200, 200, 200, 300, 60, 40,
-      200, 200, 200, 300, 60, 40]
-kds: [5.0, 5.0, 5.0, 7.5, 1.0, 0.3,
-      5.0, 5.0, 5.0, 7.5, 1.0, 0.3]
+     200, 200, 200, 300, 60, 40]
 
-# Nominal pose. Legs (12) are commanded; arms (torso + 7L + 7R = 15) are only
-# used to build the observation / e_t (driven by the IK in this stack).
+kds: [5.0, 5.0, 5.0, 7.5, 1.0, 0.3,
+     5.0, 5.0, 5.0, 7.5, 1.0, 0.3]
+
+# PD gains arms (torso + 7 left arm + 7 right arm = 15)
+kps_arms: [500, 500, 500, 500, 500, 500, 500.0,
+          500.0,
+          500, 500, 500, 500, 500, 500, 500.0]
+
+kds_arms: [5.0, 5.0, 5.0, 7.5, 1.0, 0.3, 0.0,
+          0.0,
+     5.0, 5.0, 5.0, 7.5, 1.0, 0.3, 0.0]
+
+# Default joint angles for legs
 default_angles: [0.0, -0.16, 0.0, 0.36, -0.2, 0.0,
                  0.0, -0.16, 0.0, 0.36, -0.2, 0.0]
-# Arm nominal. Index 0 = torso_joint (a waist YAW, MJCF axis 0 0 1) — this run
-# was trained with a -0.35 rad torso offset, so the proprio obs uses (q_torso -
-# (-0.35)). For the obs to match training the ACTUAL waist should be held at
-# -0.35 too (upper_controller torso_target); left at 0 it adds a constant +0.35
-# obs bias the RMA encoder has to absorb.
-default_angles_arms: [-0.35,
-                      0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
-                      0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
 
-# Observation scaling (must match training).
+# torso + 7 left arm + 7 right arm = 15
+# torso (index 0) given a -10 deg (-0.1745 rad) lean offset.
+default_angles_arms: [-0.35,
+                      -0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                      -0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+
+# Scaling factors
 ang_vel_scale: 0.25
 dof_pos_scale: 1.0
 dof_vel_scale: 0.05
 action_scale: 0.25
 cmd_scale: [2.0, 2.0, 0.25]
 
-# RMA shapes: single proprio obs = 76, 3-step history + 3-step z_t -> actor_obs 252.
+# RMA: 3-step proprio history + 3-step z_t -> actor_obs 252
 num_actions: 12
 num_obs: 252
 obs_history_len: 3
 
-# e_t wrist forces (world frame). No wrist F/T sensors in sim -> zeros; the
-# encoder still adapts the legs to the upper-body configuration the IK produces.
+# RMA: hand-only 3D forces (world frame). e_t = 21.
 left_hand_force: [0.0, 0.0, 0.0]
 right_hand_force: [0.0, 0.0, 0.0]
+
+# Initial commands
+cmd_init: [0.0, 0.0, 0.0]
+height_cmd: 1.00
+
+# Magpie gripper: position setpoint for all non-policy actuators (open=0.0).
+gripper_cmd: 0.0
+
+# Right-arm circle perturbation (probes how robust the standing policy is to upper-body motion).
+# Drives right shoulder pitch + roll with a 90° phase difference so the forearm sweeps a circle.
+right_arm_circle:
+  enabled: true
+  freq_hz: 0.5              # one full circle every 2 s
+  shoulder_pitch_amp: 0.5   # rad, ± about center
+  shoulder_pitch_center: 0.0
+  shoulder_roll_amp: 0.3
+  shoulder_roll_center: -0.6  # negative = arm out to the right
+  elbow_target: 1.2         # rad, slight bend so the hand traces a visible arc
+
+# Left-arm triangle perturbation: piecewise-linear sweep through 3 (pitch, roll, elbow) waypoints.
+# Left shoulder_roll is positive to swing the arm out to the left (mirror of the right arm).
+left_arm_triangle:
+  enabled: true
+  period_s: 4.5             # one full triangle per period (1.5 s per edge)
+  vertices:                 # each row: [shoulder_pitch, shoulder_roll, elbow] in rad
+    - [ 0.5,  0.3, 1.0]     # arm up, slightly out
+    - [-0.3,  0.9, 1.0]     # arm down, further out
+    - [ 0.2,  1.2, 1.0]     # arm mid, fully out to the side
+
+# Video recording (when --record is passed; can also be set true here).
+record_video: false
+video_fps: 30
