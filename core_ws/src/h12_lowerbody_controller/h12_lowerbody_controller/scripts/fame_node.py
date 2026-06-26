@@ -19,7 +19,7 @@ import rclpy
 import torch
 import yaml
 from ament_index_python.packages import get_package_share_directory
-from geometry_msgs.msg import Twist
+from geometry_msgs.msg import PoseStamped, Twist
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
 from std_msgs.msg import Float32
@@ -86,19 +86,33 @@ class FameNode(Node):
         # torso IMU back to the pelvis frame using the measured waist yaw. Set
         # False to feed the raw torso IMU (A/B the effect, like the old USE_IMU).
         self.declare_parameter('waist_imu_correction', True)
-        # Warm start: run FAME band-held for this many control ticks so the
-        # zero-seeded obs history flushes and the standing command settles, then
-        # drop the elastic band once (keeping the warmed-up state). Set
-        # disable_elastic_band False to keep the band on (never drop).
-        self.declare_parameter('band_warmup_ticks', 50)
+        # Warm start: keep the robot band-held until the upper-body IK is ready
+        # (frame_task_server starts publishing band_release_topic), then drop the
+        # elastic band once AND reset the policy so its obs/z history refills from
+        # free-standing state instead of the stale band-held states (which made
+        # FAME topple at release). band_max_wait is a fallback if the topic never
+        # arrives. Set disable_elastic_band False to keep the band on (never drop).
         self.declare_parameter('disable_elastic_band', True)
+        self.declare_parameter('band_wait_for_frame_task', True)
+        self.declare_parameter('band_release_topic', '/left_ee_pose')
+        self.declare_parameter('band_max_wait', 30.0)
+        # Diagnostics only (no control effect): when debug_obs_log is True, log the
+        # observation terms / leg targets every debug_log_every ticks and densely
+        # around the band drop. Run with disable_elastic_band:=false to watch the
+        # band-held leg targets (steady => release-transient bug; wild => OOD obs).
+        self.declare_parameter('debug_obs_log', False)
+        self.declare_parameter('debug_log_every', 25)
 
         config_path = self.get_parameter('config_path').get_parameter_value().string_value
         control_hz = self.get_parameter('control_hz').get_parameter_value().double_value
         self._height_cmd = float(self.get_parameter('default_height_cmd').value)
         self._waist_imu_correction = bool(self.get_parameter('waist_imu_correction').value)
-        self._band_warmup_ticks = int(self.get_parameter('band_warmup_ticks').value)
         self._disable_elastic_band = bool(self.get_parameter('disable_elastic_band').value)
+        self._band_wait_for_frame_task = bool(self.get_parameter('band_wait_for_frame_task').value)
+        band_release_topic = str(self.get_parameter('band_release_topic').value)
+        self._band_max_wait_ticks = int(float(self.get_parameter('band_max_wait').value) * control_hz)
+        self._debug_obs_log = bool(self.get_parameter('debug_obs_log').value)
+        self._debug_log_every = max(1, int(self.get_parameter('debug_log_every').value))
 
         with open(config_path, 'r') as f:
             config = yaml.safe_load(f)
@@ -186,39 +200,53 @@ class FameNode(Node):
 
         self._timer = self.create_timer(1.0 / control_hz, self._tick)
 
-        # Warm-start band handling: the policy starts running on the first
-        # /lowstate with the band still holding the robot; the band is dropped
-        # only after band_warmup_ticks policy ticks (see _tick / _try_drop_band).
+        # Warm-start band handling: the policy runs band-held from the first
+        # /lowstate; the band is released only once the upper-body IK is ready
+        # (band_release_topic seen) or band_max_wait elapses, and the policy is
+        # reset at release so it warms up free-standing (see _tick / _release_band).
         self._tick_count = 0
-        self._band_dropped = not self._disable_elastic_band
+        self._band_released = not self._disable_elastic_band
+        self._frame_task_ready = not self._band_wait_for_frame_task
+        self._pending_policy_reset = False
+        self._release_tick: int | None = None
         self._band_wait_logged = False
         self._band_cli = self.create_client(Trigger, '/elastic_band/toggle')
+        self._frame_task_sub = self.create_subscription(
+            PoseStamped, band_release_topic, self._on_frame_task_ready, 10
+        )
 
         self.get_logger().info(
             f'fame_node ready: config={config_path}, control_hz={control_hz}, '
             f'encoder={"on" if self._encoder is not None else "OFF"}, '
-            f'band_warmup_ticks={self._band_warmup_ticks if self._disable_elastic_band else "kept"}'
+            f'band={"held->release on " + band_release_topic if self._disable_elastic_band else "kept on"}'
         )
 
-    def _try_drop_band(self) -> None:
-        '''Non-blocking one-shot drop of the elastic band after warm-up.
+    def _on_frame_task_ready(self, _msg: PoseStamped) -> None:
+        # First upper-body EE pose => frame_task_server IK has initialised and is
+        # holding the arms; safe to release the band and let FAME balance free.
+        self._frame_task_ready = True
 
-        Called from the timer callback once the policy has run band-held for
-        band_warmup_ticks. Retries each tick until the toggle service is up
-        (the policy keeps warming under the band meanwhile); a no-op on stacks
-        without the sim band service.
+    def _release_band(self, reason: str) -> None:
+        '''Release the elastic band once and schedule a policy reset.
+
+        Toggles the sim band off (retrying each tick until the service is up) and
+        sets _pending_policy_reset so _tick clears the band-held obs/z history
+        before the next inference — without this, FAME acts on stale band-held
+        observations at release and topples. A no-op on stacks without the band
+        service.
         '''
         if not self._band_cli.service_is_ready():
             if not self._band_wait_logged:
                 self.get_logger().info(
-                    'warm-up done; waiting for /elastic_band/toggle to drop the band'
+                    f'release condition met ({reason}); waiting for '
+                    f'/elastic_band/toggle service'
                 )
                 self._band_wait_logged = True
             return
-        self._band_dropped = True
-        self.get_logger().info(
-            f'dropping elastic band after {self._tick_count} warm-up ticks'
-        )
+        self._band_released = True
+        self._pending_policy_reset = True
+        self._release_tick = self._tick_count
+        self.get_logger().info(f'releasing elastic band ({reason})')
         future = self._band_cli.call_async(Trigger.Request())
         future.add_done_callback(
             lambda f: self.get_logger().info(
@@ -226,6 +254,14 @@ class FameNode(Node):
                 if f.result() else 'elastic band toggle call failed'
             )
         )
+
+    def _reset_history(self) -> None:
+        '''Clear proprio + latent history for a fresh free-standing warm-up.'''
+        self._obs_history.clear()
+        for _ in range(self._obs_history_len):
+            self._obs_history.append(np.zeros(self._single_obs_dim, dtype=np.float32))
+        self._z_history[:] = 0.0
+        self._action = np.zeros(self._num_actions, dtype=np.float32)
 
     def _on_lowstate(self, msg: LowState) -> None:
         self._lowstate = msg
@@ -257,6 +293,21 @@ class FameNode(Node):
         if self._lowstate is None:
             return
 
+        # Release the band once the upper-body IK is up (or after the timeout),
+        # then reset the policy so the next obs/z history is free-standing rather
+        # than the stale band-held states that topple FAME at release.
+        if not self._band_released:
+            if self._frame_task_ready:
+                self._release_band('frame_task ready')
+            elif self._tick_count >= self._band_max_wait_ticks:
+                self._release_band('band_max_wait timeout')
+        if self._pending_policy_reset:
+            self._reset_history()
+            self._pending_policy_reset = False
+            self.get_logger().info(
+                'reset FAME for fresh free-standing warm-up (band released)'
+            )
+
         motor_state = self._lowstate.motor_state
         q = np.array(
             [motor_state[i].q for i in range(NUM_POLICY_JOINTS)], dtype=np.float32
@@ -270,16 +321,17 @@ class FameNode(Node):
         qj = (q - self._padded_defaults) * self._dof_pos_scale
         dqj = dq * self._dof_vel_scale
 
-        gravity_orientation = get_gravity_orientation(quat)
+        gravity_raw = get_gravity_orientation(quat)
+        gravity_orientation = gravity_raw
         omega_pelvis = omega
+        psi = float(q[NUM_LEG_JOINTS])       # torso_joint: pelvis->torso yaw
+        psi_dot = float(dq[NUM_LEG_JOINTS])
         if self._waist_imu_correction:
             # Rotate the torso-frame IMU readings into the pelvis frame by the
             # measured waist yaw (R_z(psi)), and remove the waist's own yaw rate
             # from the gyro. Exact for this single-DoF (yaw) waist, so the policy
             # sees the pelvis-frame gravity/ang-vel it was trained on.
-            psi = float(q[NUM_LEG_JOINTS])       # torso_joint: pelvis->torso yaw
-            psi_dot = float(dq[NUM_LEG_JOINTS])
-            gravity_orientation = rotate_about_z(gravity_orientation, psi)
+            gravity_orientation = rotate_about_z(gravity_raw, psi)
             omega_pelvis = rotate_about_z(omega, psi)
             omega_pelvis[2] -= psi_dot
         omega_obs = omega_pelvis * self._ang_vel_scale
@@ -312,6 +364,25 @@ class FameNode(Node):
             self._action = self._policy(obs_tensor).detach().numpy().squeeze()
         target_dof_pos = self._action * self._action_scale + self._default_angles
 
+        if self._debug_obs_log:
+            near_drop = (
+                self._release_tick is not None
+                and abs(self._tick_count - self._release_tick) <= 3
+            )
+            if near_drop or self._tick_count % self._debug_log_every == 0:
+                self.get_logger().info(
+                    f'[dbg t={self._tick_count} '
+                    f'band={"on" if not self._band_released else "off"}] '
+                    f'g_raw={np.round(gravity_raw, 3)} '
+                    f'g_corr={np.round(gravity_orientation, 3)} '
+                    f'psi={psi:.3f} psi_dot={psi_dot:.3f} '
+                    f'torso_q={q[NUM_LEG_JOINTS]:.3f}(want '
+                    f'{self._default_angles_arms[0]:.3f}) '
+                    f'|act|={float(np.linalg.norm(self._action)):.3f} '
+                    f'|obs|={float(np.linalg.norm(actor_obs)):.2f} '
+                    f'tgt={np.round(target_dof_pos, 2)}'
+                )
+
         cmd_msg = LowCmd()
         for i in range(NUM_LEG_JOINTS):
             motor = cmd_msg.motor_cmd[i]
@@ -323,11 +394,7 @@ class FameNode(Node):
             motor.kd = float(self._kds[i])
 
         self._cmd_pub.publish(cmd_msg)
-
-        # Warm start: count policy ticks run under the band, then drop it once.
         self._tick_count += 1
-        if not self._band_dropped and self._tick_count >= self._band_warmup_ticks:
-            self._try_drop_band()
 
 
 def main():

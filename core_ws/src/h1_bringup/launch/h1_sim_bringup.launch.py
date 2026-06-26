@@ -144,39 +144,8 @@ def generate_launch_description():
         #     output='screen',
         #     condition=IfCondition(LaunchConfiguration('use_skills')),
         # ),
-        Node(
-            package='h12_safety_layer',
-            executable='safety_node',
-            name='safety_node',
-            parameters=[sim_time_param, ],
-            arguments=['--config', "sim_safety_split.yaml"],
-            output='screen',
-        ),
-
-        # Switchable lower-body RL controller (walk / FAME stand-squat).
-        # On init it goes to the 'home' named config via frame_task_server, holds
-        # the legs at the default stance for home_settle_ticks, then commits FAME
-        # and runs it band-held for policy_warmup_ticks before dropping the elastic
-        # band (FAME keeps its warm-up state and balances the free robot). Switch
-        # via /lowerbody/start_walk or /lowerbody/set_policy (waits for a safe
-        # handover before committing).
-        Node(
-            package='h12_lowerbody_controller',
-            executable='fame_node',
-            name='lowerbody_controller_node',
-            parameters=[sim_time_param, {
-                'active_policy': 'fame',
-                'auto_home_on_init': True,
-                'home_config_name': 'home',
-                'home_settle_ticks': 10,
-                'policy_warmup_ticks': 30,
-                'home_max_wait': 30.0,
-            }],
-            output='screen',
-        ),
-
         
-
+        
         # h12_skills: serves the /skill/* atomic-skill actions (open_door,
         # grasp, pick_place, ...). On startup it waits ~10s each on the vision
         # pipeline + graspgen services, the grippers, and the frame_task / nav
@@ -189,6 +158,35 @@ def generate_launch_description():
         #     output='screen',
         #     condition=IfCondition(LaunchConfiguration('use_skills')),
         # ),
+        
+        # Node(
+        #     package='h12_safety_layer',
+        #     executable='safety_node',
+        #     name='safety_node',
+        #     parameters=[sim_time_param, ],
+        #     arguments=['--config', "sim_safety_split.yaml"],
+        #     output='screen',
+        # ),
+
+        # FAME lower-body RL stand/squat controller: publishes the 12 leg PD
+        # setpoints to the safety layer (the torso + arms are driven by the IK
+        # above and only observed here). It runs band-held until frame_task_server
+        # is up (first /left_ee_pose), then drops the elastic band once and resets
+        # its obs history for a clean free-standing warm-up. Squat height via
+        # /lowerbody/squat_cmd; base velocity via /cmd_vel.
+        Node(
+            package='h12_lowerbody_controller',
+            executable='fame_node',
+            name='lowerbody_controller_node',
+            parameters=[sim_time_param, {
+                'waist_imu_correction': True,
+                'disable_elastic_band': True,
+                'band_wait_for_frame_task': True,
+                'band_release_topic': '/left_ee_pose',
+                'band_max_wait': 30.0,
+            }],
+            output='screen',
+        ),
 
         # Node(
         #     package='rviz2',
