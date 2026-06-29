@@ -53,6 +53,14 @@ TARGET_FRAME = 'graspgenx_target_frame'
 # so the extra budget is only spent on poses that are actually close to reachable.
 SERVO_DURATION_SEC = 15   # primary (iter-0) approach/contact IK move budget [s]
 SERVO_MAX_ITER = 6        # world-frame servo refinement passes per pose
+# Convergence tolerances for the grasp servo, relaxed from base.py's defaults
+# (5 mm / ~1.15 deg). Real-robot IK + pelvis drift rarely settle a 6-DOF grasp
+# pose that tight within SERVO_MAX_ITER passes, so accept a looser world-frame
+# fit as "reached" instead of burning the whole iteration budget and proceeding
+# best-effort anyway. The iter-0 unreachable fast-fail (lin>5cm/ang>0.2rad) still
+# rejects genuinely out-of-reach candidates, so this only loosens the final fit.
+SERVO_LIN_TOL = 0.015     # 15 mm world-position convergence tol (base: 5 mm)
+SERVO_ANG_TOL = 0.05      # ~2.9 deg world-orientation convergence tol (base: ~1.15 deg)
 
 
 
@@ -143,7 +151,8 @@ class GraspSkill:
             if self.servo_frame_to_world(
                     GRASP_FRAMES[arm], approaches_w[i] if have_world else None,
                     approaches_p[i], outer_gh=gh,
-                    duration_sec=SERVO_DURATION_SEC, max_iter=SERVO_MAX_ITER):
+                    duration_sec=SERVO_DURATION_SEC, max_iter=SERVO_MAX_ITER,
+                    lin_tol=SERVO_LIN_TOL, ang_tol=SERVO_ANG_TOL):
                 idx = i
                 break
             if gh.is_cancel_requested or run.remaining() <= 0.0:
@@ -168,7 +177,8 @@ class GraspSkill:
         self.servo_frame_to_world(
             GRASP_FRAMES[arm], grasps_w[idx] if have_world else None,
             grasps_p[idx], outer_gh=gh,
-            duration_sec=SERVO_DURATION_SEC, max_iter=SERVO_MAX_ITER)
+            duration_sec=SERVO_DURATION_SEC, max_iter=SERVO_MAX_ITER,
+            lin_tol=SERVO_LIN_TOL, ang_tol=SERVO_ANG_TOL)
         if not self.close_gripper(arm):
             return run.abort('gripper close failed')
 
