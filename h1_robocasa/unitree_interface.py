@@ -42,6 +42,19 @@ class SimInterface:
         self.dt = self.model.opt.timestep
         self.have_imu = "imu_quat" in resolver.sensor_adr
 
+        # Latched last low_cmd. The PD torque is recomputed EVERY sim step from
+        # these + the CURRENT state (write_ctrl, called from the sim loop), which
+        # emulates the real motor's ~1kHz servo. Computing it only in
+        # low_cmd_handler (50Hz) holds a stale torque for ~20ms, so the kd damping
+        # term lags the true velocity and FAME oscillates then topples ~2.8s after
+        # free-standing -- while the in-loop (per-step PD) stands indefinitely.
+        self._cmd_mode = np.zeros(MOTOR_NUM, dtype=np.int32)
+        self._cmd_q = np.zeros(MOTOR_NUM, dtype=np.float64)
+        self._cmd_dq = np.zeros(MOTOR_NUM, dtype=np.float64)
+        self._cmd_kp = np.zeros(MOTOR_NUM, dtype=np.float64)
+        self._cmd_kd = np.zeros(MOTOR_NUM, dtype=np.float64)
+        self._cmd_tau = np.zeros(MOTOR_NUM, dtype=np.float64)
+
         # initialize channel
         ChannelFactoryInitialize(id=DOMAIN_ID)
         # publish low state
@@ -105,19 +118,38 @@ class SimInterface:
     def low_cmd_handler(self, msg: LowCmd_):
         if self.data is None:
             return
+        # Latch the command only (no data touch, no lock). write_ctrl turns it into
+        # a torque every sim step against the CURRENT state.
+        self.last_cmd_time = time.time()
+        for i in range(self.num_motor):
+            mc = msg.motor_cmd[i]
+            self._cmd_mode[i] = mc.mode
+            self._cmd_q[i] = mc.q
+            self._cmd_dq[i] = mc.dq
+            self._cmd_kp[i] = mc.kp
+            self._cmd_kd[i] = mc.kd
+            self._cmd_tau[i] = mc.tau
+
+    def write_ctrl(self):
+        """Per-sim-step PD: tau + kp*(q*-q) + kd*(dq*-dq) from the latched command
+        and the CURRENT q/dq. Call every step (caller holds the sim lock) so the
+        damping tracks the true velocity instead of a 20ms-stale one."""
+        if self.data is None:
+            return
         r = self.resolver
-        with self._lock:
-            self.last_cmd_time = time.time()
-            # apply control to each motor (tau + kp*(q*-q) + kd*(dq*-dq))
-            for i in range(self.num_motor):
-                ci = int(r.motor_ctrl[i])
+        if self.timeout_detected:
+            self.data.ctrl[r.motor_ctrl] = 0.0
+            return
+        for i in range(self.num_motor):
+            ci = int(r.motor_ctrl[i])
+            if self._cmd_mode[i] == 1:
                 q_cur = self.data.qpos[r.motor_qpos[i]]
                 dq_cur = self.data.qvel[r.motor_qvel[i]]
-                mc = msg.motor_cmd[i]
-                if mc.mode == 1:
-                    self.data.ctrl[ci] = mc.tau + mc.kp * (mc.q - q_cur) + mc.kd * (mc.dq - dq_cur)
-                else:
-                    self.data.ctrl[ci] = 0.0
+                self.data.ctrl[ci] = (self._cmd_tau[i]
+                                      + self._cmd_kp[i] * (self._cmd_q[i] - q_cur)
+                                      + self._cmd_kd[i] * (self._cmd_dq[i] - dq_cur))
+            else:
+                self.data.ctrl[ci] = 0.0
 
     def check_cmd_timeout(self):
         current_time = time.time()

@@ -73,6 +73,10 @@ class PolicyManager:
     def has(self, name: str) -> bool:
         return name in self._policies
 
+    def desired_policy(self) -> Policy | None:
+        """The pending (requested but not yet committed) policy, or None if idle."""
+        return self._policies.get(self._desired) if self._desired is not None else None
+
     # -- control -------------------------------------------------------------
     def request(self, name: str) -> tuple[bool, str]:
         """Request a policy. Returns (accepted, message). Commit happens later

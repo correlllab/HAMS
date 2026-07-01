@@ -42,12 +42,22 @@ from h12_lowerbody_controller.policy import (
     NUM_LEG_JOINTS,
     NUM_POLICY_JOINTS,
     FamePolicy,
+    LegCommand,
     RobotState,
     WalkPolicy,
 )
 from h12_lowerbody_controller.policy_manager import GateConfig, PolicyManager
 
 MOTOR_MODE_PR = 1
+
+# Pre-pose: before engaging the policy, PD-drive the legs to the incoming policy's
+# nominal crouch (band-held) and wait until they settle there. The RMA policy warms
+# up from its trained default pose; released from the straight-leg spawn it can't
+# recover the transition before the band drops. Only once the legs reach nominal do
+# we commit the policy (and, later, release the band).
+PREPOSE_TOL = 0.15          # rad; max |q - nominal| across the 12 legs to count as posed
+PREPOSE_SETTLE_TICKS = 10   # consecutive in-tolerance ticks required (~0.2s @ 50Hz)
+PREPOSE_MAX_TICKS = 400     # ~8s @ 50Hz; commit anyway if the legs never settle (safety)
 
 
 def _share(*parts: str) -> str:
@@ -102,6 +112,8 @@ class LowerBodyControllerNode(Node):
         self._band_cli = self.create_client(Trigger, "/elastic_band/toggle")
         self._awaiting_band_release = False  # policy committed, band not yet released
         self._request_time: float | None = None  # when the pending activation was asked
+        self._prepose_pass = 0   # consecutive ticks the legs have held at nominal (pre-engage)
+        self._prepose_ticks = 0  # total pre-pose ticks so far (for the settle timeout)
 
         lowstate_qos = QoSProfile(reliability=ReliabilityPolicy.BEST_EFFORT,
                                   history=HistoryPolicy.KEEP_LAST, depth=1)
@@ -174,6 +186,18 @@ class LowerBodyControllerNode(Node):
     def _publish_active(self) -> None:
         self._active_pub.publish(String(data=self._manager.active_name or "idle"))
 
+    def _publish_leg(self, leg: LegCommand) -> None:
+        cmd_msg = LowCmd()
+        for i in range(NUM_LEG_JOINTS):
+            m = cmd_msg.motor_cmd[i]
+            m.mode = MOTOR_MODE_PR
+            m.q = float(leg.target_q[i])
+            m.dq = 0.0
+            m.tau = 0.0
+            m.kp = float(leg.kp[i])
+            m.kd = float(leg.kd[i])
+        self._cmd_pub.publish(cmd_msg)
+
     def _release_band(self, reason: str) -> None:
         if self._band_released:
             return
@@ -206,10 +230,27 @@ class LowerBodyControllerNode(Node):
 
         if self._manager.is_pending():
             if self._manager.is_idle():
-                # First activation: engage the policy FIRST so it is actively
-                # driving the legs while the band still holds the robot. The band
-                # is released afterwards (below), once frame_task is ready —
-                # releasing before any policy controls the legs drops the robot.
+                # Pre-pose: PD-drive the legs to the incoming policy's nominal
+                # crouch (band-held) and wait until they settle BEFORE engaging it.
+                # The RMA policy warms up from its trained default pose; from the
+                # straight-leg spawn it can't recover the transition before the band
+                # drops. The band stays held throughout — the release below is gated
+                # on _awaiting_band_release, which we only set once committed.
+                pending = self._manager.desired_policy()
+                if pending is None:
+                    return
+                self._publish_leg(pending.nominal_command())
+                err = float(np.max(np.abs(state.q[:NUM_LEG_JOINTS] - pending.nominal_lower)))
+                self._prepose_ticks += 1
+                self._prepose_pass = self._prepose_pass + 1 if err < PREPOSE_TOL else 0
+                settled = self._prepose_pass >= PREPOSE_SETTLE_TICKS
+                timed_out = self._prepose_ticks >= PREPOSE_MAX_TICKS
+                if not settled and not timed_out:
+                    return  # keep posing; don't engage the policy or drop the band yet
+                self.get_logger().info(
+                    f"legs pre-posed to nominal ({'settled' if settled else 'timeout'}, "
+                    f"err={err:.3f} rad) — engaging {self._manager.desired_name!r}")
+                # Now engage the policy; it drives the legs while the band still holds.
                 self._manager.commit(state)   # resets policy -> clean warm-up
                 self._publish_active()
                 self._awaiting_band_release = not self._band_released
@@ -241,17 +282,7 @@ class LowerBodyControllerNode(Node):
         if self._manager.is_idle():
             return  # nothing requested yet -> band-held, legs uncommanded
 
-        leg = self._manager.run(state)
-        cmd_msg = LowCmd()
-        for i in range(NUM_LEG_JOINTS):
-            m = cmd_msg.motor_cmd[i]
-            m.mode = MOTOR_MODE_PR
-            m.q = float(leg.target_q[i])
-            m.dq = 0.0
-            m.tau = 0.0
-            m.kp = float(leg.kp[i])
-            m.kd = float(leg.kd[i])
-        self._cmd_pub.publish(cmd_msg)
+        self._publish_leg(self._manager.run(state))
 
 
 def main():

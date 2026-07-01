@@ -64,9 +64,6 @@ services:
       - ../h1_robocasa:/home/code/h1_robocasa
       - ../CL_Assets:/home/code/CL_Assets:ro
       - ./scripts:/home/code/h12_sim_scripts
-      # RoboCasa reads the lower-body policy YAML for the initial bent-knee
-      # stance. Mount only this package instead of the full ROS workspace.
-      - ../core_ws/src/h12_lowerbody_controller:/home/code/core_ws/src/h12_lowerbody_controller:ro
       # Only the message packages the magpi sim needs — keeps the rest of
       # core_ws (vision_pipeline weights, FAST_LIO, root-owned host build
       # dir, etc.) out of this container. The parent rw mount persists
