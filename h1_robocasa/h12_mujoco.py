@@ -1,5 +1,6 @@
 import argparse
 import math
+import os
 import random
 import threading
 import time
@@ -7,6 +8,7 @@ import time
 import mujoco
 import numpy as np
 import rclpy.executors
+import yaml
 
 from mujoco_ros_bridge import init_ros, shutdown_ros
 import mujoco.viewer
@@ -31,6 +33,71 @@ VIEW_CAM_DISTANCE  = 3.0     # m, camera height above lookat (straight down)
 VIEW_CAM_AZIMUTH   = 90.0    # deg, ADDED to robot yaw — rotates the top-down image
 VIEW_CAM_ELEVATION = -90.0   # deg, -90 = look straight down
 VIEW_CAM_LOOKAT_DZ = 0.0     # m, focal point offset along z (irrelevant for top-down)
+
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+LOWERBODY_INIT_CONFIG_ENV = "H12_LOWERBODY_INIT_CONFIG"
+LOWERBODY_SOURCE_CONFIG = os.path.join(
+    REPO_ROOT, "core_ws", "src", "h12_lowerbody_controller", "policies", "fame", "fame.yaml",
+)
+LOWERBODY_INSTALL_CONFIG = os.path.join(
+    REPO_ROOT, "core_ws", "install", "h12_lowerbody_controller", "share",
+    "h12_lowerbody_controller", "policies", "fame", "fame.yaml",
+)
+NUM_LEG_JOINTS = 12
+NUM_MOTORS = 27
+
+
+def _resolve_lowerbody_policy_config(config_path=None):
+    candidates = [
+        config_path,
+        os.environ.get(LOWERBODY_INIT_CONFIG_ENV),
+        LOWERBODY_SOURCE_CONFIG,
+        LOWERBODY_INSTALL_CONFIG,
+    ]
+
+    for path in candidates:
+        if not path:
+            continue
+        resolved = os.path.abspath(os.path.expanduser(path))
+        if os.path.isfile(resolved):
+            return resolved
+
+    raise FileNotFoundError(
+        "could not find lower-body FAME policy YAML; checked: "
+        + ", ".join(os.path.abspath(os.path.expanduser(p)) for p in candidates if p)
+        + f". Set {LOWERBODY_INIT_CONFIG_ENV} to override."
+    )
+
+
+def _initial_motor_qpos_from_policy_config(config_path=None):
+    """Build the 27-motor spawn pose from the active lower-body policy YAML.
+
+    The policy YAML owns the nominal pose used by the controller. Legs come from
+    default_angles; torso + arms come from default_angles_arms when available and
+    otherwise remain zero.
+    """
+    qpos = np.zeros(NUM_MOTORS, dtype=float)
+    config_path = _resolve_lowerbody_policy_config(config_path)
+    with open(config_path, "r") as f:
+        cfg = yaml.safe_load(f)
+
+    leg_angles = np.asarray(cfg["default_angles"], dtype=float)
+    if leg_angles.shape != (NUM_LEG_JOINTS,):
+        raise ValueError(
+            f"{config_path}: default_angles must contain {NUM_LEG_JOINTS} leg entries"
+        )
+    qpos[:NUM_LEG_JOINTS] = leg_angles
+
+    upper_angles = cfg.get("default_angles_arms")
+    if upper_angles is not None:
+        upper_angles = np.asarray(upper_angles, dtype=float)
+        if upper_angles.shape != (NUM_MOTORS - NUM_LEG_JOINTS,):
+            raise ValueError(
+                f"{config_path}: default_angles_arms must contain "
+                f"{NUM_MOTORS - NUM_LEG_JOINTS} torso/arm entries"
+            )
+        qpos[NUM_LEG_JOINTS:] = upper_angles
+    return qpos, config_path
 
 
 def _frame_viewer_on_robot(handle, data, body_id):
@@ -100,20 +167,20 @@ def sim_loop(task, viewer=True, layout=None, style=None, seed=None):
     resolver = NameResolver(model)  # ROS<->sim name map for the DDS / sensor bridges
 
     # Clean, contact-free initial state. RoboCasa's zero-action settling loop
-    # perturbs the pose during reset, so reset every actuated joint to 0 (all-zero
-    # spawn pose), zero all velocities, and re-place the pelvis. At the zero pose
-    # the arms jut forward and can overlap the counter, so place_robot_collision_free
-    # auto-fits floor clearance AND backs the base away (the robot's -x) until no
-    # robot geom penetrates a fixture, keeping the least-penetrating spot if it
-    # can't fully clear. For an upright standing spawn instead, write
-    # h1_2_robosuite.nominal_stance_vector() to the motor qpos here.
+    # perturbs the pose during reset, so restore a controller-compatible bent-knee
+    # stance from the lower-body policy YAML, zero all velocities, and re-place the
+    # pelvis. place_robot_collision_free auto-fits floor clearance AND backs the
+    # base away (the robot's -x) until no robot geom penetrates a fixture, keeping
+    # the least-penetrating spot if it can't fully clear.
     try:
-        data.qpos[resolver.motor_qpos] = 0.0
+        init_qpos, init_config = _initial_motor_qpos_from_policy_config()
+        data.qpos[resolver.motor_qpos] = init_qpos
         data.qvel[:] = 0.0
         h1_2_robosuite.place_robot_collision_free(
             env, env.init_robot_base_pos,
             h1_2_robosuite._euler_to_wxyz(getattr(env, "init_robot_base_ori", None)),
         )
+        print(f"[h12_mujoco] initial stance from {init_config}")
     except Exception as e:
         print(f"[h12_mujoco] clean reset skipped: {e}")
 
@@ -132,7 +199,7 @@ def sim_loop(task, viewer=True, layout=None, style=None, seed=None):
         base_dof = int(model.jnt_dofadr[fj])
         anchor = data.xpos[band_body_id].copy()
         anchor[2] += 0.01
-        band = ElasticBand(anchor, length=0, stiffness=1e3, damping=1e3)
+        band = ElasticBand(anchor, length=0, stiffness=2e3, damping=1e3)
         print(f"[h12_mujoco] elastic band on torso anchored at {anchor.round(3)}")
     except Exception as e:
         print(f"[h12_mujoco] elastic band setup skipped: {e}")

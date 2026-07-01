@@ -143,13 +143,13 @@ def generate_launch_description():
         # Switchable lower-body RL controller (walk / FAME stand-squat).
         # Auto-engages the FAME standing policy; switch via /lowerbody/start_walk
         # or /lowerbody/set_policy (waits for a safe handover before committing).
-        # Node(
-        #     package='h12_lowerbody_controller',
-        #     executable='lowerbody_controller_node',
-        #     name='lowerbody_controller_node',
-        #     parameters=[sim_time_param, {'active_policy': 'fame'}],
-        #     output='screen',
-        # ),
+        Node(
+            package='h12_lowerbody_controller',
+            executable='lowerbody_controller_node',
+            name='lowerbody_controller_node',
+            parameters=[sim_time_param, {'active_policy': 'fame'}],
+            output='screen',
+        ),
 
         # graspgen_server: GraspGenX 6-DOF grasp-planning service (`graspgen`).
         # Heavy GPU model (checkpoints + magpie gripper description), so it's
