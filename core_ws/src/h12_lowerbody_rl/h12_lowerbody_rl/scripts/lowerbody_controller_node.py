@@ -38,20 +38,20 @@ from std_msgs.msg import Float32, String
 from std_srvs.srv import Trigger
 from unitree_hg.msg import LowCmd, LowState
 
-from h12_lowerbody_controller.policy import (
+from h12_lowerbody_rl.policy import (
     NUM_LEG_JOINTS,
     NUM_POLICY_JOINTS,
     FamePolicy,
     RobotState,
     WalkPolicy,
 )
-from h12_lowerbody_controller.policy_manager import GateConfig, PolicyManager
+from h12_lowerbody_rl.policy_manager import GateConfig, PolicyManager
 
 MOTOR_MODE_PR = 1
 
 
 def _share(*parts: str) -> str:
-    return os.path.join(get_package_share_directory("h12_lowerbody_controller"), *parts)
+    return os.path.join(get_package_share_directory("h12_lowerbody_rl"), *parts)
 
 
 class LowerBodyControllerNode(Node):

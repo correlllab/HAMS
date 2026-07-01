@@ -102,7 +102,7 @@ def generate_launch_description():
         # or /lowerbody/set_policy (waits for a safe handover before committing).
         # Only launched once the start position has been verified.
         Node(
-            package='h12_lowerbody_controller',
+            package='h12_lowerbody_rl',
             executable='lowerbody_controller_node',
             name='lowerbody_controller_node',
             parameters=[sim_time_param, {'active_policy': 'fame'}],

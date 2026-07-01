@@ -65,7 +65,6 @@ def generate_launch_description():
         DeclareLaunchArgument('use_sliders', default_value='true'),
         DeclareLaunchArgument('use_nav', default_value='true'),
         DeclareLaunchArgument('use_skills', default_value='true'),
-        DeclareLaunchArgument('use_mjpc', default_value='true'),
         DeclareLaunchArgument('model_logging', default_value='true'),
         DeclareLaunchArgument('model_visualization', default_value='true'),
         DeclareLaunchArgument('model_clear_logs', default_value='true'),
@@ -141,32 +140,11 @@ def generate_launch_description():
             output='screen',
         ),
 
-        # MJPC lower-body controller (skeleton): whole-body MuJoCo-MPC planning,
-        # legs-only output to the safety layer's LOWER split (rt/safety/lowcmd_lower_in).
-        # Gated by use_mjpc (default off). Like safety_node, it's an rclpy node whose
-        # raw-DDS control loop runs in a worker thread; its own flags come through
-        # `arguments` and it ignores the injected --ros-args (parse_known_args).
-        # --require_sportstate false because the robocasa twin publishes only
-        # rt/lowstate; it reads ROS_DOMAIN_ID from the env (export it in the launching
-        # shell). NOTE: live Strategy switching reads stdin, which a launched node has
-        # none of — run mjpc_node standalone (docker exec -it) to switch interactively.
-        Node(
-            package='h12_lowerbody_controller',
-            executable='mjpc_node',
-            name='mjpc_node',
-            arguments=['--split', 'lower', '--require_sportstate', 'false',
-                       '--ctrl_hz', '200', '--task', 'Stabilize H12 Magpie', '--strategy', '6',
-                       '--disable_elastic_band', 'true'],
-            parameters=[sim_time_param],
-            output='screen',
-            condition=IfCondition(LaunchConfiguration('use_mjpc')),
-        ),
-
         # Switchable lower-body RL controller (walk / FAME stand-squat).
         # Auto-engages the FAME standing policy; switch via /lowerbody/start_walk
         # or /lowerbody/set_policy (waits for a safe handover before committing).
         # Node(
-        #     package='h12_lowerbody_controller',
+        #     package='h12_lowerbody_rl',
         #     executable='lowerbody_controller_node',
         #     name='lowerbody_controller_node',
         #     parameters=[sim_time_param, {'active_policy': 'fame'}],

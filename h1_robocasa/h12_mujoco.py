@@ -37,11 +37,11 @@ VIEW_CAM_LOOKAT_DZ = 0.0     # m, focal point offset along z (irrelevant for top
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 LOWERBODY_INIT_CONFIG_ENV = "H12_LOWERBODY_INIT_CONFIG"
 LOWERBODY_SOURCE_CONFIG = os.path.join(
-    REPO_ROOT, "core_ws", "src", "h12_lowerbody_controller", "policies", "fame", "fame.yaml",
+    REPO_ROOT, "core_ws", "src", "h12_lowerbody_rl", "policies", "fame", "fame.yaml",
 )
 LOWERBODY_INSTALL_CONFIG = os.path.join(
-    REPO_ROOT, "core_ws", "install", "h12_lowerbody_controller", "share",
-    "h12_lowerbody_controller", "policies", "fame", "fame.yaml",
+    REPO_ROOT, "core_ws", "install", "h12_lowerbody_rl", "share",
+    "h12_lowerbody_rl", "policies", "fame", "fame.yaml",
 )
 NUM_LEG_JOINTS = 12
 NUM_MOTORS = 27

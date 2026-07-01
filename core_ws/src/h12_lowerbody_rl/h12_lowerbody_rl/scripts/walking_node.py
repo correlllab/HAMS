@@ -44,7 +44,7 @@ def get_gravity_orientation(quaternion):
 
 
 def _default_example_path(filename: str) -> str:
-    pkg_share = get_package_share_directory('h12_lowerbody_controller')
+    pkg_share = get_package_share_directory('h12_lowerbody_rl')
     return str(Path(pkg_share) / 'policies' / 'walk' / filename)
 
 

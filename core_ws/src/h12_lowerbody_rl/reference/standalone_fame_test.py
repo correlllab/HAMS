@@ -12,7 +12,7 @@ import os
 import numpy as np
 import mujoco
 from ament_index_python.packages import get_package_share_directory
-from h12_lowerbody_controller.policy import FamePolicy, RobotState
+from h12_lowerbody_rl.policy import FamePolicy, RobotState
 
 POLICY_JOINT_NAMES = [
     "left_hip_yaw_joint", "left_hip_pitch_joint", "left_hip_roll_joint",
@@ -26,7 +26,7 @@ POLICY_JOINT_NAMES = [
     "right_elbow_joint", "right_wrist_roll_joint", "right_wrist_pitch_joint", "right_wrist_yaw_joint",
 ]
 XML = "/home/code/CL_Assets/mujoco_assets/h1_2_magpie.xml"
-CFG = os.path.join(get_package_share_directory("h12_lowerbody_controller"), "policies", "fame", "fame.yaml")
+CFG = os.path.join(get_package_share_directory("h12_lowerbody_rl"), "policies", "fame", "fame.yaml")
 
 
 def quat_rpy(q):

@@ -1,6 +1,6 @@
 # FAME standing/squatting policy (RMA) — ROS deployment config.
 #
-# Consumed by h12_lowerbody_controller.policy.FamePolicy. Paths are relative to
+# Consumed by h12_lowerbody_rl.policy.FamePolicy. Paths are relative to
 # this file. The standalone-sim-only fields from the original training config
 # (xml_path, simulation_*, kps_arms, arm-swing perturbations, video) are dropped
 # — in the ROS pipeline the arms are driven by the upper-body IK and observed via

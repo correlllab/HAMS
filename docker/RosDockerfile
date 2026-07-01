@@ -361,7 +361,7 @@ RUN mkdir -p "$GRASPGENX_CHECKPOINT_DIR" "$GRASPGENX_GRIPPER_CFG_DIR"
 # MuJoCo MPC (MJPC) — badinkajink/mujoco_mpc @ extended_hw, cloned to
 # /home/code/mujoco_mpc, built, and installed so later code can `import
 # mujoco_mpc` (the gRPC Agent API for real-time predictive control, e.g. the
-# h12_lowerbody_controller).
+# h12_lowerbody_rl).
 #
 # Appended last (same reasoning as the GraspGenX / nav2 / tk blocks above) so
 # iterating here can't bust the heavy apt / pip / SAM / robocasa layers earlier

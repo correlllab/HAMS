@@ -3,7 +3,7 @@ from glob import glob
 
 from setuptools import find_packages, setup
 
-package_name = 'h12_lowerbody_controller'
+package_name = 'h12_lowerbody_rl'
 
 setup(
     name=package_name,
@@ -33,13 +33,10 @@ setup(
     },
     entry_points={
         'console_scripts': [
-            'walking_node = h12_lowerbody_controller.scripts.walking_node:main',
-            'fame_node = h12_lowerbody_controller.scripts.fame_node:main',
+            'walking_node = h12_lowerbody_rl.scripts.walking_node:main',
+            'fame_node = h12_lowerbody_rl.scripts.fame_node:main',
             'lowerbody_controller_node = '
-            'h12_lowerbody_controller.scripts.lowerbody_controller_node:main',
-            # MJPC (MuJoCo MPC) DDS control node — Python skeleton analog of the
-            # fork's C++ h12_control_node.cc (drives the mujoco_mpc gRPC Agent).
-            'mjpc_node = h12_lowerbody_controller.scripts.mjpc_node:main',
+            'h12_lowerbody_rl.scripts.lowerbody_controller_node:main',
         ],
     },
 )

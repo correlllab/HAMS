@@ -55,7 +55,7 @@ FREE_JOINT_NAME = "floating_base_joint"
 _INIT_QPOS = np.zeros(27)
 
 # Nominal standing stance, keyed by ROS joint name. Legs are the walking policy's
-# default_angles (core_ws/.../h12_lowerbody_controller/example/h1_2.yaml) so the
+# default_angles (core_ws/.../h12_lowerbody_rl/example/h1_2.yaml) so the
 # stance matches what the policy will hold (clean handoff). Arms are tucked
 # down/back (shoulder_pitch +1.0, elbow +0.3) so the hands clear the kitchen
 # fixtures — at zeros the hands jut ~0.31 m forward into the counter. Everything
