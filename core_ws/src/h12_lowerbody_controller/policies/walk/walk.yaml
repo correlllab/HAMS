@@ -12,6 +12,12 @@ control_decimation: 10
 kps: [200, 200, 200, 300, 40, 40, 200, 200, 200, 300, 40, 40]
 kds: [2.5, 2.5, 2.5, 4, 2, 2,  2.5, 2.5, 2.5, 4, 2, 2]
 
+# Joint position clipping for the 12 commanded leg motors.
+legs_motor_pos_lower_limit_list: [-0.37, -3.13, -0.42, -0.11, -0.887334, -0.181799,
+                                  -0.37, -3.13, -3.13, -0.11, -0.887334, -0.181799]
+legs_motor_pos_upper_limit_list: [0.37, 2.49, 3.13, 2.18, 0.513599, 0.181799,
+                                  0.37, 2.49, 0.42, 2.18, 0.513599, 0.181799]
+
 # Training nominal: hip_pitch = -0.16 (slight forward lean). FAME shares this
 # exact nominal by joint name, so the walk<->FAME handover has no leg-target jump.
 default_angles: [0.0, -0.16, 0.0, 0.36, -0.2, 0.0,

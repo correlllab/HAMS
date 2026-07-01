@@ -104,6 +104,32 @@ def _load_yaml(config_path: str) -> dict:
         return yaml.safe_load(f)
 
 
+def _load_leg_position_limits(cfg: dict) -> tuple[np.ndarray | None, np.ndarray | None]:
+    lower = cfg.get("legs_motor_pos_lower_limit_list")
+    upper = cfg.get("legs_motor_pos_upper_limit_list")
+    if lower is None or upper is None:
+        return None, None
+
+    lower = np.asarray(lower, dtype=np.float32)
+    upper = np.asarray(upper, dtype=np.float32)
+    if lower.shape != (NUM_LEG_JOINTS,) or upper.shape != (NUM_LEG_JOINTS,):
+        raise ValueError(
+            "legs_motor_pos_*_limit_list must each contain "
+            f"{NUM_LEG_JOINTS} entries"
+        )
+    return lower, upper
+
+
+def _clip_leg_positions(
+    target: np.ndarray,
+    lower: np.ndarray | None,
+    upper: np.ndarray | None,
+) -> np.ndarray:
+    if lower is None or upper is None:
+        return target
+    return np.clip(target, lower, upper)
+
+
 # --------------------------------------------------------------------------- #
 # Policy interface
 # --------------------------------------------------------------------------- #
@@ -133,7 +159,12 @@ class Policy(ABC):
         The controller drives the legs here — band-held — before committing the
         policy, so the RMA warm-up starts from the trained default crouch instead
         of the straight-leg spawn (which it can't recover before band release)."""
-        return LegCommand(target_q=self.nominal_lower.copy(), kp=self._kps, kd=self._kds)
+        target = _clip_leg_positions(
+            self.nominal_lower.copy(),
+            getattr(self, "_lower_limit", None),
+            getattr(self, "_upper_limit", None),
+        )
+        return LegCommand(target_q=target, kp=self._kps, kd=self._kds)
 
 
 # --------------------------------------------------------------------------- #
@@ -163,6 +194,7 @@ class WalkPolicy(Policy):
         self._cmd_scale = np.asarray(cfg["cmd_scale"], dtype=np.float32)
         self._num_actions = int(cfg["num_actions"])
         self._num_obs = int(cfg["num_obs"])
+        self._lower_limit, self._upper_limit = _load_leg_position_limits(cfg)
 
         self._policy = torch.jit.load(policy_path)
         self._policy.eval()
@@ -202,6 +234,7 @@ class WalkPolicy(Policy):
         with torch.no_grad():
             self._action = self._policy(torch.from_numpy(self._obs).unsqueeze(0)).numpy().squeeze()
         target = self._action * self._action_scale + self._default_angles
+        target = _clip_leg_positions(target, self._lower_limit, self._upper_limit)
         return LegCommand(target_q=target, kp=self._kps, kd=self._kds)
 
 
@@ -243,6 +276,7 @@ class FamePolicy(Policy):
         self._num_actions = int(cfg["num_actions"])                     # 12
         self._num_obs = int(cfg["num_obs"])                            # 252
         self._obs_history_len = int(cfg["obs_history_len"])            # 3
+        self._lower_limit, self._upper_limit = _load_leg_position_limits(cfg)
         self._left_force = np.asarray(cfg.get("left_hand_force", [0, 0, 0]), dtype=np.float32)
         self._right_force = np.asarray(cfg.get("right_hand_force", [0, 0, 0]), dtype=np.float32)
         self._hand_force_provider = hand_force_provider
@@ -335,4 +369,5 @@ class FamePolicy(Policy):
         with torch.no_grad():
             self._action = self._policy(torch.from_numpy(actor_obs).unsqueeze(0)).numpy().squeeze()
         target = self._action * self._action_scale + self._default_angles
+        target = _clip_leg_positions(target, self._lower_limit, self._upper_limit)
         return LegCommand(target_q=target, kp=self._kps, kd=self._kds)

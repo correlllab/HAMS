@@ -32,6 +32,26 @@ VIEW_CAM_AZIMUTH   = 90.0    # deg, ADDED to robot yaw — rotates the top-down 
 VIEW_CAM_ELEVATION = -90.0   # deg, -90 = look straight down
 VIEW_CAM_LOOKAT_DZ = 0.0     # m, focal point offset along z (irrelevant for top-down)
 
+NUM_LEG_JOINTS = 12
+NUM_MOTORS = 27
+INIT_LEG_POS = np.array([
+    0.0, -0.16, 0.0, 0.36, -0.2, 0.0,
+    0.0, -0.16, 0.0, 0.36, -0.2, 0.0,
+], dtype=float)
+INIT_ARM_POS = np.array([
+    0.0,
+    0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+    0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+], dtype=float)
+
+
+def _initial_motor_qpos():
+    """Build the 27-motor spawn pose without depending on controller configs."""
+    qpos = np.concatenate([INIT_LEG_POS, INIT_ARM_POS])
+    if qpos.shape != (NUM_MOTORS,):
+        raise ValueError(f"initial motor pose must contain {NUM_MOTORS} entries")
+    return qpos
+
 
 def _frame_viewer_on_robot(handle, data, body_id):
     """Set the passive viewer free camera's spawn pose as a function of the robot
@@ -100,20 +120,20 @@ def sim_loop(task, viewer=True, layout=None, style=None, seed=None):
     resolver = NameResolver(model)  # ROS<->sim name map for the DDS / sensor bridges
 
     # Clean, contact-free initial state. RoboCasa's zero-action settling loop
-    # perturbs the pose during reset, so reset every actuated joint to 0 (all-zero
-    # spawn pose), zero all velocities, and re-place the pelvis. At the zero pose
-    # the arms jut forward and can overlap the counter, so place_robot_collision_free
-    # auto-fits floor clearance AND backs the base away (the robot's -x) until no
-    # robot geom penetrates a fixture, keeping the least-penetrating spot if it
-    # can't fully clear. For an upright standing spawn instead, write
-    # h1_2_robosuite.nominal_stance_vector() to the motor qpos here.
+    # perturbs the pose during reset, so restore a baked-in bent-knee stance,
+    # zero all velocities, and re-place the pelvis. Upper-body motors remain at
+    # zero. place_robot_collision_free auto-fits floor clearance AND backs the
+    # base away (the robot's -x) until no robot geom penetrates a fixture, keeping
+    # the least-penetrating spot if it can't fully clear.
     try:
-        data.qpos[resolver.motor_qpos] = 0.0
+        init_qpos = _initial_motor_qpos()
+        data.qpos[resolver.motor_qpos] = init_qpos
         data.qvel[:] = 0.0
         h1_2_robosuite.place_robot_collision_free(
             env, env.init_robot_base_pos,
             h1_2_robosuite._euler_to_wxyz(getattr(env, "init_robot_base_ori", None)),
         )
+        print("[h12_mujoco] initial stance from baked-in sim defaults")
     except Exception as e:
         print(f"[h12_mujoco] clean reset skipped: {e}")
 
