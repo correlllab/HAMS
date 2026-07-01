@@ -132,7 +132,11 @@ def sim_loop(task, viewer=True, layout=None, style=None, seed=None):
         base_dof = int(model.jnt_dofadr[fj])
         anchor = data.xpos[band_body_id].copy()
         anchor[2] += 0.01
-        band = ElasticBand(anchor, length=0, stiffness=1e3, damping=1e3)
+        # Stiff enough to hold the LIMP robot near-upright through the lowerbody
+        # controller's band-held idle phase (~20s of frame_task arm-home startup
+        # before FAME engages); at stiffness=1e3 it pitched forward to ~60deg and
+        # FAME inherited a toppling robot. Static tilt ~ gravity_torque/stiffness.
+        band = ElasticBand(anchor, length=0, stiffness=1e4, damping=1e3)
         print(f"[h12_mujoco] elastic band on torso anchored at {anchor.round(3)}")
     except Exception as e:
         print(f"[h12_mujoco] elastic band setup skipped: {e}")
@@ -223,6 +227,12 @@ def sim_loop(task, viewer=True, layout=None, style=None, seed=None):
                     _frame_viewer_on_robot(handle, data, cam_body_id)
             except Exception as e:
                 print(f"[h12_mujoco] viewer camera framing skipped: {e}")
+    # Fall logger: watch the torso's uprightness + height and log once when the
+    # robot falls, including how long it stood after the elastic band was released.
+    _fall_logged = False
+    _band_release_t = None
+    _band_prev_on = bool(band.enabled) if band is not None else False
+
     try:
         while True:
             start_time = time.time()
@@ -236,7 +246,28 @@ def sim_loop(task, viewer=True, layout=None, style=None, seed=None):
                         band.evaluate_force(data.xpos[band_body_id], data.qvel[base_dof:base_dof + 3])
                         if band.enabled else 0.0
                     )
+                if sim_interface is not None:
+                    # Recompute the DDS command's PD torque every sim step (emulates
+                    # the real motor's ~1kHz servo) instead of only on each 50Hz
+                    # /lowcmd, which held a stale-damping torque and toppled FAME.
+                    sim_interface.write_ctrl()
                 mujoco.mj_step(model, data)
+                # --- fall logger ---
+                if band is not None and _band_prev_on and not band.enabled:
+                    _band_release_t = float(data.time)
+                    _band_prev_on = False
+                    print(f"[fall-logger] elastic band released at t={data.time:.2f}s", flush=True)
+                if band_body_id >= 0 and not _fall_logged:
+                    _upz = float(data.xmat[band_body_id][8])   # torso z-axis . world up (1=upright)
+                    _torso_h = float(data.xpos[band_body_id][2])
+                    if _upz < 0.5 or _torso_h < 0.5:
+                        _fall_logged = True
+                        _since = (f"{data.time - _band_release_t:.2f}s after band release"
+                                  if _band_release_t is not None
+                                  else f"{data.time:.2f}s (band still on)")
+                        print(f"[fall-logger] *** ROBOT FELL at sim t={data.time:.2f}s — stood "
+                              f"{_since} (uprightness={_upz:.2f}, torso_h={_torso_h:.2f}) ***",
+                              flush=True)
                 env.update_state()                  # REQUIRED before _check_success
                 ros_bridge.tick()                   # /clock + camera + lidar + imu
                 done = measurement.tick()

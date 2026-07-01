@@ -113,8 +113,12 @@ class Policy(ABC):
     name: str
 
     #: 12 leg default angles, in /lowstate order — the nominal pose used by the
-    #: handover gate to decide a switch is safe.
+    #: handover gate to decide a switch is safe, and to pre-pose the legs before
+    #: the policy is engaged. ``_kps``/``_kds`` are the leg PD gains each concrete
+    #: policy loads from its YAML.
     nominal_lower: np.ndarray
+    _kps: np.ndarray
+    _kds: np.ndarray
 
     @abstractmethod
     def reset(self, state: RobotState) -> None:
@@ -123,6 +127,13 @@ class Policy(ABC):
     @abstractmethod
     def compute(self, state: RobotState) -> LegCommand:
         """Run one inference step and return a 12-joint leg setpoint."""
+
+    def nominal_command(self) -> LegCommand:
+        """A PD setpoint that just holds the nominal leg pose (``default_angles``).
+        The controller drives the legs here — band-held — before committing the
+        policy, so the RMA warm-up starts from the trained default crouch instead
+        of the straight-leg spawn (which it can't recover before band release)."""
+        return LegCommand(target_q=self.nominal_lower.copy(), kp=self._kps, kd=self._kds)
 
 
 # --------------------------------------------------------------------------- #
