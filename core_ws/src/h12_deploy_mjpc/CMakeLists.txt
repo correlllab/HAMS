@@ -49,7 +49,7 @@ set(MJPC_BUILD "${MJPC_ROOT}/build" CACHE PATH "MJPC CMake build tree (hydrated 
 if(H12_BUILD_CONTROLLER AND EXISTS "${MJPC_BUILD}")
   find_package(rclcpp REQUIRED)
   find_package(unitree_hg REQUIRED)
-  find_package(nav_msgs REQUIRED)
+  find_package(unitree_go REQUIRED)
   find_package(std_srvs REQUIRED)
   find_package(Threads REQUIRED)
 
@@ -82,24 +82,24 @@ if(H12_BUILD_CONTROLLER AND EXISTS "${MJPC_BUILD}")
   file(GLOB_RECURSE _mjpc_absl "${MJPC_BUILD}/libabsl_*.a")
   set(MJPC_LIBRARIES ${_mjpc_core} ${_mjpc_absl})
 
-  add_executable(controller_node src/controller_node.cpp)
-  target_include_directories(controller_node PRIVATE
+  add_executable(mjpc_deploy_lowerbody_controller src/mjpc_deploy_lowerbody_controller.cpp)
+  target_include_directories(mjpc_deploy_lowerbody_controller PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/src" ${MJPC_INCLUDE_DIRS})
-  ament_target_dependencies(controller_node rclcpp unitree_hg nav_msgs std_srvs)
-  target_link_libraries(controller_node
+  ament_target_dependencies(mjpc_deploy_lowerbody_controller rclcpp unitree_hg unitree_go std_srvs)
+  target_link_libraries(mjpc_deploy_lowerbody_controller
     -Wl,--start-group ${MJPC_LIBRARIES} -Wl,--end-group
     "${MUJOCO_LIBRARY}" Threads::Threads ${CMAKE_DL_LIBS})
   # lld (LTO-aware) is required to link the clang-13 bitcode archives above.
   if(EXISTS "/usr/bin/ld.lld-13")
-    target_link_options(controller_node PRIVATE -fuse-ld=/usr/bin/ld.lld-13)
+    target_link_options(mjpc_deploy_lowerbody_controller PRIVATE -fuse-ld=/usr/bin/ld.lld-13)
   endif()
-  set_target_properties(controller_node PROPERTIES
+  set_target_properties(mjpc_deploy_lowerbody_controller PROPERTIES
     BUILD_RPATH "/usr/local/lib;${MJPC_BUILD}/lib"
     INSTALL_RPATH "/usr/local/lib;${MJPC_BUILD}/lib")
-  install(TARGETS controller_node DESTINATION lib/${PROJECT_NAME})
-  message(STATUS "h12_deploy_mjpc: controller_node ENABLED (MJPC build tree ${MJPC_BUILD})")
+  install(TARGETS mjpc_deploy_lowerbody_controller DESTINATION lib/${PROJECT_NAME})
+  message(STATUS "h12_deploy_mjpc: mjpc_deploy_lowerbody_controller ENABLED (MJPC build tree ${MJPC_BUILD})")
 else()
-  message(STATUS "h12_deploy_mjpc: controller_node SKIPPED "
+  message(STATUS "h12_deploy_mjpc: mjpc_deploy_lowerbody_controller SKIPPED "
                  "(no MJPC build tree at '${MJPC_BUILD}'; run in the ros container after "
                  "launch_ros.sh hydrates it, or pass -DH12_BUILD_CONTROLLER=OFF). "
                  "Estimator + launch still build.")

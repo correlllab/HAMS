@@ -30,6 +30,11 @@ inline constexpr const char* JOINT_NAMES[kNU] = {
     "LhipY", "LhipP", "LhipR", "Lknee", "LankP", "LankR",
     "RhipY", "RhipP", "RhipR", "Rknee", "RankP", "RankR"};
 
+// pelvis -> IMU site translation (from h1_2_handless.xml); used to back the
+// estimator's IMU-site SportModeState out to the pelvis. Must match the
+// estimator's IMU_OFFSET exactly (both ends agree or the reconstruction is wrong).
+inline constexpr double IMU_OFFSET[3] = {-0.04452, -0.01891, 0.27756};
+
 // audit H2: bound the emitted position target so the FULL commanded torque the
 // onboard/safety PD applies -- tau_ff + KP*(tgt-q) + KV*(0-dq) -- stays within
 // 0.9x the safety estop. Upstream only bounded the KP*(tgt-q) term and ignored

@@ -170,8 +170,8 @@ def generate_launch_description():
         ),
         Node(
             package='h12_deploy_mjpc',
-            executable='controller_node',
-            name='h12_deploy_mjpc_controller',
+            executable='mjpc_deploy_lowerbody_controller',
+            name='mjpc_deploy_lowerbody_controller',
             parameters=[sim_time_param],
             # mjpc resolves task model XMLs relative to MJPC_TASKS_DIR (else
             # <exe>/../mjpc/tasks, which doesn't exist for this ROS binary -> a

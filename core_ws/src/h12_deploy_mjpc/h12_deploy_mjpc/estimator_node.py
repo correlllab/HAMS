@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """Proprioceptive floating-base estimator for the MJPC lower-body controller.
 
-Publishes a world-frame pelvis pose+twist as nav_msgs/Odometry on a dedicated
-topic (default /h12_deploy_mjpc/base_state) from REAL proprioception only -- the
-robot's IMU (orientation + gyro) and joint encoders (q, dq) on /lowstate -- via
-leg odometry on the H1-2 MuJoCo kinematics. The MJPC controller consumes this
-directly into the planner's floating-base state.
+Publishes the IMU-site base pose+velocity as unitree_go/msg/SportModeState on a
+dedicated topic (default /h12_deploy_mjpc/sportstate_est) from REAL proprioception
+only -- the robot's IMU (orientation + gyro) and joint encoders (q, dq) on
+/lowstate -- via leg odometry on the H1-2 MuJoCo kinematics. The MJPC controller
+reads orientation+gyro from /lowstate and backs the site pose out to the pelvis
+for the planner's floating-base state.
 
 METHOD -- leg odometry, planted-foot constraint:
   A foot in contact is stationary in the world, so the base velocity is whatever
@@ -23,20 +24,38 @@ foot is gated on an actual contact estimate (height above the floor, plus leg
 load when tau_est is available) and NON-contact feet are DROPPED from the update
 entirely -- not merely down-weighted.
 
-MESSAGE CONTRACT (we own both ends; kept explicit to avoid frame bugs):
-  pose.position          = world-frame pelvis position (x, y, z)
-  pose.orientation       = pelvis orientation, ROS xyzw (from IMU wxyz)
-  twist.linear           = WORLD-frame pelvis linear velocity  -> MuJoCo qvel[0:3]
-  twist.angular          = BODY-frame angular velocity (gyro)  -> MuJoCo qvel[3:6]
-  header.frame_id="odom", child_frame_id="pelvis"
+MESSAGE CONTRACT -- unitree_go/msg/SportModeState (IMU-site, matches original):
+  position[0:3] = world IMU-site position  = pelvis_world_pos + R*IMU_OFFSET
+  velocity[0:3] = world IMU-site linvel    = base_v + (R*gyro) x (R*IMU_OFFSET)
+  (imu_state / mode / foot_* left default; the controller reads orientation + gyro
+   from /lowstate and backs the site pose out to the pelvis.)
+  R = quat2mat(/lowstate IMU quaternion, wxyz).
 
 Offline self-test (no ROS, no robot):
   python3 estimator_node.py --selftest
 """
+from __future__ import annotations  # ROS-typed annotations stay lazy so offline --selftest imports
+
 import argparse
 import os
 
 import numpy as np
+
+# ROS imports are guarded so the offline --selftest (and importing the pure
+# estimator helpers for unit tests) works without a sourced ROS environment. In
+# the deploy image these all resolve; EstimatorNode is only instantiated on the
+# ROS path, so the `object` fallback for its base class is never used there.
+try:
+    import rclpy
+    from rclpy.node import Node
+    from rclpy.qos import HistoryPolicy, QoSProfile, ReliabilityPolicy
+    from unitree_go.msg import SportModeState
+    from unitree_hg.msg import LowState
+    _HAVE_ROS = True
+except ModuleNotFoundError:
+    Node = object   # EstimatorNode(Node) still defines; only instantiated with ROS present
+    _HAVE_ROS = False
+
 
 try:
     import mujoco
@@ -194,12 +213,100 @@ def _selftest(m, data, foot_ids, load_idx, height_C, home_q):
     # a lifted (swing) foot must be excluded by the contact gate
     fz = foot_z.copy(); fz[0] = floor_z + 0.20
     cm_swing = contact_mask(fz, floor_z, None, load_idx, 0.04, 5.0)
+    # site transform (identity quat -> R=I): site_p = pelvis + IMU_OFFSET, site_v = v
+    Rident = _quat2mat(ident)
+    roff = Rident @ IMU_OFFSET
+    site_p = np.array([0.0, 0.0, h]) + roff
+    site_v = v + np.cross(Rident @ np.zeros(3), roff)
+    site_ok = (np.allclose(site_p, [IMU_OFFSET[0], IMU_OFFSET[1], h + IMU_OFFSET[2]], atol=1e-9)
+               and np.linalg.norm(site_v) < 1e-6)
+    print(f"[selftest] site xform: site_p={np.round(site_p, 4)} site_v={np.round(site_v, 4)} "
+          f"(expect pelvis+IMU_OFFSET, ~0)")
     ok = (abs(h - float(home_q[2])) < 0.05 and bool(cm.all()) and np.linalg.norm(v) < 1e-6
-          and np.linalg.norm(v2) > 1e-4 and not bool(cm_swing[0]) and bool(cm_swing[1]))
+          and np.linalg.norm(v2) > 1e-4 and not bool(cm_swing[0]) and bool(cm_swing[1])
+          and site_ok)
     print(f"[selftest] swing-foot gate: contacts={cm_swing.tolist()} (expect [False, True])")
     print(f"[selftest] {'PASS' if ok else 'FAIL'}")
     return 0 if ok else 1
 
+
+
+class EstimatorNode(Node):
+    def __init__(self):
+        super().__init__("h12_deploy_mjpc_estimator")
+        self.declare_parameter("scene", _DEFAULT_SCENE)
+        self.declare_parameter("publish_hz", 200.0)
+        self.declare_parameter("base_state_topic", "/h12_deploy_mjpc/sportstate_est")
+        self.declare_parameter("lowstate_topic", "/lowstate")
+        self.declare_parameter("contact_height_m", 0.04)   # foot within this of floor -> contact
+        self.declare_parameter("contact_load_nm", 5.0)     # min knee+ankle |tau| when tau usable
+        scene = self.get_parameter("scene").value
+        self._hz = float(self.get_parameter("publish_hz").value)
+        self._hthr = float(self.get_parameter("contact_height_m").value)
+        self._lthr = float(self.get_parameter("contact_load_nm").value)
+
+        self.get_logger().info(f"loading H1-2 kinematics: {scene}")
+        (self._m, self._data, self._foot_ids, self._load_idx,
+            self._height_C, _home_q) = load_model_and_calibrate(scene)
+        self._res = np.zeros(6)
+        self._ekf = RWEKF(3.0, 0.02, 0.3, 5.0, 11.34, 20, 1.0 /self._hz)
+        self._pos_xy = np.zeros(2)
+        self._ls = None
+        self._warned_short = False
+
+        qos = QoSProfile(reliability=ReliabilityPolicy.BEST_EFFORT,
+                            history=HistoryPolicy.KEEP_LAST, depth=1)
+        self.create_subscription(LowState, self.get_parameter("lowstate_topic").value,
+                                    self._on_lowstate, qos)
+        self._pub = self.create_publisher(
+            SportModeState, self.get_parameter("base_state_topic").value, 10)
+        self.create_timer(1.0 / self._hz, self._tick)
+        self.get_logger().info(
+            f"estimator ready: publishing {self.get_parameter('base_state_topic').value} "
+            f"@ {self._hz:.0f}Hz (contact gate: height<{self._hthr}m + load>{self._lthr}Nm)")
+
+    def _on_lowstate(self, msg: LowState):
+        self._ls = msg
+
+    def _tick(self):
+        ls = self._ls
+        if ls is None:
+            return
+        if len(ls.motor_state) < NJ and not self._warned_short:
+            self.get_logger().warn(
+                f"/lowstate has {len(ls.motor_state)} motors (< {NJ}); reading available")
+            self._warned_short = True
+        n = min(NJ, len(ls.motor_state))
+        q = np.zeros(NJ); dq = np.zeros(NJ); tau = np.zeros(NJ)
+        for i in range(n):
+            q[i] = ls.motor_state[i].q
+            dq[i] = ls.motor_state[i].dq
+            tau[i] = ls.motor_state[i].tau_est
+        quat = np.asarray(ls.imu_state.quaternion, dtype=float)   # wxyz
+        gyro = np.asarray(ls.imu_state.gyroscope, dtype=float)     # body frame
+
+        floor_z, foot_z, base_height, vfeet = leg_kinematics(
+            self._m, self._data, self._foot_ids, self._height_C, q, dq, quat, gyro, self._res)
+        contact = contact_mask(foot_z, floor_z, tau, self._load_idx, self._hthr, self._lthr)
+        v = self._ekf.update(vfeet, contact, tau, self._load_idx)
+
+        dt = 1.0 / self._hz
+        self._pos_xy += v[0:2] * dt
+
+        # IMU-site pose+velocity (matches original_estimator; controller backs it
+        # out to the pelvis with the same raw IMU quat + offset). Orientation and
+        # gyro are NOT published here -- the controller reads them from /lowstate.
+        R = _quat2mat(quat)
+        roff = R @ IMU_OFFSET
+        omega_w = R @ gyro
+        site_p = np.array([self._pos_xy[0], self._pos_xy[1], base_height]) + roff
+        site_v = v + np.cross(omega_w, roff)
+
+        msg = SportModeState()
+        for k in range(3):
+            msg.position[k] = float(site_p[k])
+            msg.velocity[k] = float(site_v[k])
+        self._pub.publish(msg)
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
@@ -212,121 +319,10 @@ def main():
         m, data, foot_ids, load_idx, height_C, home_q = load_model_and_calibrate(args.scene)
         raise SystemExit(_selftest(m, data, foot_ids, load_idx, height_C, home_q))
 
-    # ROS imports deferred so --selftest runs without a sourced ROS environment.
-    import rclpy
-    from rclpy.node import Node
-    from rclpy.qos import HistoryPolicy, QoSProfile, ReliabilityPolicy
-    from nav_msgs.msg import Odometry
-    from unitree_hg.msg import LowState
-
-    class EstimatorNode(Node):
-        def __init__(self):
-            super().__init__("h12_deploy_mjpc_estimator")
-            self.declare_parameter("scene", _DEFAULT_SCENE)
-            self.declare_parameter("publish_hz", 200.0)
-            self.declare_parameter("base_state_topic", "/h12_deploy_mjpc/base_state")
-            self.declare_parameter("lowstate_topic", "/lowstate")
-            self.declare_parameter("contact_height_m", 0.04)   # foot within this of floor -> contact
-            self.declare_parameter("contact_load_nm", 5.0)     # min knee+ankle |tau| when tau usable
-            self.declare_parameter("zero_yaw", False)          # remove initial heading (default: real yaw, as upstream)
-            scene = self.get_parameter("scene").value
-            self._hz = float(self.get_parameter("publish_hz").value)
-            self._hthr = float(self.get_parameter("contact_height_m").value)
-            self._lthr = float(self.get_parameter("contact_load_nm").value)
-            self._zero_yaw = bool(self.get_parameter("zero_yaw").value)
-
-            self.get_logger().info(f"loading H1-2 kinematics: {scene}")
-            (self._m, self._data, self._foot_ids, self._load_idx,
-             self._height_C, _home_q) = load_model_and_calibrate(scene)
-            self._res = np.zeros(6)
-            self._ekf = RWEKF(3.0, 0.02, 0.3, 5.0, 11.34, 20, 1.0 /self._hz)
-            self._pos_xy = np.zeros(2)
-            self._ls = None
-            self._warned_short = False
-            # Yaw-align the published base frame to the robot's INITIAL heading so
-            # it "faces +x" as the Stabilize task assumes (its CoM / capture-point
-            # costs are +x-forward; a yawed spawn otherwise makes the planner fight
-            # the heading). Captured on the first sample as a rigid Rz(-yaw0).
-            self._yaw0 = None
-            self._Rz = np.eye(3)
-            self._qcorr = np.array([1.0, 0.0, 0.0, 0.0])
-
-            qos = QoSProfile(reliability=ReliabilityPolicy.BEST_EFFORT,
-                             history=HistoryPolicy.KEEP_LAST, depth=1)
-            self.create_subscription(LowState, self.get_parameter("lowstate_topic").value,
-                                     self._on_lowstate, qos)
-            self._pub = self.create_publisher(
-                Odometry, self.get_parameter("base_state_topic").value, 10)
-            self.create_timer(1.0 / self._hz, self._tick)
-            self.get_logger().info(
-                f"estimator ready: publishing {self.get_parameter('base_state_topic').value} "
-                f"@ {self._hz:.0f}Hz (contact gate: height<{self._hthr}m + load>{self._lthr}Nm)")
-
-        def _on_lowstate(self, msg: LowState):
-            self._ls = msg
-
-        def _tick(self):
-            ls = self._ls
-            if ls is None:
-                return
-            if len(ls.motor_state) < NJ and not self._warned_short:
-                self.get_logger().warn(
-                    f"/lowstate has {len(ls.motor_state)} motors (< {NJ}); reading available")
-                self._warned_short = True
-            n = min(NJ, len(ls.motor_state))
-            q = np.zeros(NJ); dq = np.zeros(NJ); tau = np.zeros(NJ)
-            for i in range(n):
-                q[i] = ls.motor_state[i].q
-                dq[i] = ls.motor_state[i].dq
-                tau[i] = ls.motor_state[i].tau_est
-            quat = np.asarray(ls.imu_state.quaternion, dtype=float)   # wxyz
-            gyro = np.asarray(ls.imu_state.gyroscope, dtype=float)     # body frame
-
-            floor_z, foot_z, base_height, vfeet = leg_kinematics(
-                self._m, self._data, self._foot_ids, self._height_C, q, dq, quat, gyro, self._res)
-            contact = contact_mask(foot_z, floor_z, tau, self._load_idx, self._hthr, self._lthr)
-            v = self._ekf.update(vfeet, contact, tau, self._load_idx)
-
-            dt = 1.0 / self._hz
-            self._pos_xy += v[0:2] * dt
-
-            # Capture the initial yaw once, then rotate the published base frame by
-            # Rz(-yaw0) so the robot faces +x (matches the Stabilize task frame).
-            if self._zero_yaw and self._yaw0 is None:
-                self._yaw0 = float(np.arctan2(2.0 * (quat[0] * quat[3] + quat[1] * quat[2]),
-                                              1.0 - 2.0 * (quat[2] ** 2 + quat[3] ** 2)))
-                c, s = float(np.cos(self._yaw0)), float(np.sin(self._yaw0))
-                self._Rz = np.array([[c, s, 0.0], [-s, c, 0.0], [0.0, 0.0, 1.0]])
-                self._qcorr = np.array([np.cos(self._yaw0 / 2.0), 0.0, 0.0,
-                                        -np.sin(self._yaw0 / 2.0)])
-                self.get_logger().info(
-                    "[estimator] yaw-aligned base frame: removing initial yaw %.1f deg"
-                    % np.degrees(self._yaw0))
-            q_pub = np.zeros(4)
-            mujoco.mju_mulQuat(q_pub, self._qcorr, np.asarray(quat, dtype=float))
-            pos_pub = self._Rz @ np.array([self._pos_xy[0], self._pos_xy[1], base_height])
-            v_pub = self._Rz @ v
-
-            odom = Odometry()
-            odom.header.stamp = self.get_clock().now().to_msg()
-            odom.header.frame_id = "odom"
-            odom.child_frame_id = "pelvis"
-            odom.pose.pose.position.x = float(pos_pub[0])
-            odom.pose.pose.position.y = float(pos_pub[1])
-            odom.pose.pose.position.z = float(pos_pub[2])
-            # IMU quat is wxyz; ROS geometry_msgs/Quaternion is xyzw.
-            odom.pose.pose.orientation.w = float(q_pub[0])
-            odom.pose.pose.orientation.x = float(q_pub[1])
-            odom.pose.pose.orientation.y = float(q_pub[2])
-            odom.pose.pose.orientation.z = float(q_pub[3])
-            # Contract: twist.linear = WORLD-frame linvel; twist.angular = BODY-frame gyro.
-            odom.twist.twist.linear.x = float(v_pub[0])
-            odom.twist.twist.linear.y = float(v_pub[1])
-            odom.twist.twist.linear.z = float(v_pub[2])
-            odom.twist.twist.angular.x = float(gyro[0])
-            odom.twist.twist.angular.y = float(gyro[1])
-            odom.twist.twist.angular.z = float(gyro[2])
-            self._pub.publish(odom)
+    if not _HAVE_ROS:
+        raise SystemExit(
+            "ROS 2 (rclpy/unitree_go/unitree_hg) is not available in this environment; "
+            "only offline --selftest can run here.")
 
     rclpy.init()
     node = EstimatorNode()

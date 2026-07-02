@@ -5,8 +5,8 @@
   <version>0.0.0</version>
   <description>MJPC lower-body balance controller for the Unitree H1-2: a rclcpp
     node embedding mjpc::Agent (fed unitree_hg /lowstate + a proprioceptive
-    nav_msgs/Odometry base estimate) publishing 12-leg setpoints to the safety
-    layer, plus a rclpy proprioceptive base estimator. Ported from
+    unitree_go/SportModeState base estimate) publishing 12-leg setpoints to the
+    safety layer, plus a rclpy proprioceptive base estimator. Ported from
     badinkajink/mujoco_mpc@extended_hw:mjpc/deploy.</description>
   <maintainer email="maxlconway@gmail.com">maxconway</maintainer>
   <license>Apache-2.0</license>
@@ -17,11 +17,11 @@
   <!-- C++ controller -->
   <depend>rclcpp</depend>
   <depend>unitree_hg</depend>
-  <depend>nav_msgs</depend>
+  <depend>unitree_go</depend>
   <depend>std_srvs</depend>
   <!-- mujoco_mpc (mjpc::Agent) is provided by the deploy image at MJPC_ROOT, not rosdep -->
 
-  <!-- Python estimator (nav_msgs / unitree_hg already covered by <depend> above) -->
+  <!-- Python estimator (unitree_go / unitree_hg already covered by <depend> above) -->
   <exec_depend>rclpy</exec_depend>
   <exec_depend>python3-numpy</exec_depend>
   <!-- mujoco (python) is pip-installed in the image; no rosdep key -->
