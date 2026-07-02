@@ -1,0 +1,7 @@
+# Minimal runtime params for the MJPC lower-body controller. Everything else
+# (ctrl_hz, strategy=stand, ramp/hold/blend timings, gains, torque clamp,
+# synchronous planning) is hardcoded in controller_node.cpp.
+/**:
+  ros__parameters:
+    gravity_ff: 0.85      # gravity feedforward scale (tau = gravity_ff * qfrc_bias)
+    plan_rate_hz: 80.0    # synchronous planner iterations per second

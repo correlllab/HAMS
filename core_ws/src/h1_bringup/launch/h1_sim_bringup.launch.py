@@ -69,6 +69,7 @@ def generate_launch_description():
         DeclareLaunchArgument('model_visualization', default_value='true'),
         DeclareLaunchArgument('model_clear_logs', default_value='true'),
         DeclareLaunchArgument('rviz_config', default_value=default_rviz),
+        DeclareLaunchArgument('use_mjpc_lowerbody', default_value='true'),
 
         nav_launch,
 
@@ -115,13 +116,16 @@ def generate_launch_description():
             output='screen',
         ),
 
-        # vision foundation-model services (gemini + sam, served by model_server)
+        # vision foundation-model services (gemini + sam, served by model_server).
+        # Gated on use_skills so a lower-body-only run (use_skills:=false) doesn't
+        # load the heavy vision ML and steal CPU from the MJPC planner.
         Node(
             package='model_server',
             executable='gemini_server',
             name='gemini_server',
             parameters=[sim_time_param, model_log_params],
             output='screen',
+            condition=IfCondition(LaunchConfiguration('use_skills')),
         ),
         Node(
             package='model_server',
@@ -129,6 +133,7 @@ def generate_launch_description():
             name='sam_server',
             parameters=[sim_time_param, model_log_params],
             output='screen',
+            condition=IfCondition(LaunchConfiguration('use_skills')),
         ),
 
         Node(
@@ -150,6 +155,32 @@ def generate_launch_description():
         #     parameters=[sim_time_param, {'active_policy': 'fame'}],
         #     output='screen',
         # ),
+
+        # MJPC lower-body balance controller (h12_deploy_mjpc): a proprioceptive
+        # base estimator feeding an embedded-mjpc::Agent controller that drives the
+        # 12 leg joints (upper body owned by frame_task IK, split safety mode).
+        # Disable with use_mjpc_lowerbody:=false.
+        Node(
+            package='h12_deploy_mjpc',
+            executable='estimator_node',
+            name='h12_deploy_mjpc_estimator',
+            parameters=[sim_time_param],
+            output='screen',
+            condition=IfCondition(LaunchConfiguration('use_mjpc_lowerbody')),
+        ),
+        Node(
+            package='h12_deploy_mjpc',
+            executable='controller_node',
+            name='h12_deploy_mjpc_controller',
+            parameters=[sim_time_param],
+            # mjpc resolves task model XMLs relative to MJPC_TASKS_DIR (else
+            # <exe>/../mjpc/tasks, which doesn't exist for this ROS binary -> a
+            # null model -> mj_makeData segfault). Point it at the runtime-hydrated
+            # build tree that matches the linked mjpc libs.
+            additional_env={'MJPC_TASKS_DIR': '/home/code/mujoco_mpc/build/mjpc/tasks'},
+            output='screen',
+            condition=IfCondition(LaunchConfiguration('use_mjpc_lowerbody')),
+        ),
 
         # graspgen_server: GraspGenX 6-DOF grasp-planning service (`graspgen`).
         # Heavy GPU model (checkpoints + magpie gripper description), so it's

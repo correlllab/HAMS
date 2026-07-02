@@ -3,17 +3,28 @@
 <package format="3">
   <name>h12_deploy_mjpc</name>
   <version>0.0.0</version>
-  <description>TODO: Package description</description>
+  <description>MJPC lower-body balance controller for the Unitree H1-2: a rclcpp
+    node embedding mjpc::Agent (fed unitree_hg /lowstate + a proprioceptive
+    nav_msgs/Odometry base estimate) publishing 12-leg setpoints to the safety
+    layer, plus a rclpy proprioceptive base estimator. Ported from
+    badinkajink/mujoco_mpc@extended_hw:mjpc/deploy.</description>
   <maintainer email="maxlconway@gmail.com">maxconway</maintainer>
-  <license>TODO: License declaration</license>
+  <license>Apache-2.0</license>
 
   <buildtool_depend>ament_cmake</buildtool_depend>
+  <buildtool_depend>ament_cmake_python</buildtool_depend>
 
+  <!-- C++ controller -->
   <depend>rclcpp</depend>
-  <depend>rclpy</depend>
+  <depend>unitree_hg</depend>
+  <depend>nav_msgs</depend>
+  <depend>std_srvs</depend>
+  <!-- mujoco_mpc (mjpc::Agent) is provided by the deploy image at MJPC_ROOT, not rosdep -->
 
-  <test_depend>ament_lint_auto</test_depend>
-  <test_depend>ament_lint_common</test_depend>
+  <!-- Python estimator (nav_msgs / unitree_hg already covered by <depend> above) -->
+  <exec_depend>rclpy</exec_depend>
+  <exec_depend>python3-numpy</exec_depend>
+  <!-- mujoco (python) is pip-installed in the image; no rosdep key -->
 
   <export>
     <build_type>ament_cmake</build_type>
