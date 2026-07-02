@@ -42,3 +42,7 @@
 [submodule "core_ws/src/magpie_control"]
 	path = core_ws/src/magpie_control
 	url = git@github.com:correlllab/magpie_control.git
+[submodule "mujoco_mpc"]
+	path = mujoco_mpc
+	url = git@github.com:badinkajink/mujoco_mpc.git
+	branch = extended_hw_patched

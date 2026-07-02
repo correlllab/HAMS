@@ -358,7 +358,7 @@ RUN grep -viE '^psutil==' /opt/graspgenx-constraints.txt \
 RUN mkdir -p "$GRASPGENX_CHECKPOINT_DIR" "$GRASPGENX_GRIPPER_CFG_DIR"
 
 # -----------------------------------------------------------------------------
-# MuJoCo MPC (MJPC) — badinkajink/mujoco_mpc @ extended_hw, cloned to
+# MuJoCo MPC (MJPC) — badinkajink/mujoco_mpc @ extended_hw_patched, cloned to
 # /home/code/mujoco_mpc, built, and installed so later code can `import
 # mujoco_mpc` (the gRPC Agent API for real-time predictive control, e.g. the
 # h12_lowerbody_rl).
@@ -371,9 +371,15 @@ RUN mkdir -p "$GRASPGENX_CHECKPOINT_DIR" "$GRASPGENX_GRIPPER_CFG_DIR"
 # alone is ~10-20 min, so expect a long build (and it links best with several GB
 # of RAM at -j$(nproc); lower -j if it OOMs).
 #
-# `/home/code/mujoco_mpc` is safe to bake: the ros service only bind-mounts
-# /home/code subdirs (core_ws, h12_sim_scripts), never /home/code itself, so the
-# baked clone + install survive at runtime.
+# DEV LOOP: /home/code/mujoco_mpc is a BUILD-TIME-ONLY checkout — it is compiled,
+# its package is installed into dist-packages (the DURABLE import target), its
+# build tree is stashed to /opt/mjpc-build-seed, and then the source clone is
+# REMOVED (step 4). At runtime the docker-compose `ros` service bind-mounts the
+# ../mujoco_mpc submodule back over /home/code/mujoco_mpc (host-editable source),
+# and launch_ros.sh hydrates a persistent build cache from the seed so the first
+# in-container `rebuild_mjpc.sh` is incremental, not a cold ~15-min rebuild.
+# The submodule + MJPC_REF are pinned to the SAME patched-fork SHA so the mounted
+# source matches the baked install byte-for-byte until a deliberate bump.
 # -----------------------------------------------------------------------------
 
 # 1. C++ build deps. Mirrors upstream CI (.github/workflows/build.yml): clang-13
@@ -400,15 +406,21 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libgl1-mesa-dev libxinerama-dev libxcursor-dev libxrandr-dev libxi-dev \
     && rm -rf /var/lib/apt/lists/*
 
-# 2. Clone the fork into /home/code, PINNED to a commit of extended_hw via the
-#    MJPC_REF arg. The fork moves fast (new C++ tasks land often) and the
-#    agent_server is COMPILED from this checkout, so the baked binary only knows
-#    the tasks present at MJPC_REF — bump it (edit here or `--build-arg
-#    MJPC_REF=<sha>`) to pull newer tasks; that re-clones AND recompiles. Pinning
-#    keeps the build reproducible despite the moving branch + Docker layer cache
-#    (a bare `--branch extended_hw` would cache the first-ever clone forever).
-ARG MJPC_REF=7a60c2dee1c7e2b4877398f21f6d23bf7ebf3542
-RUN git clone --branch extended_hw --single-branch \
+# 2. Clone the fork into /home/code, PINNED to a commit of extended_hw_patched
+#    via the MJPC_REF arg. extended_hw_patched = extended_hw + the three build
+#    fixes that used to be sed'd in here (ui_agent_server removal, magpie
+#    patch->copy, case-insensitive .STL globs), now carried as real commits so
+#    the mounted submodule source and this baked build are byte-identical — a
+#    hard requirement for the runtime incremental-build cache to stay warm.
+#    The fork moves fast and agent_server is COMPILED from this checkout, so the
+#    baked binary only knows the tasks present at MJPC_REF — bump it (edit here or
+#    `--build-arg MJPC_REF=<sha>`, AND move the submodule gitlink to match) to
+#    pull newer tasks; that re-clones AND recompiles. Pinning keeps the build
+#    reproducible despite the moving branch + Docker layer cache.
+#    NOTE: extended_hw_patched must be PUSHED to the fork before this layer can
+#    build (it is fetched over https here, with no build-time SSH keys).
+ARG MJPC_REF=934c59a9d6f95b5fdab348cc50939a9106846ecf
+RUN git clone --branch extended_hw_patched --single-branch \
         https://github.com/badinkajink/mujoco_mpc.git /home/code/mujoco_mpc \
     && git -C /home/code/mujoco_mpc checkout --quiet "${MJPC_REF}"
 
@@ -431,60 +443,53 @@ RUN grep -viE '^(grpcio|grpcio-tools|grpcio-status|protobuf|mujoco)==' \
     && PIP_CONSTRAINT=/opt/mjpc-constraints.txt pip install --no-cache-dir \
         grpcio grpcio-tools protobuf "mujoco==3.2.3"
 
-# 4. Build the C++ agent_server, then install the importable `mujoco_mpc` package.
-#
-#    Two upstream gotchas, both fatal if skipped:
-#      (a) setup.py's distutils command order is build_py -> build_ext, and
-#          build_py's copy_task_assets asserts `build/mjpc/tasks` already exists.
-#          That dir is only produced by CMake (build_ext), so `setup.py install`
-#          on a fresh clone dies before compiling anything. Fix: run the CMake
-#          build FIRST (below); the install's build_ext re-config is then an
-#          incremental no-op and build_py finds the assets. Building just
-#          agent_server is enough — its libmjpc link dep pulls the copy_resources
-#          / copy_model_resources ALL targets that populate build/mjpc/tasks.
-#      (b) the extended_hw fork DELETED the standalone `ui_agent_server`
-#          executable (mjpc/grpc/CMakeLists.txt:251 — only the mjpc_ui_agent_service
-#          static lib remains), but setup.py still tries to `--target` and copy it,
-#          which aborts Ninja with "unknown target". Patch both references out.
-#      (c) the fork derives its H1-2 magpie-gripper model by applying
-#          h1_2_modified_magpie.xml.patch to the base model, but that patch is stale
-#          against the pinned h1_mujoco@ef83c84 base (2 of 6 hunks reject on the
-#          ankle/foot geoms), so `patch` exits non-zero and aborts copy_model_resources
-#          — a hard dependency of libmjpc, hence of agent_server. We rewrite that one
-#          command to a direct copy of the base model: exactly the "directly copy files
-#          bc patches are broken" workaround the fork's own contributors already use
-#          elsewhere in this CMakeLists. The gripperless base is fine for lower-body
-#          work; nothing here selects the magpie task. (Drop this once the fork repins
-#          h1_mujoco or regenerates the patch.)
-#      (d) the fork's H1-2 (and inspire-hand) meshes are UPPERCASE .STL (the Unitree
-#          convention), but setup.py's copy_task_assets globs are case-sensitive
-#          (rglob("*.stl")), so those meshes never reach site-packages and the H1-2
-#          task fails to load at runtime ("Error opening file .../h1_2/pelvis.STL").
-#          We make the asset globs case-insensitive. (dm_control/menagerie tasks use
-#          lowercase .obj/.png, so only the .STL tasks were affected — which is why
-#          Cartpole/Humanoid load but "Lean H12" did not.)
+# 4. Build the C++ agent_server, install the importable `mujoco_mpc` package,
+#    stage libmujoco, STASH the warm build tree as the incremental-cache seed,
+#    then REMOVE the source clone. The three source fixes that used to be sed'd
+#    in here now live as commits on extended_hw_patched, so the seed and the
+#    runtime-mounted submodule source are byte-identical (a hard requirement for
+#    the runtime incremental-build cache) and there is NO in-Dockerfile patching.
+#    The original gotchas still hold and are satisfied by those committed fixes
+#    plus build-first ordering:
+#      (a) setup.py's build_py.copy_task_assets asserts build/mjpc/tasks exists,
+#          which only CMake (build_ext) produces — so run the CMake build FIRST;
+#          the install's build_ext re-config is then an incremental no-op. Building
+#          just agent_server pulls the copy_resources / copy_model_resources ALL
+#          targets that populate build/mjpc/tasks.
+#      (b) extended_hw deleted the standalone ui_agent_server executable, so the
+#          fork's setup.py no longer --targets/copies it (it aborted Ninja).
+#      (c) the stale h1_2_modified_magpie.xml.patch is replaced by a direct CMake
+#          copy of the base model in the fork's mjpc/tasks/CMakeLists.txt.
+#      (d) copy_task_assets globs are case-insensitive in the fork, so the H1-2
+#          UPPERCASE .STL meshes reach site-packages.
 #
 #    Install via --single-version-externally-managed --record: copies the FULL
-#    build_lib tree (agent_server binary + generated proto/ + task XML/mesh
-#    assets) into site-packages AND does NOT easy_install setup.py's heavy
-#    install_requires (brax / mujoco-mjx / jax) — those are only used by the
-#    unused mjx submodule and would shatter the numpy<2 / cu130-torch pins; the
-#    gRPC Agent path needs none of them.
+#    build_lib tree (agent_server binary + generated proto/ + task XML/mesh assets)
+#    into dist-packages AND does NOT easy_install setup.py's heavy install_requires
+#    (brax / mujoco-mjx / jax), which would shatter the numpy<2 / cu130-torch pins;
+#    the gRPC Agent path needs none of them. dist-packages is the DURABLE import
+#    target — it survives the `rm -rf` of the source clone below, so `import
+#    mujoco_mpc` works at runtime with ZERO rebuild (before any dev rebuild).
 #
-#    agent_server is dynamically linked against libmujoco.so.3.2.3 (its RUNPATH
-#    points into build/lib), and setup.py copies ONLY the executable — not that
-#    .so. So before deleting the multi-GB build/ tree we stash the build's OWN
-#    libmujoco.so* into /usr/local/lib and ldconfig it. It MUST be this exact .so:
-#    the pip `mujoco==3.2.3` wheel ships a same-soname libmujoco.so.3.2.3, but it
-#    is built from a different 3.2.3 commit than the fork's pin (088079e) and is
-#    NOT ABI-identical — substituting it makes agent_server misread mjModel
-#    (garbled sensor names, bogus "ctrl limits required" cost-construction errors).
-RUN sed -i -e '/^ *"ui_agent_server",$/d' \
-           -e '/_copy_binary("ui_agent_server")/d' \
-        /home/code/mujoco_mpc/python/setup.py \
-    && python3 -c 'import re,pathlib; p=pathlib.Path("/home/code/mujoco_mpc/mjpc/tasks/CMakeLists.txt"); s=p.read_text(); pat=re.compile(r"COMMAND\s+patch\s+-o\s+\$\{CMAKE_CURRENT_BINARY_DIR\}/humanoid_bench/h1_2/h1_2_modified_magpie\.xml\s+\$\{CMAKE_CURRENT_BINARY_DIR\}/humanoid_bench/h1_2/h1_2_modified\.xml\s+<\$\{CMAKE_CURRENT_SOURCE_DIR\}/humanoid_bench/h1_2_modified_magpie\.xml\.patch"); repl="COMMAND ${CMAKE_COMMAND} -E copy\n        ${CMAKE_CURRENT_BINARY_DIR}/humanoid_bench/h1_2/h1_2_modified.xml\n        ${CMAKE_CURRENT_BINARY_DIR}/humanoid_bench/h1_2/h1_2_modified_magpie.xml"; s2,n=pat.subn(repl,s); assert n==1,"magpie patch->copy: expected 1 replacement, got %d"%n; p.write_text(s2); print("[mjpc] stale magpie patch neutralized -> direct copy")' \
-    && python3 -c 'import re,pathlib; p=pathlib.Path("/home/code/mujoco_mpc/python/setup.py"); s=p.read_text(); pat=re.compile(r"source_paths = \(\s*tuple\(mjpc_tasks_path\.rglob\(\"\*\.xml\"\)\)(?:\s*\+\s*tuple\(mjpc_tasks_path\.rglob\(\"\*\.[a-z]+\"\)\))*\s*\)"); repl="source_paths = tuple(dict.fromkeys(\n      p\n      for _ext in (\"xml\", \"png\", \"stl\", \"obj\", \"skn\", \"msh\")\n      for _pat in (\"*.\" + _ext, \"*.\" + _ext.upper())\n      for p in mjpc_tasks_path.rglob(_pat)\n    ))"; s2,n=pat.subn(repl,s); assert n==1,"copy_task_assets glob: expected 1, got %d"%n; p.write_text(s2); print("[mjpc] copy_task_assets glob made case-insensitive (uppercase .STL)")' \
-    && cd /home/code/mujoco_mpc \
+#    agent_server is dynamically linked against libmujoco.so.3.2.3 (RUNPATH points
+#    into build/lib) and setup.py copies ONLY the executable — not that .so. So
+#    stash the build's OWN libmujoco.so* into /usr/local/lib + ldconfig. It MUST be
+#    this exact .so: the pip mujoco==3.2.3 wheel ships a same-soname libmujoco but
+#    from a different 3.2.3 commit (not ABI-identical) — substituting it makes
+#    agent_server misread mjModel (garbled sensor names, bogus cost errors).
+#
+#    SEED (dev loop): instead of `rm -rf build`, snapshot the post-install build
+#    tree to /opt/mjpc-build-seed with `cp -a` (preserves mtimes/symlinks/_deps
+#    stamps/.ninja_deps so it stays warm). The build is done IN-TREE at
+#    /home/code/mujoco_mpc/build — the exact path the runtime container_cache
+#    build mount lands on — so CMakeCache's absolute paths stay valid when the
+#    seed is hydrated back there by launch_ros.sh. That makes the first
+#    in-container rebuild_mjpc.sh incremental instead of a cold ~15-min rebuild.
+#    The seed grows the image ~3-8 GB (full _deps tree) — the deliberate cost of a
+#    warm first rebuild; only _deps/.git metadata (never used by the build) is
+#    trimmed. Then the source clone is removed (the ../mujoco_mpc submodule bind
+#    mount re-supplies it, host-editable, at runtime).
+RUN cd /home/code/mujoco_mpc \
     && cmake -S . -B build -G Ninja \
         -DCMAKE_C_COMPILER=clang-13 -DCMAKE_CXX_COMPILER=clang++-13 \
         -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF \
@@ -498,7 +503,9 @@ RUN sed -i -e '/^ *"ui_agent_server",$/d' \
     && rm -f /tmp/mjpc-install-files.txt \
     && cp -a /home/code/mujoco_mpc/build/lib/libmujoco.so* /usr/local/lib/ \
     && ldconfig \
-    && rm -rf /home/code/mujoco_mpc/build
+    && cp -a /home/code/mujoco_mpc/build /opt/mjpc-build-seed \
+    && find /opt/mjpc-build-seed/_deps -maxdepth 2 -name .git -prune -exec rm -rf {} + 2>/dev/null || true \
+    && rm -rf /home/code/mujoco_mpc
 
 # 5. Restore the setuptools/wheel clamp that step 3's grpcio-tools bumped to 82
 #    (same rationale + ghost-removal as steps 7 & 9 far above: colcon's
@@ -518,6 +525,9 @@ RUN rm -rf /usr/local/lib/python3.10/dist-packages/setuptools \
 # 6. Fail the build loudly if the package isn't importable, the server binary
 #    didn't get bundled, or any of its shared libraries (notably libmujoco.so.3.2.3,
 #    staged in step 4) don't resolve — so a broken MJPC build can't ship silently.
+#    Runs AFTER step 4's `rm -rf` of the source clone: this is the source-
+#    independence gate — import + binary + libs must all resolve from dist-packages
+#    (+ /usr/local/lib) alone, exactly as they will at runtime before any dev rebuild.
 RUN BIN=/usr/local/lib/python3.10/dist-packages/mujoco_mpc/mjpc/agent_server; \
     if ldd "$BIN" | grep -q 'not found'; then \
         echo 'ERROR: agent_server has unresolved shared libraries:'; ldd "$BIN" | grep 'not found'; exit 1; \

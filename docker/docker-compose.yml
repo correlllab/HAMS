@@ -122,4 +122,16 @@ services:
       - ../CL_Assets/graspgenx/assets/magpie:/opt/graspgenx/assets/x_grippers/magpie:ro
       - ../CL_Assets/graspgenx/assets/meshes/magpie:/opt/graspgenx/assets/x_grippers/meshes/magpie:ro
       - ./scripts:/home/code/h12_sim_scripts
+      # --- MuJoCo MPC (MJPC) dev mounts -------------------------------------
+      # rw SOURCE mount: the ../mujoco_mpc submodule fills the (build-time-removed)
+      # clone path so the C++ agent_server / task XMLs are host-editable. The
+      # importable package lives baked in dist-packages, so `import mujoco_mpc`
+      # works with zero rebuild; keep this checkout pinned at MJPC_REF.
+      - ../mujoco_mpc:/home/code/mujoco_mpc:rw
+      # Persistent CMake build tree, nested INSIDE the source mount at the exact
+      # in-tree path the image seed was built at (/home/code/mujoco_mpc/build), so
+      # CMakeCache absolute paths match and setup.py's build_ext reuses it. Host
+      # bytes live in gitignored container_cache/mjpc_build; launch_ros.sh hydrates
+      # it from /opt/mjpc-build-seed on first launch (see msgs_ws pattern above).
+      - ../container_cache/mjpc_build:/home/code/mujoco_mpc/build:rw
     command: /home/code/h12_sim_scripts/launch_ros.sh

@@ -5,6 +5,33 @@ set -e
 
 source /opt/ros/humble/setup.bash
 
+# --- MuJoCo MPC (MJPC) build-cache hydrate (image seed -> persistent mount) ---
+# ../container_cache/mjpc_build persists the CMake build tree at the in-tree path
+# /home/code/mujoco_mpc/build. On first launch it is empty, so hydrate it from the
+# baked seed and back-date the freshly-checked-out submodule source so the first
+# in-container rebuild_mjpc.sh is warm (incremental) instead of a ~15-min cold
+# rebuild. Guarded on the absence of CMakeCache.txt -> runs exactly once; later
+# `run --rm` containers reuse the already-hydrated host dir. No-ops cleanly if the
+# submodule isn't checked out (import mujoco_mpc still works from dist-packages).
+MJPC_SRC=/home/code/mujoco_mpc
+MJPC_BUILD=/home/code/mujoco_mpc/build
+MJPC_SEED=/opt/mjpc-build-seed
+if [ -f "$MJPC_SRC/CMakeLists.txt" ] && [ ! -e "$MJPC_BUILD/CMakeCache.txt" ] \
+   && [ -d "$MJPC_SEED" ]; then
+    echo "[launch_ros] hydrating MJPC build cache from seed ($MJPC_SEED -> $MJPC_BUILD)"
+    mkdir -p "$MJPC_BUILD"
+    cp -a "$MJPC_SEED/." "$MJPC_BUILD/"    # preserve mtimes/symlinks/_deps stamps
+    # The host submodule was checked out AFTER the image build, so its source
+    # mtimes are NEWER than the seeded objects -> Ninja would recompile everything
+    # and CMake would reconfigure. Push SOURCE mtimes into the past (NOT the
+    # multi-GB build tree, whose internal mtime ordering must stay intact). Prune
+    # the build dir and .git. Fork source == seed source (same patched SHA), so no
+    # patching is needed here.
+    echo "[launch_ros] back-dating MJPC source mtimes so the seed stays warm"
+    find "$MJPC_SRC" \( -path "$MJPC_BUILD" -o -name .git \) -prune -o \
+         -exec touch -h -d '2000-01-01T00:00:00' {} +
+fi
+
 WS=/home/code/core_ws
 cd "$WS"
 
