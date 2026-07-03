@@ -10,6 +10,8 @@
   <exec_depend>rviz2</exec_depend>
   <exec_depend>launch</exec_depend>
   <exec_depend>launch_ros</exec_depend>
+  <exec_depend>estop</exec_depend>
+  <exec_depend>robot_state_publisher</exec_depend>
   <exec_depend>h12_ros2_controller</exec_depend>
   <exec_depend>h12_safety_layer</exec_depend>
   <exec_depend>model_server</exec_depend>
