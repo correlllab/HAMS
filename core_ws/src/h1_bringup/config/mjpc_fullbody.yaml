@@ -32,14 +32,31 @@ mjpc_deploy_lowerbody_controller:
     # holds the assisted equilibrium (H2: z 0.94, ~280 N). The height/support
     # deficit is NOT a gravity-ff shortfall; next suspect = state source
     # (estimator leg-odometry vs the twin's ground-truth sportmodestate).
-    plan_threads: 3
-    # PLANNER-RATE PARITY (2026-07-04, wobble root cause R1): see mjpc_sim.yaml --
-    # ~14 iters/s wall ~= twin's iterations-per-plant-second at 0.25x RTF.
-    # Bench-only; twin/real keep 12.
+    plan_threads: 4
+    # ★ REDUCED 12->4 (2026-07-07): on RoboCasa's CPU-BOUND kitchen (nq=151), threads
+    # and RTF TRADE OFF -- 12 threads stole CPU from the plant and dropped RTF 0.5->0.34,
+    # which (a) OVER-planned (~135 iters/plant-s vs real's ~55 -> elite-variance collapse,
+    # poor recovery) AND (b) WORSENED the latency compensator's over-prediction (deploy_
+    # common.cc:903 predicts fwd by wall-dt as sim-sec -> over-leads by 1/RTF: 2.9x @0.34
+    # vs 2x @0.5). The compensator is RTF-sensitive + COMPILED (unfixable at runtime), so
+    # the ONLY lever for the FREE-STAND is MAX RTF = FEWER threads + headless + no-sensors.
+    # 4 threads leaves cores for the plant (RTF up) while ~matching real's iters-per-plant-
+    # second at the achieved RTF. READ the log: aim RTF as high as possible AND plan/RTF
+    # ~= 55; if RTF still <0.5 drop to 3, if plan/RTF <<40 nudge up. NOT 12 (that TANKS RTF).
     twin_dt: 0.005
     sportstate_topic: rt/sportmodestate_est  # REAL-PARITY estimator (2026-07-05, matches lower-body)
     imu_pitch_offset_deg: 0.0
     has_arm_aware: false                 # full node owns the arms + has no --arm_aware flag; suppress it
     stale_sec: 1.5
+    # ★ NEW (2026-07-07): latency-comp sim-time scale = RoboCasa's measured real-time
+    # factor. The predict-forward horizon (deploy_common.cc:903) is a WALL-clock
+    # duration rolled forward as SIM steps, so at RTF<1 it over-leads the plant by
+    # 1/RTF -> the controller aims each command ~2x too far ahead -> overshoot ->
+    # the "tries to correct then leans backward and falls" seen on release. 1.0 is
+    # identity (real/twin, byte-unchanged). SET THIS TO THE RTF THE LOG REPORTS:
+    # ~0.45 at plan_threads 4 headless. If you change threads/headless and RTF
+    # moves, update this to match (read it off the run). Too LOW = under-leads
+    # (sluggish); too HIGH = the original over-lead. Tune toward the achieved RTF.
+    latency_rtf: 0.45
     drop_band: false
     band_drop_after_secs: 25.0

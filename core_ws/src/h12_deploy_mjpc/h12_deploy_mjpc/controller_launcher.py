@@ -100,6 +100,10 @@ def main() -> None:
         "--plan_trajectories", str(p("plan_trajectories", 0).value),
         "--plan_threads", str(p("plan_threads", 0).value),
         "--stale_sec", str(p("stale_sec", 0.05).value),
+        # latency-comp sim-time scale = measured RTF. 1.0 (default) is byte-identical
+        # to before (real/twin run RTF~1); a below-realtime sim (RoboCasa) passes its
+        # measured RTF so the predict-forward horizon stops over-leading by 1/RTF.
+        "--latency_rtf", str(p("latency_rtf", 1.0).value),
     ]
     iface = str(p("network_interface", "").value)
     if iface:
