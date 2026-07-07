@@ -99,7 +99,6 @@ def sim_loop(task, viewer=True, layout=None, style=None, seed=None):
     drives it; RoboCasa's _check_success/reward/lang are read off the shared env.
     """
 
-
     create_kwargs = {}
     if layout is not None:
         create_kwargs["layout_ids"] = layout
