@@ -160,3 +160,104 @@ ros2 action send_goal /skill/grasp custom_ros_messages/action/SkillGrasp \
   "{target_object: 'vertical fridge handle', arm: 'right', timeout: {sec: 60, nanosec: 0}}" \
   --feedback
 ```
+
+## macOS (Apple Silicon) — headless CPU port
+
+On Apple-Silicon Macs there is a self-contained, CPU-only port that runs **just
+ROS 2 + MuJoCo/RoboCasa** — Isaac is dropped and there is no NVIDIA/EGL path, so
+MuJoCo renders in software (OSMesa/llvmpipe). It uses its own standalone compose
+file, `docker/docker-compose.mac.yml`, and runs the ROS layer on **FastDDS**
+instead of CycloneDDS (an arm64 in-process coexistence fix). None of the x86
+instructions above apply — use this section instead.
+
+### Prerequisites
+
+- [Colima](https://github.com/abiosoft/colima) + the Docker CLI
+  (`brew install colima docker docker-compose`). No Docker Desktop, no NVIDIA
+  toolkit, and no XQuartz (see the GUI note below).
+- Git LFS and submodules, exactly as in [Prerequisites](#prerequisites) above.
+- No `docker/.env` is needed; the Mac compose only reads `ROS_DOMAIN_ID`
+  (optional, defaults to `1`), `HAMS_DISPLAY`, and `HAMS_RVIZ`.
+- Start the VM with enough resources — one software-GL viewer alone uses ~5
+  cores, and running both the MuJoCo viewer and RViz wants headroom:
+
+  ```bash
+  colima start --cpu 12 --memory 24     # sized for a 14-core / 48 GB Mac; scale to yours
+  ```
+
+### Build and run
+
+```bash
+# build both arm64 images (robocasa + ros); the base image builds automatically
+docker compose -f docker/docker-compose.mac.yml build
+
+# headless (no viewer) — the default
+docker compose -f docker/docker-compose.mac.yml up
+```
+
+The first run is slow (colcon builds the message + controller workspaces into
+named volumes); later runs are cached and fast. Both containers use
+`network_mode: host` + `ipc: host` so FastDDS's shared-memory transport works
+across them.
+
+> **Always bring both containers up together.** If RoboCasa runs alone for more
+> than a few seconds it releases the robot's motors ("Command timeout"), the H1
+> collapses under gravity, and when the ROS controller then connects it reads the
+> fallen pose and trips its e-stop. `docker compose … up` (both services) engages
+> the controller before the robot can fall.
+
+### Viewing the GUIs (MuJoCo viewer + RViz)
+
+MuJoCo's and RViz's OpenGL windows **cannot** be forwarded to XQuartz —
+Apple-Silicon XQuartz has broken indirect GLX. Instead each is rendered
+in-container with software GL into a virtual display and streamed to your browser
+over noVNC. Enable them per-viewer:
+
+```bash
+# MuJoCo viewer on :6080, RViz on :6081 (set either or both)
+HAMS_DISPLAY=vnc HAMS_RVIZ=vnc docker compose -f docker/docker-compose.mac.yml up -d
+
+# open the SSH tunnel to both noVNC ports (Colima does not forward container ports)
+./docker/scripts/mac_vnc_tunnel.sh     # --open also opens the browser; --stop closes the tunnel
+```
+
+Then open:
+
+- **MuJoCo viewer** → <http://localhost:6080/vnc.html>
+- **RViz** (RobotModel + TF) → <http://localhost:6081/vnc.html>
+
+`HAMS_DISPLAY` (RoboCasa/MuJoCo) and `HAMS_RVIZ` (ROS/RViz) are independent — set
+either or both; the defaults are headless.
+
+### Driving the robot
+
+Bringup starts automatically in the `ros` container (`joint_state_publisher`,
+`robot_state_publisher`, the `frame_task_server` IK solver, `safety_node`). To
+command the H1, source the helper and send joint-space postures or gripper
+commands:
+
+```bash
+docker exec -it hams_ros bash          # if the host docker CLI is flaky: colima ssh, then docker exec …
+source /home/code/h12_sim_scripts/robot_cli.sh
+
+rob_poses                # list postures
+rob_pose t_pose          # MOVE: home t_pose arms_front arms_overhead elbow_only … (rob_poses lists all)
+rob_grip right close     # open/close a gripper
+rob_home
+```
+
+Watch the motion in either viewer. (`rob_pose` takes a name and moves the robot;
+`rob_poses` only prints the list.)
+
+### macOS gotchas
+
+- **The host `docker` CLI socket is intermittent** under Colima — `docker …` may
+  fail with "Cannot connect to the Docker daemon" while the VM and containers are
+  perfectly healthy. Use `colima ssh -- docker …` as the reliable fallback, or
+  `colima stop && colima start` to relink the socket (this restarts the containers).
+- **Cartesian reaching is disabled.** The `/frame_task` action currently crashes
+  the controller node, so `rob_reach` is a no-op stub — drive the robot in joint
+  space with `rob_pose` for now.
+- **Two viewers use two displays.** RoboCasa renders on X display `:99` and RViz
+  on `:100`; they must differ because the containers share one network namespace
+  (`network_mode: host`). The launchers already handle this.

@@ -6,7 +6,60 @@
 # frame_task_server, safety_node) against the running MuJoCo sim.
 #
 # Pass `bash` as the first arg to drop to a shell instead of launching.
+#
+# Set HAMS_RVIZ=vnc to also run RViz2 rendered with software GL (llvmpipe) into
+# an in-container Xvfb and streamed over VNC/noVNC on port 6081 (separate from
+# the MuJoCo viewer's 6080). RViz's GL window can't forward to XQuartz on Apple
+# Silicon, so we ship pixels. View from the Mac: docker/scripts/mac_vnc_tunnel.sh
+# then open http://localhost:6081/vnc.html.
 set -e
+
+HAMS_RVIZ="${HAMS_RVIZ:-0}"
+
+# VNC/noVNC for RViz (only used when HAMS_RVIZ=vnc). Localhost-bound in the VM;
+# reachable from the Mac only via the SSH tunnel (mac_vnc_tunnel.sh). Ports are
+# offset from the robocasa MuJoCo viewer's (5900/6080) so both run together.
+#
+# DISPLAY MUST differ from robocasa's :99. Both containers run network_mode:host,
+# so they share ONE network namespace — and X11's abstract socket
+# (@/tmp/.X11-unix/X<n>) plus TCP 60<nn> are namespace-scoped. Two Xvfb on :99
+# would collide: one wins the abstract socket and BOTH viewers land on that single
+# display (both noVNC ports then show the same mixed screen). :100 keeps RViz on
+# its own X server.
+RVIZ_DISPLAY=:100
+RVIZ_VNC_PORT=5901
+RVIZ_NOVNC_PORT=6081
+RVIZ_GEOMETRY="${RVIZ_GEOMETRY:-1600x900x24}"
+RVIZ_CONFIG="${RVIZ_CONFIG:-/home/code/h12_sim_scripts/h1_sim.rviz}"
+
+start_rviz_stack() {
+    echo "[launch_ros_mac] starting RViz VNC stack on $RVIZ_DISPLAY ($RVIZ_GEOMETRY)"
+    Xvfb "$RVIZ_DISPLAY" -screen 0 "$RVIZ_GEOMETRY" +extension GLX +render -noreset \
+        >/tmp/xvfb_rviz.log 2>&1 &
+    export DISPLAY="$RVIZ_DISPLAY"
+    for _ in $(seq 1 30); do
+        xdpyinfo -display "$RVIZ_DISPLAY" >/dev/null 2>&1 && break
+        sleep 0.5
+    done
+    xdpyinfo -display "$RVIZ_DISPLAY" >/dev/null 2>&1 \
+        || { echo "[launch_ros_mac] Xvfb failed to start"; cat /tmp/xvfb_rviz.log; return 1; }
+
+    fluxbox >/tmp/fluxbox_rviz.log 2>&1 &
+    sleep 1
+    x11vnc -display "$RVIZ_DISPLAY" -rfbport "$RVIZ_VNC_PORT" -localhost \
+        -forever -shared -nopw -quiet -bg >/tmp/x11vnc_rviz.log 2>&1
+    sleep 1
+    websockify --web /usr/share/novnc "127.0.0.1:$RVIZ_NOVNC_PORT" "localhost:$RVIZ_VNC_PORT" \
+        >/tmp/websockify_rviz.log 2>&1 &
+    sleep 1
+
+    export LIBGL_ALWAYS_SOFTWARE=1   # force llvmpipe; no GPU under Colima
+    local cfg_arg=()
+    [ -f "$RVIZ_CONFIG" ] && cfg_arg=(-d "$RVIZ_CONFIG")
+    rviz2 "${cfg_arg[@]}" >/tmp/rviz2.log 2>&1 &
+    echo "[launch_ros_mac] RViz launched. From the Mac run mac_vnc_tunnel.sh, then open:"
+    echo "[launch_ros_mac]   http://localhost:${RVIZ_NOVNC_PORT}/vnc.html?autoconnect=1&resize=scale"
+}
 
 source /opt/ros/humble/setup.bash
 
@@ -35,6 +88,13 @@ colcon build --symlink-install \
 source "$INSTALL_BASE/setup.bash"
 
 export ROS_DOMAIN_ID="${ROS_DOMAIN_ID:-1}"
+
+# Optionally bring up RViz (rendered to Xvfb, streamed over noVNC). Started
+# before the bringup so it's up whether we launch or drop to a shell; RViz
+# tolerates topics/TF arriving after it starts.
+if [ "$HAMS_RVIZ" = "vnc" ] || [ "$HAMS_RVIZ" = "1" ]; then
+    start_rviz_stack || echo "[launch_ros_mac] RViz stack failed to start (continuing without it)"
+fi
 
 if [ "${1:-}" = "bash" ]; then
     echo "[launch_ros_mac] workspace built; dropping to shell (ROS_DOMAIN_ID=$ROS_DOMAIN_ID)"

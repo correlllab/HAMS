@@ -29,6 +29,13 @@ services:
     environment:
       - MUJOCO_GL=osmesa
       - ROS_DOMAIN_ID=${ROS_DOMAIN_ID:-1}
+      # Display mode for the MuJoCo sim. Default headless (OSMesa, no window).
+      # Set HAMS_DISPLAY=vnc to render the interactive viewer with software GL
+      # (llvmpipe) into an in-container Xvfb and stream it over VNC/noVNC — the
+      # only way to see the MuJoCo GUI on Apple Silicon, since its GL window
+      # cannot forward to XQuartz. View it with docker/scripts/mac_vnc_tunnel.sh:
+      #   HAMS_DISPLAY=vnc docker compose -f docker/docker-compose.mac.yml up robocasa
+      - HAMS_DISPLAY=${HAMS_DISPLAY:-headless}
       # rclpy runs on FastDDS so it does not load a 2nd CycloneDDS libddsc
       # alongside unitree_sdk2py's (arm64 in-process coexistence fix).
       - RMW_IMPLEMENTATION=rmw_fastrtps_cpp
@@ -62,6 +69,11 @@ services:
       - ROS_DOMAIN_ID=${ROS_DOMAIN_ID:-1}
       # Match the robocasa container: rclpy on FastDDS (arm64 coexistence fix).
       - RMW_IMPLEMENTATION=rmw_fastrtps_cpp
+      # Set HAMS_RVIZ=vnc to also run RViz2 (software GL -> Xvfb -> noVNC on 6081).
+      # Independent of the robocasa MuJoCo viewer (HAMS_DISPLAY=vnc, 6080), so you
+      # can run either or both. View via docker/scripts/mac_vnc_tunnel.sh:
+      #   HAMS_RVIZ=vnc docker compose -f docker/docker-compose.mac.yml up
+      - HAMS_RVIZ=${HAMS_RVIZ:-0}
     volumes:
       - ../core_ws:/home/code/core_ws
       - ../CL_Assets:/home/code/CL_Assets:ro
