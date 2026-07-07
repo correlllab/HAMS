@@ -34,12 +34,33 @@ GEMINI_GRASP_PROMPT = (
 # GraspGenX pose — no axis permutation or base->fingertip (TCP-depth) fix-up here.
 
 
+# Gripper aperture used while grasping, as a fraction of the gripper's full
+# range (see base.open_gripper/close_gripper). OPEN_PERCENT is how far to open
+# before approaching (1 = fully open); CLOSED_PERCENT is how far to close on the
+# object (1 = fully closed).
+OPEN_PERCENT = 1.0
+CLOSED_PERCENT = 1.0
+
 # How many of the ranked GraspGenX grasps to try (best-first) before giving up:
 # the top grasp may be IK-unreachable, so fall through to the next one.
 MAX_GRASP_ATTEMPTS = 5
 
+# Bias grasp selection toward TOP-DOWN grasps. A grasp's approach axis is its
+# GraspGenX +Z (pointing into the object); "downwardness" is how much that axis
+# points DOWN in the z-up world/pelvis frame: +1 for a straight-down approach,
+# 0 for horizontal, -1 for straight-up. DOWNWARD_WEIGHT * downwardness is ADDED
+# to each grasp's GraspGenX confidence (~0-1) and the candidates re-sorted
+# best-first, so a larger weight more strongly prefers reaching down onto the
+# object. 0 disables the bias (pure GraspGenX ranking).
+DOWNWARD_WEIGHT = 10.0
 
-APPROACH_DIST = 0.075  # metres to back off along the grasp's +Z approach axis for pre-grasp
+
+APPROACH_DIST = 0.1  # metres to back off along the grasp's +Z approach axis for pre-grasp
+# Metres to shift every GraspGenX grasp along its OWN +Z approach axis before
+# executing it. POSITIVE drives the grasp DEEPER into the object (further along
+# the approach); NEGATIVE backs it off. The pre-grasp standoff (APPROACH_DIST) is
+# measured from this shifted grasp, so the whole approach->grasp pair moves together.
+GRASP_OFFSET = 0.0
 # Single TF frame the planned pre-grasp approach is broadcast to, updated as the
 # loop walks the ranked candidates, so RViz shows the target currently being tried.
 TARGET_FRAME = 'graspgenx_target_frame'
@@ -111,8 +132,8 @@ class GraspSkill:
             return run.abort(f'no grasp planned for {obj!r}')
         width_mm = float(resp.gripper_width) * 1000.0
 
-        # --- approach: pre-open the gripper to the planned width ---------------
-        if not self.set_gripper(arm, width_mm):
+        # --- approach: pre-open the gripper before reaching for the object -----
+        if not self.open_gripper(arm, OPEN_PERCENT):
             return run.abort('gripper pre-open failed')
 
         # GraspGenX returns grasps ranked best-first; the top grasp can be
@@ -124,7 +145,9 @@ class GraspSkill:
         # iteration. If the world TF is unavailable (navigation/odom not running)
         # we drive the raw pelvis poses with no drift compensation.
         n = min(len(resp.grasps), MAX_GRASP_ATTEMPTS)
-        grasps_p = [resp.grasps[i].pose for i in range(n)]
+        # Shift each raw grasp along its approach axis by GRASP_OFFSET before use.
+        grasps_p = [get_approach_pose(resp.grasps[i].pose, approach_dist=GRASP_OFFSET)
+                    for i in range(n)]
         approaches_p = [get_approach_pose(g, approach_dist=-APPROACH_DIST) for g in grasps_p]
         grasps_w = [self._transform_pose(g, 'pelvis', WORLD_FRAME) for g in grasps_p]
         approaches_w = [self._transform_pose(a, 'pelvis', WORLD_FRAME)
@@ -135,8 +158,19 @@ class GraspSkill:
                 f'grasp: {WORLD_FRAME} TF unavailable; pelvis-drift servoing OFF, '
                 'driving raw pelvis poses (start navigation/FAST-LIO to enable)')
 
+        # Re-rank the candidates to favor top-down grasps. downwardness[i] is how
+        # much grasp i's approach axis (pelvis +Z of the pose, i.e. the pose's own
+        # +Z expressed in the z-up pelvis frame) points DOWN: +1 straight down,
+        # -1 straight up. Combine with the GraspGenX confidence and sort best-first
+        # so the reachability loop below tries the most top-down grasps first.
+        downwardness = [-float(pose_to_matrix(grasps_p[i])[2, 2]) for i in range(n)]
+        order = sorted(
+            range(n),
+            key=lambda i: resp.scores[i] + DOWNWARD_WEIGHT * downwardness[i],
+            reverse=True)
+
         idx = -1
-        for i in range(n):
+        for i in order:
             # Register the candidate we're about to drive to as TARGET_FRAME (one
             # frame, updated each iteration). publish_tf keeps re-broadcasting it so
             # RViz shows the live target instead of it expiring between sends. When
@@ -147,14 +181,14 @@ class GraspSkill:
                 parent, dbg, self.get_clock().now().to_msg()))
             self.get_logger().info(
                 f'grasp {i} for {obj!r}: score {resp.scores[i]:.2f}, '
-                f'width {width_mm:.1f}mm')
-            if self.servo_frame_to_world(
-                    GRASP_FRAMES[arm], approaches_w[i] if have_world else None,
-                    approaches_p[i], outer_gh=gh,
-                    duration_sec=SERVO_DURATION_SEC, max_iter=SERVO_MAX_ITER,
-                    lin_tol=SERVO_LIN_TOL, ang_tol=SERVO_ANG_TOL):
-                idx = i
-                break
+                f'downwardness {downwardness[i]:+.2f}, width {width_mm:.1f}mm')
+            # if self.servo_frame_to_world(
+            #         GRASP_FRAMES[arm], approaches_w[i] if have_world else None,
+            #         approaches_p[i], outer_gh=gh,
+            #         duration_sec=SERVO_DURATION_SEC, max_iter=SERVO_MAX_ITER,
+            #         lin_tol=SERVO_LIN_TOL, ang_tol=SERVO_ANG_TOL):
+            #     idx = i
+            #     break
             if gh.is_cancel_requested or run.remaining() <= 0.0:
                 return run.abort('canceled or timed out during approach')
             self.get_logger().warn(
@@ -162,7 +196,6 @@ class GraspSkill:
         if idx < 0:
             return run.abort(
                 f'no reachable grasp for {obj!r} (tried {n} of {len(resp.grasps)})')
-
         # --- grasp: move to contact + close ------------------------------------
         if not run.phase('grasp', 0.75):
             return run.result
@@ -174,13 +207,18 @@ class GraspSkill:
         # we've already committed to a reachable grasp, so a best-effort contact
         # pose is still worth closing on. servo_frame_to_world logs the residual
         # world error; we deliberately don't abort on non-convergence here.
-        self.servo_frame_to_world(
-            GRASP_FRAMES[arm], grasps_w[idx] if have_world else None,
-            grasps_p[idx], outer_gh=gh,
-            duration_sec=SERVO_DURATION_SEC, max_iter=SERVO_MAX_ITER,
-            lin_tol=SERVO_LIN_TOL, ang_tol=SERVO_ANG_TOL)
-        if not self.close_gripper(arm):
+
+
+
+        # self.servo_frame_to_world(
+        #     GRASP_FRAMES[arm], grasps_w[idx] if have_world else None,
+        #     grasps_p[idx], outer_gh=gh,
+        #     duration_sec=SERVO_DURATION_SEC, max_iter=SERVO_MAX_ITER,
+        #     lin_tol=SERVO_LIN_TOL, ang_tol=SERVO_ANG_TOL)
+
+        if not self.close_gripper(arm, CLOSED_PERCENT):
             return run.abort('gripper close failed')
+
 
         return run.succeed(
             f'grasped {obj!r} (graspgen score {resp.scores[idx]:.2f})')

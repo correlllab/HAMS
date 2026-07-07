@@ -15,6 +15,7 @@ graspgenx is deferred to __init__ so the module can be inspected without it.
 import inspect
 import math
 import os
+import threading
 from collections import namedtuple
 
 import numpy as np
@@ -111,6 +112,15 @@ APPROACH_MIN_FORWARD_COS = 0.0
 # service runs with network_mode: host, so the port is reachable on the host.
 VISER_PORT = 8080
 
+# Persistent accumulation of every grasp this server generates: a single (N, 4, 4)
+# .npy file that each successful plan APPENDS its returned grasps to. Unlike the
+# per-call `rec.save_array('grasps', ...)` artifacts (gated on the logging toggle
+# and wiped on startup by clear_logs), this file is always written and persists
+# across runs. Defaults to `generated_grasps.npy` at the model_server logs ROOT
+# (the parent of the graspgen log dir, so clear_logs doesn't remove it); override
+# the full path with GRASPGEN_GRASPS_FILE.
+GRASPGEN_GRASPS_FILENAME = 'generated_grasps.npy'
+
 # Per-gripper cache entry: the heavy sampler, its opening width [m], the gripper
 # info (sweep volume + collision mesh, for viz/collision), and the gripper surface
 # points pre-sampled once for the collision filter (None if sampling failed).
@@ -187,6 +197,16 @@ class GraspGenServer(Node):
         # Keep only the planner kwargs the installed run_planner_on_object accepts.
         sig = inspect.signature(run_planner_on_object)
         self._kwargs = {k: v for k, v in PLANNER_KWARGS.items() if k in sig.parameters}
+
+        # Persistent (N, 4, 4) accumulation of every grasp we generate (see
+        # GRASPGEN_GRASPS_FILENAME). Lives at the logs ROOT so clear_logs (which
+        # wipes only the graspgen subdir) leaves it intact across runs.
+        self._grasps_file = os.environ.get(
+            'GRASPGEN_GRASPS_FILE',
+            os.path.join(os.path.dirname(self.logger.dir), GRASPGEN_GRASPS_FILENAME))
+        self._grasps_lock = threading.Lock()
+        self.get_logger().info(
+            f'accumulating generated grasps -> {self._grasps_file}')
 
         self._samplers = {}           # gripper_name -> _Gripper
         try:
@@ -427,18 +447,20 @@ class GraspGenServer(Node):
         grasps, confs = grasps[keep_approach], confs[keep_approach]
 
 
-        # Flip grasps whose gripper +Y points down so it points up. Grasps are in
-        # the cloud frame (pelvis), where +Z is up, so "Y up/down" is the z-component
-        # (row 2) of the grasp's local +Y column (col 1) — mirroring the approach
-        # filter above (grasps[:, 0, 2] = x-component of the +Z column). A 180° turn
-        # about the local +Z (approach) axis negates local X and Y, swinging a
-        # down-pointing Y up while leaving the approach direction and origin intact.
-        needs_flip = grasps[:, 2, 1] < 0.0
+        # Canonicalize the finger-closing axis: make the gripper's local +X point
+        # toward robot-left (+Y). Grasps are in the cloud frame (pelvis: +X forward,
+        # +Y left, +Z up), so "+X's +Y component" is row 1 of the local +X column
+        # (col 0) — i.e. gripper_X · +Y. A 180° turn about the local +Z (approach)
+        # axis negates local X and Y, swinging a right-pointing +X back toward +Y
+        # while leaving the approach direction and origin intact (the two fingers
+        # just swap — a physically identical grasp).
+        needs_flip = grasps[:, 1, 0] < 0.0
         T_flip = np.eye(4)
         T_flip[:3, :3] = np.diag([-1.0, -1.0, 1.0])  # 180° about local Z
         grasps[needs_flip] = grasps[needs_flip] @ T_flip
         self.get_logger().info(
-            f'flipped: {int(needs_flip.sum())} grasps with Y down (cloud frame +Z up)')
+            f'flipped: {int(needs_flip.sum())} grasps with +X toward -Y '
+            f'(cloud frame +Y left)')
 
 
 
@@ -507,6 +529,7 @@ class GraspGenServer(Node):
             f"scene_pts={0 if scene_pts is None else len(scene_pts)})")
         rec.save_array('grasps', grasps)            # raw (M, 4, 4) in the cloud frame
         rec.save_array('scores', confs)
+        self._append_generated_grasps(grasps)       # persist to the cumulative file
         self._publish_grasp_markers(frame, grasps)
         self._save_grasp_viz(rec, pts, grasps, width)
         self._render_viser(pts, scene_pts, grasps, confs, gr.info, obb_dict)
@@ -527,6 +550,37 @@ class GraspGenServer(Node):
             idx = np.random.choice(len(scene_pts), MAX_SCENE_POINTS, replace=False)
             scene_pts = scene_pts[idx]
         return scene_pts.astype(np.float32)
+
+    def _append_generated_grasps(self, grasps):
+        """Append the given (M, 4, 4) grasp poses to the persistent accumulation
+        file (self._grasps_file), which holds every grasp this server has
+        generated across all requests. Load-concat-save under a lock so concurrent
+        service calls (MultiThreadedExecutor) don't clobber each other, writing via
+        a temp file + os.replace so a crash mid-write can't corrupt the file.
+        Best-effort: a failure here must never break planning."""
+        try:
+            new = np.asarray(grasps, dtype=np.float64).reshape(-1, 4, 4)
+            if new.shape[0] == 0:
+                return
+            with self._grasps_lock:
+                allg = new
+                if os.path.exists(self._grasps_file):
+                    try:
+                        existing = np.load(self._grasps_file).reshape(-1, 4, 4)
+                        allg = np.concatenate([existing, new], axis=0)
+                    except Exception as e:
+                        self.get_logger().warn(
+                            f'could not read {self._grasps_file} ({e}); recreating')
+                os.makedirs(os.path.dirname(self._grasps_file), exist_ok=True)
+                tmp = self._grasps_file + '.tmp'
+                with open(tmp, 'wb') as f:
+                    np.save(f, allg)
+                os.replace(tmp, self._grasps_file)
+            self.get_logger().info(
+                f'appended {new.shape[0]} grasps -> {self._grasps_file} '
+                f'({allg.shape[0]} total)')
+        except Exception as e:
+            self.get_logger().warn(f'grasp accumulation failed: {e}')
 
     def _render_viser(self, object_pts, scene_pts, grasps, confs,
                       gripper_info, obb_dict=None):

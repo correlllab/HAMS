@@ -156,6 +156,11 @@ ros2 launch h1_bringup h1_sim_bringup.launch.py
 docker exec -it hams_ros bash
 source /opt/ros/humble/setup.bash
 source /home/code/core_ws/install/setup.bash
+
+# send the arms to the 'home' named config before grasping
+ros2 action send_goal /named_config custom_ros_messages/action/NamedConfig \
+  "{config_name: 'home', duration: {sec: 0, nanosec: 0}}"
+
 ros2 action send_goal /skill/grasp custom_ros_messages/action/SkillGrasp \
   "{target_object: 'vertical fridge handle', arm: 'right', timeout: {sec: 60, nanosec: 0}}" \
   --feedback

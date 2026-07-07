@@ -69,6 +69,10 @@ GRIPPER_NS = {'left': '/left/gripper', 'right': '/right/gripper'}
 
 # Grip-force limit (N) applied via set_force before closing on an object.
 GRIP_FORCE_N = 30.0
+# Full-open gripper aperture [mm]. The magpie driver clamps set_position to
+# 0-106 mm (gripper.set_goal_aperture), so 106 mm is "fully open" and 0 mm is
+# "fully closed" — the endpoints the open/close percentage helpers map to.
+GRIPPER_MAX_WIDTH_MM = 106.0
 # Used when goal.timeout is zero [s]. Generous because the grasp skill's Gemini
 # detection alone (gemini-robotics-er) can take ~3 min; this deadline is a safety
 # ceiling checked at phase boundaries, not a target — most skills finish far sooner.
@@ -695,15 +699,22 @@ class SkillsBase(Node):
         self.get_logger().info(f'{name}: success={result.success} — {result.message}')
         return result.success
 
-    def open_gripper(self, arm):
-        """Open fully via the dedicated open service."""
-        return self._trigger_gripper(self.gripper_open_clis[arm], f'gripper/open({arm})')
+    def open_gripper(self, arm, amount=1.0):
+        """Open the gripper by `amount`, a fraction of its full range where 0 is
+        fully closed and 1 is fully open (default 1 = fully open). Commanded as a
+        position so intermediate openings are honored."""
+        amount = min(max(float(amount), 0.0), 1.0)
+        return self.set_gripper(arm, amount * GRIPPER_MAX_WIDTH_MM)
 
-    def close_gripper(self, arm):
-        """Bound the grip force, then close fully on the object."""
+    def close_gripper(self, arm, amount=1.0):
+        """Bound the grip force, then close the gripper by `amount`, a fraction of
+        its full range where 0 is fully open and 1 is fully closed (default
+        1 = fully closed). Commanded as a position so the force limit still stops
+        the fingers when they meet the object."""
+        amount = min(max(float(amount), 0.0), 1.0)
         if not self.set_gripper_force(arm):
             return False
-        return self._trigger_gripper(self.gripper_close_clis[arm], f'gripper/close({arm})')
+        return self.set_gripper(arm, (1.0 - amount) * GRIPPER_MAX_WIDTH_MM)
 
     def _validated_arm(self, goal):
         arm = goal.arm.strip().lower()
