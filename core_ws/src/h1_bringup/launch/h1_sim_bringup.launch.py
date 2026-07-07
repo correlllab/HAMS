@@ -70,6 +70,11 @@ def generate_launch_description():
         DeclareLaunchArgument('model_clear_logs', default_value='true'),
         DeclareLaunchArgument('rviz_config', default_value=default_rviz),
         DeclareLaunchArgument('use_mjpc_lowerbody', default_value='true'),
+        # Param file for the MJPC estimator + controller pair (sim values by
+        # default; mjpc_real.yaml carries the validated real-robot values).
+        DeclareLaunchArgument(
+            'mjpc_config',
+            default_value=os.path.join(bringup_share, 'config', 'mjpc_sim.yaml')),
 
         nav_launch,
 
@@ -156,15 +161,18 @@ def generate_launch_description():
         #     output='screen',
         # ),
 
-        # MJPC lower-body balance controller (h12_deploy_mjpc): a proprioceptive
-        # base estimator feeding an embedded-mjpc::Agent controller that drives the
-        # 12 leg joints (upper body owned by frame_task IK, split safety mode).
-        # Disable with use_mjpc_lowerbody:=false.
+        # MJPC lower-body balance controller (h12_deploy_mjpc): the fork's RW-EKF
+        # proprioceptive base estimator feeding the fork's shared deploy core
+        # (embedded mjpc::Agent, raw unitree_sdk2 DDS) which drives the 12 leg
+        # joints (upper body owned by frame_task IK, split safety mode). Params
+        # live in mjpc_config (default config/mjpc_sim.yaml; pass
+        # mjpc_config:=.../mjpc_real.yaml for the real-robot values). Disable
+        # with use_mjpc_lowerbody:=false.
         Node(
             package='h12_deploy_mjpc',
             executable='estimator_node',
             name='h12_deploy_mjpc_estimator',
-            parameters=[sim_time_param],
+            parameters=[sim_time_param, LaunchConfiguration('mjpc_config')],
             output='screen',
             condition=IfCondition(LaunchConfiguration('use_mjpc_lowerbody')),
         ),
@@ -172,11 +180,12 @@ def generate_launch_description():
             package='h12_deploy_mjpc',
             executable='mjpc_deploy_lowerbody_controller',
             name='mjpc_deploy_lowerbody_controller',
-            parameters=[sim_time_param],
+            parameters=[sim_time_param, LaunchConfiguration('mjpc_config')],
             # mjpc resolves task model XMLs relative to MJPC_TASKS_DIR (else
             # <exe>/../mjpc/tasks, which doesn't exist for this ROS binary -> a
             # null model -> mj_makeData segfault). Point it at the runtime-hydrated
-            # build tree that matches the linked mjpc libs.
+            # build tree that matches the linked mjpc libs. The estimator's default
+            # scene resolves through the same env (see estimator_node.py).
             additional_env={'MJPC_TASKS_DIR': '/home/code/mujoco_mpc/build/mjpc/tasks'},
             output='screen',
             condition=IfCondition(LaunchConfiguration('use_mjpc_lowerbody')),

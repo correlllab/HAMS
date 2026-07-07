@@ -45,4 +45,4 @@
 [submodule "mujoco_mpc"]
 	path = mujoco_mpc
 	url = git@github.com:badinkajink/mujoco_mpc.git
-	branch = extended_hw_patched
+	branch = extended_hw

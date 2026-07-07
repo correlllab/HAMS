@@ -1,339 +1,130 @@
 #!/usr/bin/env python3
-"""Proprioceptive floating-base estimator for the MJPC lower-body controller.
+"""rclpy parameter shell around the fork's FULL proprioceptive base estimator.
 
-Publishes the IMU-site base pose+velocity as unitree_go/msg/SportModeState on a
-dedicated topic (default /h12_deploy_mjpc/sportstate_est) from REAL proprioception
-only -- the robot's IMU (orientation + gyro) and joint encoders (q, dq) on
-/lowstate -- via leg odometry on the H1-2 MuJoCo kinematics. The MJPC controller
-reads orientation+gyro from /lowstate and backs the site pose out to the pelvis
-for the planner's floating-base state.
+The actual estimator is mjpc/deploy/helper_scripts/base_estimator_node.py in the
+bind-mounted mujoco_mpc submodule (badinkajink/mujoco_mpc@extended_hw): a
+RW-EKF (or complementary) leg-odometry + IMU-fusion filter over rt/lowstate,
+publishing SportModeState_ on a side topic, with contact modes, chi2 outlier
+rejection, an accel-health probe, --compare and --selftest. This shell ONLY maps
+ROS parameters -> the estimator's argv and then runs it unmodified — the fork
+stays the single source of truth, and the estimator's unitree_sdk2py DDS I/O
+(one-writer + iface auto-pinning) is deliberately NOT converted to rclpy pub/sub.
 
-METHOD -- leg odometry, planted-foot constraint:
-  A foot in contact is stationary in the world, so the base velocity is whatever
-  cancels the joint + angular motion at that foot (evaluated with the base linear
-  velocity zeroed), averaged over the *planted* feet. Base HEIGHT comes from the
-  same kinematics (lowest planted foot on the floor), auto-calibrated so the
-  reference pose matches the model's base height. Base XY is the integral of the
-  estimated velocity (translation-invariant for balance). Orientation + gyro come
-  straight from the IMU.
+Replaces the earlier stripped port (velocity-only leg odometry, hardcoded
+covariances, never read the accelerometer) — see git history. That version's
+"H3 hard contact gate" (drop swing feet entirely) is NOT carried over: the fork
+filter handles outliers via load-scaled measurement noise + chi2 rejection;
+bench H3 on the twin before considering re-adding it.
 
-CONTACT GATE (audit H3 fix): the upstream estimator applied the planted-foot
-constraint to EVERY foot with only a soft load-scaled noise, so a swinging /
-sliding foot injected a phantom base velocity into the balance planner. Here each
-foot is gated on an actual contact estimate (height above the floor, plus leg
-load when tau_est is available) and NON-contact feet are DROPPED from the update
-entirely -- not merely down-weighted.
-
-MESSAGE CONTRACT -- unitree_go/msg/SportModeState (IMU-site, matches original):
-  position[0:3] = world IMU-site position  = pelvis_world_pos + R*IMU_OFFSET
-  velocity[0:3] = world IMU-site linvel    = base_v + (R*gyro) x (R*IMU_OFFSET)
-  (imu_state / mode / foot_* left default; the controller reads orientation + gyro
-   from /lowstate and backs the site pose out to the pelvis.)
-  R = quat2mat(/lowstate IMU quaternion, wxyz).
-
-Offline self-test (no ROS, no robot):
-  python3 estimator_node.py --selftest
+Contract: the estimator's IMU_OFFSET must equal the controller core's kImuOffset
+(both are {-0.04452, -0.01891, 0.27756}; both ends of the IMU-site -> pelvis
+reconstruction must agree or the base pose is wrong).
 """
-from __future__ import annotations  # ROS-typed annotations stay lazy so offline --selftest imports
 
-import argparse
 import os
+import runpy
+import sys
 
-import numpy as np
+import rclpy
+from rclpy.node import Node
 
-# ROS imports are guarded so the offline --selftest (and importing the pure
-# estimator helpers for unit tests) works without a sourced ROS environment. In
-# the deploy image these all resolve; EstimatorNode is only instantiated on the
-# ROS path, so the `object` fallback for its base class is never used there.
-try:
-    import rclpy
-    from rclpy.node import Node
-    from rclpy.qos import HistoryPolicy, QoSProfile, ReliabilityPolicy
-    from unitree_go.msg import SportModeState
-    from unitree_hg.msg import LowState
-    _HAVE_ROS = True
-except ModuleNotFoundError:
-    Node = object   # EstimatorNode(Node) still defines; only instantiated with ROS present
-    _HAVE_ROS = False
-
-
-try:
-    import mujoco
-except ModuleNotFoundError:
-    # The pure helpers (contact gate, RW-EKF) don't need MuJoCo; only the
-    # kinematics / node paths do. Deferring keeps them unit-testable anywhere.
-    mujoco = None
-
-NJ = 27  # H1-2 handless actuated joints (== /lowstate motor order: legs 0..11, torso 12, arms 13..26)
-NLEG = 12
-IMU_OFFSET = np.array([-0.04452, -0.01891, 0.27756])  # pelvis -> IMU site, from h1_2_handless.xml
-# CL_Assets is bind-mounted at /home/code/CL_Assets in the deploy image.
-_DEFAULT_SCENE = "/home/code/CL_Assets/mujoco_assets/scene_h1_2_handless.xml"
+# In-container defaults (docker-compose mounts). MJPC_ROOT can override for a
+# host/dev checkout.
+_MJPC_ROOT = os.environ.get("MJPC_ROOT", "/home/code/mujoco_mpc")
+_DEFAULT_SCRIPT = os.path.join(
+    _MJPC_ROOT, "mjpc", "deploy", "helper_scripts", "base_estimator_node.py")
+# The estimator only needs SOME H1-2 model with a free base + the 27 joints in
+# lowstate motor order + *ankle_roll* foot bodies; use the same staged task XML
+# the controller loads (assets live next to it in the hydrated build tree).
+_DEFAULT_SCENE = os.path.join(
+    os.environ.get("MJPC_TASKS_DIR",
+                   os.path.join(_MJPC_ROOT, "build", "mjpc", "tasks")),
+    "humanoid_bench", "stabilize", "Stabilize_H12_Magpie.xml")
 
 
-def _quat2mat(q):
-    R = np.zeros(9)
-    mujoco.mju_quat2Mat(R, np.asarray(q, dtype=float))
-    return R.reshape(3, 3)
-
-
-def load_model_and_calibrate(scene):
-    """Load the H1-2 model, find the foot bodies, and calibrate the ankle->floor
-    height constant so the reference pose reproduces the model's base height."""
-    scene = os.path.expanduser(scene or _DEFAULT_SCENE)
-    d_dir = os.path.dirname(os.path.abspath(scene))
-    cwd = os.getcwd()
-    os.chdir(d_dir)
-    try:
-        m = mujoco.MjModel.from_xml_path(os.path.basename(scene))
-    finally:
-        os.chdir(cwd)
-    data = mujoco.MjData(m)
-    assert m.nq >= 7 + NJ, f"model nq={m.nq} too small (need free base + {NJ} joints)"
-
-    foot_ids = []
-    for bid in range(m.nbody):
-        nm = mujoco.mj_id2name(m, mujoco.mjtObj.mjOBJ_BODY, bid) or ""
-        if "ankle_roll" in nm:
-            foot_ids.append((bid, nm))
-    if not foot_ids:
-        for bid in range(m.nbody):
-            nm = mujoco.mj_id2name(m, mujoco.mjtObj.mjOBJ_BODY, bid) or ""
-            if "ankle" in nm or "foot" in nm:
-                foot_ids.append((bid, nm))
-    if not foot_ids:
-        raise RuntimeError("no foot bodies found (looked for *ankle_roll* / *ankle* / *foot*)")
-
-    home = mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_KEY, "home")
-    if home >= 0:
-        home_q = np.array(m.key_qpos[home * m.nq: home * m.nq + m.nq])
-    else:
-        home_q = np.array(m.qpos0)
-    home_base_z = float(home_q[2])
-
-    # base at origin + identity orientation + reference joints -> lowest ankle z.
-    data.qpos[:] = 0.0
-    data.qpos[3] = 1.0
-    data.qpos[7:7 + NJ] = home_q[7:7 + NJ]
-    mujoco.mj_forward(m, data)
-    ankle_z_home = min(float(data.xpos[bid][2]) for bid, _ in foot_ids)
-    height_C = home_base_z + ankle_z_home   # base_height = -min(ankle_z) + C ; at ref -> home_base_z
-
-    # leg-load motor indices per foot (knee, ankle-pitch): left=(3,4) right=(9,10)
-    load_idx = [(3, 4) if "left" in nm else (9, 10) for _, nm in foot_ids]
-
-    print(f"[est] model nq={m.nq} nv={m.nv} feet={[nm for _, nm in foot_ids]} "
-          f"home_base_z={home_base_z:.3f} C={height_C:.3f}")
-    return m, data, foot_ids, load_idx, height_C, home_q
-
-
-def leg_kinematics(m, data, foot_ids, height_C, q, dq, quat, gyro, res):
-    """One proprioceptive sample -> (floor_z, per-foot world height, per-foot world
-    linear velocity with base-linvel zeroed). The base velocity that makes a planted
-    foot stationary is the negation of that foot's computed world velocity."""
-    data.qpos[:] = 0.0
-    data.qpos[3:7] = quat                 # base at origin (xy nominal), real orientation
-    data.qpos[7:7 + NJ] = q
-    data.qvel[:] = 0.0
-    data.qvel[3:6] = gyro                 # base angvel = body gyro (base linvel stays 0)
-    data.qvel[6:6 + NJ] = dq
-    mujoco.mj_forward(m, data)
-
-    foot_z = np.array([float(data.xpos[bid][2]) for bid, _ in foot_ids])
-    floor_z = float(foot_z.min())
-    base_height = -floor_z + height_C
-    vfeet = []
-    for bid, _ in foot_ids:
-        mujoco.mj_objectVelocity(m, data, mujoco.mjtObj.mjOBJ_BODY, bid, res, 0)
-        vfeet.append(-res[3:6].copy())    # -(foot world linear velocity), base-lin=0
-    return floor_z, foot_z, base_height, np.array(vfeet)
-
-
-def contact_mask(foot_z, floor_z, tau, load_idx, height_thresh, load_thresh):
-    """audit H3: a foot is in contact iff it is near the floor. When tau_est is
-    meaningful, also require a minimum leg load. Returns a boolean per foot."""
-    near_floor = (foot_z - floor_z) < height_thresh
-    if tau is not None and float(np.abs(tau).sum()) > 1e-6:
-        loaded = np.array([abs(tau[a]) + abs(tau[b]) > load_thresh for (a, b) in load_idx])
-        return near_floor & loaded
-    return near_floor
-
-
-class RWEKF:
-    """Random-walk velocity EKF over the planted-foot leg-odometry measurements.
-    Only feet flagged in-contact are used; a Mahalanobis gate rejects spikes with a
-    force-accept backstop so genuine motion is re-accepted."""
-
-    def __init__(self, amax, r0, r1, lfloor, chi2, rejcap, dt):
-        self.I3 = np.eye(3)
-        self.P = self.I3 * 0.04
-        self.Q = (amax * dt) ** 2 * self.I3
-        self.r0, self.r1, self.lfloor = r0, r1, lfloor
-        self.chi2, self.rejcap = chi2, rejcap
-        self.v = np.zeros(3)
-        self.rej = 0
-
-    def update(self, vfeet, contact, tau, load_idx):
-        self.P = self.P + self.Q
-        for k in range(len(vfeet)):
-            if not contact[k]:
-                continue                       # audit H3: swing/non-contact foot dropped entirely
-            a, b = load_idx[k]
-            load_k = (abs(tau[a]) + abs(tau[b])) if tau is not None else 0.0
-            rk = (self.r0 + self.r1 / max(load_k, self.lfloor)) ** 2
-            S = self.P + rk * self.I3
-            inn = vfeet[k] - self.v
-            if float(inn @ np.linalg.solve(S, inn)) > self.chi2 and self.rej < self.rejcap:
-                self.rej += 1
-                self.P = self.P + self.Q   # inflate P while rejecting so the gate self-reopens
-                continue
-            self.rej = 0
-            K = self.P @ np.linalg.inv(S)
-            self.v = self.v + K @ inn
-            self.P = (self.I3 - K) @ self.P
-        return self.v
-
-
-def _selftest(m, data, foot_ids, load_idx, height_C, home_q):
-    res = np.zeros(6)
-    qj = np.array(home_q[7:7 + NJ])
-    ident = np.array([1.0, 0.0, 0.0, 0.0])
-    floor_z, foot_z, h, vfeet = leg_kinematics(m, data, foot_ids, height_C, qj,
-                                               np.zeros(NJ), ident, np.zeros(3), res)
-    cm = contact_mask(foot_z, floor_z, None, load_idx, 0.04, 5.0)
-    ekf = RWEKF(3.0, 0.02, 0.3, 5.0, 11.34, 20, 1.0 /200.0)
-    v = ekf.update(vfeet, cm, None, load_idx)
-    print(f"[selftest] static ref: base_z={h:.3f} (expect ~{float(home_q[2]):.3f}) "
-          f"contacts={cm.tolist()} v={np.round(v, 4)} (expect ~0)")
-    dq = np.zeros(NJ); dq[3] = 0.5
-    _, foot_z2, _, vfeet2 = leg_kinematics(m, data, foot_ids, height_C, qj, dq, ident,
-                                           np.zeros(3), res)
-    v2 = ekf.update(vfeet2, cm, None, load_idx)
-    print(f"[selftest] joint moving: v={np.round(v2, 4)} (expect nonzero)")
-    # a lifted (swing) foot must be excluded by the contact gate
-    fz = foot_z.copy(); fz[0] = floor_z + 0.20
-    cm_swing = contact_mask(fz, floor_z, None, load_idx, 0.04, 5.0)
-    # site transform (identity quat -> R=I): site_p = pelvis + IMU_OFFSET, site_v = v
-    Rident = _quat2mat(ident)
-    roff = Rident @ IMU_OFFSET
-    site_p = np.array([0.0, 0.0, h]) + roff
-    site_v = v + np.cross(Rident @ np.zeros(3), roff)
-    site_ok = (np.allclose(site_p, [IMU_OFFSET[0], IMU_OFFSET[1], h + IMU_OFFSET[2]], atol=1e-9)
-               and np.linalg.norm(site_v) < 1e-6)
-    print(f"[selftest] site xform: site_p={np.round(site_p, 4)} site_v={np.round(site_v, 4)} "
-          f"(expect pelvis+IMU_OFFSET, ~0)")
-    ok = (abs(h - float(home_q[2])) < 0.05 and bool(cm.all()) and np.linalg.norm(v) < 1e-6
-          and np.linalg.norm(v2) > 1e-4 and not bool(cm_swing[0]) and bool(cm_swing[1])
-          and site_ok)
-    print(f"[selftest] swing-foot gate: contacts={cm_swing.tolist()} (expect [False, True])")
-    print(f"[selftest] {'PASS' if ok else 'FAIL'}")
-    return 0 if ok else 1
-
-
-
-class EstimatorNode(Node):
-    def __init__(self):
-        super().__init__("h12_deploy_mjpc_estimator")
-        self.declare_parameter("scene", _DEFAULT_SCENE)
-        self.declare_parameter("publish_hz", 200.0)
-        self.declare_parameter("base_state_topic", "/h12_deploy_mjpc/sportstate_est")
-        self.declare_parameter("lowstate_topic", "/lowstate")
-        self.declare_parameter("contact_height_m", 0.04)   # foot within this of floor -> contact
-        self.declare_parameter("contact_load_nm", 5.0)     # min knee+ankle |tau| when tau usable
-        scene = self.get_parameter("scene").value
-        self._hz = float(self.get_parameter("publish_hz").value)
-        self._hthr = float(self.get_parameter("contact_height_m").value)
-        self._lthr = float(self.get_parameter("contact_load_nm").value)
-
-        self.get_logger().info(f"loading H1-2 kinematics: {scene}")
-        (self._m, self._data, self._foot_ids, self._load_idx,
-            self._height_C, _home_q) = load_model_and_calibrate(scene)
-        self._res = np.zeros(6)
-        self._ekf = RWEKF(3.0, 0.02, 0.3, 5.0, 11.34, 20, 1.0 /self._hz)
-        self._pos_xy = np.zeros(2)
-        self._ls = None
-        self._warned_short = False
-
-        qos = QoSProfile(reliability=ReliabilityPolicy.BEST_EFFORT,
-                            history=HistoryPolicy.KEEP_LAST, depth=1)
-        self.create_subscription(LowState, self.get_parameter("lowstate_topic").value,
-                                    self._on_lowstate, qos)
-        self._pub = self.create_publisher(
-            SportModeState, self.get_parameter("base_state_topic").value, 10)
-        self.create_timer(1.0 / self._hz, self._tick)
-        self.get_logger().info(
-            f"estimator ready: publishing {self.get_parameter('base_state_topic').value} "
-            f"@ {self._hz:.0f}Hz (contact gate: height<{self._hthr}m + load>{self._lthr}Nm)")
-
-    def _on_lowstate(self, msg: LowState):
-        self._ls = msg
-
-    def _tick(self):
-        ls = self._ls
-        if ls is None:
-            return
-        if len(ls.motor_state) < NJ and not self._warned_short:
-            self.get_logger().warn(
-                f"/lowstate has {len(ls.motor_state)} motors (< {NJ}); reading available")
-            self._warned_short = True
-        n = min(NJ, len(ls.motor_state))
-        q = np.zeros(NJ); dq = np.zeros(NJ); tau = np.zeros(NJ)
-        for i in range(n):
-            q[i] = ls.motor_state[i].q
-            dq[i] = ls.motor_state[i].dq
-            tau[i] = ls.motor_state[i].tau_est
-        quat = np.asarray(ls.imu_state.quaternion, dtype=float)   # wxyz
-        gyro = np.asarray(ls.imu_state.gyroscope, dtype=float)     # body frame
-
-        floor_z, foot_z, base_height, vfeet = leg_kinematics(
-            self._m, self._data, self._foot_ids, self._height_C, q, dq, quat, gyro, self._res)
-        contact = contact_mask(foot_z, floor_z, tau, self._load_idx, self._hthr, self._lthr)
-        v = self._ekf.update(vfeet, contact, tau, self._load_idx)
-
-        dt = 1.0 / self._hz
-        self._pos_xy += v[0:2] * dt
-
-        # IMU-site pose+velocity (matches original_estimator; controller backs it
-        # out to the pelvis with the same raw IMU quat + offset). Orientation and
-        # gyro are NOT published here -- the controller reads them from /lowstate.
-        R = _quat2mat(quat)
-        roff = R @ IMU_OFFSET
-        omega_w = R @ gyro
-        site_p = np.array([self._pos_xy[0], self._pos_xy[1], base_height]) + roff
-        site_v = v + np.cross(omega_w, roff)
-
-        msg = SportModeState()
-        for k in range(3):
-            msg.position[k] = float(site_p[k])
-            msg.velocity[k] = float(site_v[k])
-        self._pub.publish(msg)
-
-def main():
-    ap = argparse.ArgumentParser(description=__doc__,
-                                 formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--selftest", action="store_true", help="offline math check (no ROS), then exit")
-    ap.add_argument("--scene", default=None, help="H1-2 MuJoCo scene (default: CL_Assets handless)")
-    args, _ = ap.parse_known_args()
-
-    if args.selftest:
-        m, data, foot_ids, load_idx, height_C, home_q = load_model_and_calibrate(args.scene)
-        raise SystemExit(_selftest(m, data, foot_ids, load_idx, height_C, home_q))
-
-    if not _HAVE_ROS:
-        raise SystemExit(
-            "ROS 2 (rclpy/unitree_go/unitree_hg) is not available in this environment; "
-            "only offline --selftest can run here.")
-
+def main() -> None:
     rclpy.init()
-    node = EstimatorNode()
-    try:
-        rclpy.spin(node)
-    except KeyboardInterrupt:
-        pass
-    finally:
-        node.destroy_node()
-        if rclpy.ok():
-            rclpy.shutdown()
+    node = Node("h12_deploy_mjpc_estimator")
+
+    p = node.declare_parameter
+    script = p("estimator_script", _DEFAULT_SCRIPT).value
+    scene = p("scene", _DEFAULT_SCENE).value
+    domain = p("domain_id", int(os.environ.get("ROS_DOMAIN_ID", "0"))).value
+    iface = p("iface", "").value               # "" = auto-pin robot subnet
+    no_auto_iface = p("no_auto_iface", False).value
+    rate = p("rate", 200.0).value              # publish Hz
+    # Plant-clock the filter: plant seconds per lowstate tick (0 = wall-clocked,
+    # the validated real/twin behavior). Set to the sim's physics timestep on
+    # slower-than-realtime plants — see the fork estimator's --tick-dt help.
+    tick_dt = p("tick_dt", 0.0).value
+    lowstate_topic = p("lowstate_topic", "rt/lowstate").value
+    # Side topic by default: in sim nothing else publishes sportmodestate, but a
+    # side topic keeps the one-writer rule trivially safe; the controller's
+    # sportstate_topic param points here.
+    out_topic = p("out_topic", "rt/sportmodestate_est").value
+    vel_lpf_ms = p("vel_lpf_ms", 30.0).value
+    imu_fusion = p("imu_fusion", True).value
+    imu_tau_ms = p("imu_tau_ms", 300.0).value
+    static_dq = p("static_dq", 0.3).value
+    contact = p("contact", "min-speed").value  # min-speed | mean
+    filt = p("filter", "rw-ekf").value         # rw-ekf | complementary
+    ekf_amax = p("ekf_amax", 3.0).value
+    ekf_r0 = p("ekf_r0", 0.02).value
+    ekf_r1 = p("ekf_r1", 0.3).value
+    ekf_lfloor = p("ekf_lfloor", 5.0).value
+    ekf_chi2 = p("ekf_chi2", 11.34).value
+    ekf_rejcap = p("ekf_rejcap", 50).value
+    compare = p("compare", False).value
+    truth_topic = p("truth_topic", "rt/sportmodestate").value
+    selftest = p("selftest", False).value
+
+    node.get_logger().info(
+        f"running fork estimator {script} (filter={filt}, out={out_topic}, "
+        f"domain={domain})")
+    # Params sourced; the estimator is a pure-DDS worker from here on.
+    node.destroy_node()
+    rclpy.shutdown()
+
+    if not os.path.isfile(script):
+        sys.exit(f"[estimator_node] fork estimator not found at {script} — "
+                 "is the mujoco_mpc submodule mounted/checked out?")
+
+    argv = [
+        script,
+        "--scene", str(scene),
+        "--domain", str(domain),
+        "--rate", str(rate),
+        "--tick-dt", str(tick_dt),
+        "--lowstate-topic", str(lowstate_topic),
+        "--out-topic", str(out_topic),
+        "--vel-lpf-ms", str(vel_lpf_ms),
+        "--imu-tau-ms", str(imu_tau_ms),
+        "--static-dq", str(static_dq),
+        "--contact", str(contact),
+        "--filter", str(filt),
+        "--ekf-amax", str(ekf_amax),
+        "--ekf-r0", str(ekf_r0),
+        "--ekf-r1", str(ekf_r1),
+        "--ekf-lfloor", str(ekf_lfloor),
+        "--ekf-chi2", str(ekf_chi2),
+        "--ekf-rejcap", str(ekf_rejcap),
+        "--truth-topic", str(truth_topic),
+    ]
+    if iface:
+        argv += ["--iface", str(iface)]
+    if no_auto_iface:
+        argv.append("--no-auto-iface")
+    if not imu_fusion:
+        argv.append("--no-imu-fusion")
+    if compare:
+        argv.append("--compare")
+    if selftest:
+        argv.append("--selftest")
+
+    sys.argv = argv
+    # run_name="__main__" fires the script's own entry point; SIGINT from
+    # `ros2 launch` lands as KeyboardInterrupt in its loop, same as a terminal ^C.
+    runpy.run_path(script, run_name="__main__")
 
 
 if __name__ == "__main__":

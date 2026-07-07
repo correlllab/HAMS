@@ -406,21 +406,19 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libgl1-mesa-dev libxinerama-dev libxcursor-dev libxrandr-dev libxi-dev \
     && rm -rf /var/lib/apt/lists/*
 
-# 2. Clone the fork into /home/code, PINNED to a commit of extended_hw_patched
-#    via the MJPC_REF arg. extended_hw_patched = extended_hw + the three build
-#    fixes that used to be sed'd in here (ui_agent_server removal, magpie
-#    patch->copy, case-insensitive .STL globs), now carried as real commits so
-#    the mounted submodule source and this baked build are byte-identical — a
-#    hard requirement for the runtime incremental-build cache to stay warm.
+# 2. Clone the extended_hw branch (which now carries the merged build fixes:
+#    ui_agent_server removal, magpie patch->copy, case-insensitive .STL globs) and
+#    PIN to a commit via the MJPC_REF arg so the mounted submodule source and this
+#    baked build are byte-identical — a hard requirement for the runtime
+#    incremental-build cache to stay warm.
 #    The fork moves fast and agent_server is COMPILED from this checkout, so the
 #    baked binary only knows the tasks present at MJPC_REF — bump it (edit here or
 #    `--build-arg MJPC_REF=<sha>`, AND move the submodule gitlink to match) to
 #    pull newer tasks; that re-clones AND recompiles. Pinning keeps the build
-#    reproducible despite the moving branch + Docker layer cache.
-#    NOTE: extended_hw_patched must be PUSHED to the fork before this layer can
-#    build (it is fetched over https here, with no build-time SSH keys).
-ARG MJPC_REF=934c59a9d6f95b5fdab348cc50939a9106846ecf
-RUN git clone --branch extended_hw_patched --single-branch \
+#    reproducible despite the moving branch + Docker layer cache. MJPC_REF must be
+#    reachable from extended_hw (fetched over https; no build-time SSH keys).
+ARG MJPC_REF=c49e47efaf2c82b6ce26a980c43f76d11d15a757
+RUN git clone --branch extended_hw --single-branch \
         https://github.com/badinkajink/mujoco_mpc.git /home/code/mujoco_mpc \
     && git -C /home/code/mujoco_mpc checkout --quiet "${MJPC_REF}"
 
@@ -504,6 +502,10 @@ RUN cd /home/code/mujoco_mpc \
     && cp -a /home/code/mujoco_mpc/build/lib/libmujoco.so* /usr/local/lib/ \
     && ldconfig \
     && cp -a /home/code/mujoco_mpc/build /opt/mjpc-build-seed \
+    # Stamp the seed with the ref it was built at: launch_ros.sh's hydrate uses it
+    # to re-touch only the files that changed when the mounted submodule is AHEAD
+    # of this image (otherwise the blanket back-date makes a stale build look warm).
+    && echo "${MJPC_REF}" > /opt/mjpc-build-seed/.mjpc_ref \
     && find /opt/mjpc-build-seed/_deps -maxdepth 2 -name .git -prune -exec rm -rf {} + 2>/dev/null || true \
     && rm -rf /home/code/mujoco_mpc
 

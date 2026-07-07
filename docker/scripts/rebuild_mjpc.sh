@@ -36,6 +36,18 @@ if [ ! -f "$MJPC_BUILD/CMakeCache.txt" ]; then
         "${FC_FLAG[@]}"
 fi
 
+# 1b. The seed ships _deps PRE-POPULATED but with their .git dirs trimmed (image
+#     size), so any reconfigure (e.g. a CMakeLists.txt change after a submodule
+#     bump) must NEVER re-run FetchContent's git download/update steps — git in a
+#     .git-less _deps dir climbs to the submodule's (read-only) git metadata and
+#     fails. Pin FULLY_DISCONNECTED into the cache once; if a future dep/tag bump
+#     genuinely needs a fetch, wipe container_cache/mjpc_build and cold-rebuild.
+if [ -d "$MJPC_BUILD/_deps" ] && \
+   ! grep -q '^FETCHCONTENT_FULLY_DISCONNECTED:BOOL=ON$' "$MJPC_BUILD/CMakeCache.txt"; then
+    echo "[rebuild_mjpc] pinning FETCHCONTENT_FULLY_DISCONNECTED=ON into the warm cache"
+    cmake -DFETCHCONTENT_FULLY_DISCONNECTED=ON "$MJPC_BUILD"
+fi
+
 # 2. Incremental build of just the C++ server (identical env to the seed build).
 echo "[rebuild_mjpc] cmake --build (incremental) --target agent_server"
 CC=clang-13 CXX=clang++-13 CMAKE_GENERATOR=Ninja \

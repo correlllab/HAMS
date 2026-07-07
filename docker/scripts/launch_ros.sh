@@ -25,11 +25,67 @@ if [ -f "$MJPC_SRC/CMakeLists.txt" ] && [ ! -e "$MJPC_BUILD/CMakeCache.txt" ] \
     # mtimes are NEWER than the seeded objects -> Ninja would recompile everything
     # and CMake would reconfigure. Push SOURCE mtimes into the past (NOT the
     # multi-GB build tree, whose internal mtime ordering must stay intact). Prune
-    # the build dir and .git. Fork source == seed source (same patched SHA), so no
-    # patching is needed here.
+    # the build dir and .git.
     echo "[launch_ros] back-dating MJPC source mtimes so the seed stays warm"
     find "$MJPC_SRC" \( -path "$MJPC_BUILD" -o -name .git \) -prune -o \
          -exec touch -h -d '2000-01-01T00:00:00' {} +
+    # The blanket back-date assumes source SHA == seed SHA. When the submodule is
+    # AHEAD of the image's MJPC_REF (normal between image rebakes), that would
+    # hydrate a silently STALE build (Ninja sees everything up to date). Fix: re-touch
+    # exactly the files that differ from the seed ref so Ninja recompiles just the
+    # delta. Seed ref comes from the baked .mjpc_ref stamp (newer images) or the
+    # fallback constant (= the MJPC_REF the current image was built with). Needs the
+    # ../.git/modules/mujoco_mpc ro mount for git to work on the submodule source.
+    SEED_REF=$(cat "$MJPC_SEED/.mjpc_ref" 2>/dev/null \
+               || echo 9f3cb6488aa82efc67893261cee6a1af560e4bc1)
+    git config --global --get-all safe.directory 2>/dev/null | grep -qx "$MJPC_SRC" \
+        || git config --global --add safe.directory "$MJPC_SRC"
+    if HEAD_REF=$(git -C "$MJPC_SRC" rev-parse HEAD 2>/dev/null); then
+        if [ "$HEAD_REF" != "$SEED_REF" ]; then
+            echo "[launch_ros] source ($HEAD_REF) != seed ($SEED_REF) — re-touching the changed files"
+            git -C "$MJPC_SRC" diff --name-only "$SEED_REF" HEAD 2>/dev/null \
+                | (cd "$MJPC_SRC" && xargs -r -d '\n' touch -c -h) \
+                || { echo "[launch_ros] WARNING: seed-delta diff failed — re-touching ALL sources (cold-ish rebuild, but correct)"; \
+                     find "$MJPC_SRC" \( -path "$MJPC_BUILD" -o -name .git \) -prune -o -exec touch -h {} + ; }
+        fi
+    else
+        echo "[launch_ros] WARNING: git unusable on $MJPC_SRC (missing .git/modules mount?) — re-touching ALL sources (cold-ish rebuild, but correct)"
+        find "$MJPC_SRC" \( -path "$MJPC_BUILD" -o -name .git \) -prune -o -exec touch -h {} +
+    fi
+fi
+
+# --- unitree_sdk2 C++ install hydrate (for the h12_deploy_mjpc controller shim) ---
+# deploy_common.cc (compiled by colcon from the submodule) links unitree_sdk2's
+# C++ ChannelFactory/Publisher/Subscriber. The repo ships PREBUILT
+# libunitree_sdk2.a + CycloneDDS .so per arch, so this is a clone + header/lib
+# copy — seconds, no compilation. /opt/unitree_install is a persistent host
+# mount (container_cache/unitree_install), so this runs exactly once per host.
+# SHA pinned to the host's ~/unitree_sdk2 build (63c6f53) so fork and shim link
+# the SAME SDK.
+UNITREE_PREFIX=/opt/unitree_install
+UNITREE_SDK_REF=63c6f53103e2f28e23b807d7399e92338c9d07d3
+if [ ! -f "$UNITREE_PREFIX/lib/libunitree_sdk2.a" ]; then
+    echo "[launch_ros] hydrating unitree_sdk2 C++ install -> $UNITREE_PREFIX (@$UNITREE_SDK_REF)"
+    rm -rf /tmp/unitree_sdk2
+    if git clone https://github.com/unitreerobotics/unitree_sdk2.git /tmp/unitree_sdk2 \
+       && git -C /tmp/unitree_sdk2 checkout --quiet "$UNITREE_SDK_REF" \
+       && cmake -S /tmp/unitree_sdk2 -B /tmp/unitree_sdk2/build \
+                -DCMAKE_INSTALL_PREFIX="$UNITREE_PREFIX" >/dev/null \
+       && cmake --install /tmp/unitree_sdk2/build >/dev/null; then
+        echo "[launch_ros] unitree_sdk2 installed"
+    else
+        echo "[launch_ros] WARNING: unitree_sdk2 hydrate FAILED — h12_deploy_mjpc's controller will be skipped by its CMake guard"
+    fi
+    rm -rf /tmp/unitree_sdk2
+fi
+
+# --- MJPC incremental rebuild (ninja no-op scan when already warm) ---
+# Brings libmjpc/threadpool + the staged task assets + the dist-packages
+# agent_server current with the mounted submodule BEFORE colcon links
+# h12_deploy_mjpc against the build tree (after a hydrate the tree is at the
+# image's MJPC_REF; the delta-touch above marked exactly what must recompile).
+if [ -f "$MJPC_SRC/CMakeLists.txt" ] && [ -e "$MJPC_BUILD/CMakeCache.txt" ]; then
+    /home/code/h12_sim_scripts/rebuild_mjpc.sh
 fi
 
 WS=/home/code/core_ws

@@ -162,13 +162,16 @@ class RosSensorBridge(Node):
 
         self.cam_width = cam_width
         self.cam_height = cam_height
-        self.cam_period = 1.0 / cam_rate_hz
+        # rate <= 0 disables the publisher entirely (h12_mujoco --no-sensors:
+        # the renders/ray casts hold the sim lock 50-60 ms, stalling rt/lowstate
+        # and dragging RTF far below 1x when nothing consumes the topics).
+        self.cam_period = (1.0 / cam_rate_hz) if cam_rate_hz > 0 else float("inf")
         # Far-plane distance in world units. MuJoCo's depth buffer reports
         # zfar for rays that miss; mask those pixels to "no return" so
         # consumers don't treat the far plane as a real surface.
         self.zfar = float(model.vis.map.zfar * model.stat.extent)
 
-        self.lidar_period = 1.0 / lidar_rate_hz
+        self.lidar_period = (1.0 / lidar_rate_hz) if lidar_rate_hz > 0 else float("inf")
         self.lidar_max_range = lidar_max_range
         self.lidar_min_range = lidar_min_range
         # Livox MID-360 FOV in WORLD coordinates is el ∈ [-7°, +52°] (mostly
@@ -200,8 +203,9 @@ class RosSensorBridge(Node):
         # reads CustomPoint.offset_time [ns] and divides by 1e6 → per-point
         # time [ms] for motion deskew. Span = one scan period (1 / rate).
         az_idx = np.arange(self.lidar_rays) % lidar_az_rays
+        _period = self.lidar_period if np.isfinite(self.lidar_period) else 0.0
         self.lidar_offset_time_ns = (
-            (az_idx / lidar_az_rays) * self.lidar_period * 1e9).astype(np.uint32)
+            (az_idx / lidar_az_rays) * _period * 1e9).astype(np.uint32)
         # Preallocated mj_multiRay output buffers (overwritten each tick).
         # mujoco 3.3.1's pybind binding requires column-vector shapes
         # (m, 1) for the geomid / dist / vec / pnt / geomgroup args.

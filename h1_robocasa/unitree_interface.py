@@ -11,9 +11,13 @@ from unitree_sdk2py.utils.thread import RecurrentThread
 from unitree_sdk2py.idl.unitree_hg.msg.dds_ import LowCmd_
 from unitree_sdk2py.idl.unitree_hg.msg.dds_ import LowState_
 from unitree_sdk2py.idl.default import unitree_hg_msg_dds__LowState_ as LowState_default
+from unitree_sdk2py.idl.unitree_go.msg.dds_ import SportModeState_
+from unitree_sdk2py.idl.default import (
+    unitree_go_msg_dds__SportModeState_ as SportModeState_default)
 
 TOPIC_LOWCMD = 'rt/lowcmd'
 TOPIC_LOWSTATE = 'rt/lowstate'
+TOPIC_HIGHSTATE = 'rt/sportmodestate'
 # 27 motors on main body, 3 sensors on each motor
 MOTOR_NUM = 27
 MOTOR_SENSOR_NUM = 3
@@ -21,7 +25,8 @@ MOTOR_SENSOR_NUM = 3
 DOMAIN_ID = int(os.getenv("ROS_DOMAIN_ID"))
 assert DOMAIN_ID > 0 and isinstance(DOMAIN_ID, int), "Please set ROS_DOMAIN_ID environment variable to a positive value, e.g. export ROS_DOMAIN_ID=1, domain 0 is reserved for the real robot."
 class SimInterface:
-    def __init__(self, model, data, lock=None, resolver=None):
+    def __init__(self, model, data, lock=None, resolver=None,
+                 truth_sportstate=False):
         # record mujoco model & data
         self.model = model
         self.data = data
@@ -51,6 +56,39 @@ class SimInterface:
         self.low_state_thread = RecurrentThread(interval=self.dt, target=self.publish_low_state, name='sim_lowstate')
         self.low_state_thread.Start()
 
+        # TRUTH sportmodestate (TWIN PARITY, 2026-07-04): the digital twin's
+        # SimInterface publishes GROUND-TRUTH base position/velocity on
+        # rt/sportmodestate (framepos/framelinvel of the IMU site) — the deploy
+        # node was validated against truth state, and the twin bench never runs
+        # the RW-EKF estimator. On this plant the estimator's leg-odometry xy
+        # wanders ~0.3 m under sim foot micro-slip, feeding phantom base
+        # velocities into the policy's capture-point terms. This publisher
+        # mirrors the twin exactly: position = IMU-site world pos, velocity =
+        # IMU-site world linvel (the node back-projects to the pelvis with its
+        # kImuOffset). Opt-in; when used, park the estimator on another topic.
+        self.imu_site = -1
+        if truth_sportstate and self.have_imu:
+            qa = resolver.sensor_adr["imu_quat"][0]
+            for s in range(model.nsensor):
+                if int(model.sensor_adr[s]) == int(qa):
+                    self.imu_site = int(model.sensor_objid[s])
+                    break
+        if truth_sportstate and self.imu_site >= 0:
+            self.high_state = SportModeState_default()
+            self.high_state_publisher = ChannelPublisher(
+                TOPIC_HIGHSTATE, SportModeState_)
+            self.high_state_publisher.Init()
+            self.high_state_thread = RecurrentThread(
+                interval=self.dt, target=self.publish_high_state,
+                name='sim_highstate')
+            self.high_state_thread.Start()
+            print("[unitree_interface] TRUTH rt/sportmodestate publisher ON "
+                  "(twin-parity ground-truth base state; estimator must be "
+                  "parked on another topic)")
+        elif truth_sportstate:
+            print("[unitree_interface] truth sportstate requested but no IMU "
+                  "site found -- NOT publishing")
+
         # subscribe to low command
         self.low_cmd_subscriber = ChannelSubscriber(TOPIC_LOWCMD, LowCmd_)
         self.low_cmd_subscriber.Init(self.low_cmd_handler, 10)
@@ -61,7 +99,17 @@ class SimInterface:
         # on the floor — preferable to a stiff pose-hold snapshot, which
         # tries to freeze whatever chaotic mid-fall pose was sampled at the
         # moment of timeout and tends to NaN against contact dynamics.
+        # The gap is measured in SIM time once commands have started: with the
+        # full sensor set each lidar+camera cycle holds the sim lock up to ~1 s
+        # of WALL time, blocking low_cmd_handler with it — a wall-clocked
+        # watchdog then fired once per sensor cycle (294 times in one bringup,
+        # 2026-07-03), injecting a limp zero-ctrl step into every cycle even
+        # though NO sim time passed without a command. A frozen world can't
+        # miss commands; a genuinely dead controller still trips this because
+        # sim time keeps advancing without new lowcmds.
         self.last_cmd_time = time.time()
+        self.last_cmd_simtime = None   # sim clock stamp of the last lowcmd
+        self.last_cmd_kp = 0.0         # max commanded stiffness (engagement gate)
         self.timeout = 0.1
         self.timeout_detected = False
         self.timeout_thread = RecurrentThread(
@@ -102,12 +150,28 @@ class SimInterface:
         # write to low state (DDS publish is thread-safe, no lock needed)
         self.low_state_publisher.Write(self.low_state)
 
+    def publish_high_state(self):
+        if self.data is None or self.imu_site < 0:
+            return
+        v6 = np.zeros(6)   # [angular(3); linear(3)], world frame
+        with self._lock:
+            mujoco.mj_objectVelocity(self.model, self.data,
+                                     mujoco.mjtObj.mjOBJ_SITE,
+                                     self.imu_site, v6, 0)
+            p = self.data.site_xpos[self.imu_site].copy()
+        for k in range(3):
+            self.high_state.position[k] = float(p[k])
+            self.high_state.velocity[k] = float(v6[3 + k])
+        self.high_state_publisher.Write(self.high_state)
+
     def low_cmd_handler(self, msg: LowCmd_):
         if self.data is None:
             return
         r = self.resolver
         with self._lock:
             self.last_cmd_time = time.time()
+            self.last_cmd_simtime = float(self.data.time)
+            _kmax = 0.0
             # apply control to each motor (tau + kp*(q*-q) + kd*(dq*-dq))
             for i in range(self.num_motor):
                 ci = int(r.motor_ctrl[i])
@@ -116,12 +180,25 @@ class SimInterface:
                 mc = msg.motor_cmd[i]
                 if mc.mode == 1:
                     self.data.ctrl[ci] = mc.tau + mc.kp * (mc.q - q_cur) + mc.kd * (mc.dq - dq_cur)
+                    if mc.kp > _kmax:
+                        _kmax = mc.kp
                 else:
                     self.data.ctrl[ci] = 0.0
+            # max commanded stiffness this cmd — the harness gates joint-hold
+            # release on kp>1 (a STIFF controller command), NOT on last_cmd_time:
+            # the safety layer idles at kp=0 zeros, which would release the hold
+            # before the controller is driving. Twin-parity (its _stiff["kp"] gate).
+            self.last_cmd_kp = _kmax
 
     def check_cmd_timeout(self):
-        current_time = time.time()
-        if (current_time - self.last_cmd_time) > self.timeout:
+        # Pre-first-command: wall clock (original behavior — the spawn-limp zero).
+        # After commands start: SIM-time gap, so sensor-render world freezes
+        # (no sim time elapses) can't fake a dead controller.
+        if self.last_cmd_simtime is None:
+            timed_out = (time.time() - self.last_cmd_time) > self.timeout
+        else:
+            timed_out = (float(self.data.time) - self.last_cmd_simtime) > self.timeout
+        if timed_out:
             if not self.timeout_detected:
                 self.timeout_detected = True
                 print('Command timeout! Releasing motors (zero ctrl).')

@@ -1,0 +1,45 @@
+# Full-body MJPC stand BENCH params (h1_sim_fullbody_bench.launch.py). Same
+# estimator + deploy core as mjpc_sim.yaml, but the WHOLE-BODY core (nu=27, Lean
+# task) instead of the legs-only core -- so the full-body controller (arms + legs,
+# the validated 281 s real-robot stand) can be benched on RoboCasa through the
+# SAME in-container DDS/estimator path as the lower body. Used to confirm the
+# sim2sim2sim contact-parity fix against the full-body reference.
+
+h12_deploy_mjpc_estimator:
+  ros__parameters:
+    out_topic: rt/sportmodestate_est  # PARKED (2026-07-04): the sim publishes
+    # TRUTH rt/sportmodestate (--truth-sportstate), twin-parity — the twin's
+    # SimInterface publishes ground-truth base state and the node was validated
+    # against it; the RW-EKF belongs to the REAL chain. On this plant the
+    # estimator's leg-odometry xy wandered ~0.3 m (sim foot micro-slip) =
+    # phantom capture-point velocity. Estimator stays running here for
+    # side-by-side logging only. To A/B the estimator back in: out_topic ->
+    # rt/sportmodestate and drop --truth-sportstate from the sim.
+    rate: 200.0
+    filter: rw-ekf
+    tick_dt: 0.005                     # plant-clock the filter to RoboCasa's timestep
+
+mjpc_deploy_lowerbody_controller:
+  ros__parameters:
+    controller_exe: mjpc_fullbody_core   # the whole-body h12_control_node core
+    task: "Lean H12 Magpie"              # full-body task; strategy 6 = stand
+    strategy: 6
+    gravity_ff: 0.85
+    # gff CLOSED for good (2026-07-04, takes H2/H3, clean handoff both): 1.0
+    # was re-tested with the fixed holdout+grip-fade handoff (the old bracket
+    # was confounded by the broken handoff) and STILL collapsed (H3: rode the
+    # payout to z 0.27, 650 N rope-capped hang). 0.85 hands off cleanly and
+    # holds the assisted equilibrium (H2: z 0.94, ~280 N). The height/support
+    # deficit is NOT a gravity-ff shortfall; next suspect = state source
+    # (estimator leg-odometry vs the twin's ground-truth sportmodestate).
+    plan_threads: 3
+    # PLANNER-RATE PARITY (2026-07-04, wobble root cause R1): see mjpc_sim.yaml --
+    # ~14 iters/s wall ~= twin's iterations-per-plant-second at 0.25x RTF.
+    # Bench-only; twin/real keep 12.
+    twin_dt: 0.005
+    sportstate_topic: rt/sportmodestate_est  # REAL-PARITY estimator (2026-07-05, matches lower-body)
+    imu_pitch_offset_deg: 0.0
+    has_arm_aware: false                 # full node owns the arms + has no --arm_aware flag; suppress it
+    stale_sec: 1.5
+    drop_band: false
+    band_drop_after_secs: 25.0
