@@ -44,7 +44,7 @@ start_rviz_stack() {
     xdpyinfo -display "$RVIZ_DISPLAY" >/dev/null 2>&1 \
         || { echo "[launch_ros_mac] Xvfb failed to start"; cat /tmp/xvfb_rviz.log; return 1; }
 
-    fluxbox >/tmp/fluxbox_rviz.log 2>&1 &
+    fluxbox >/tmp/fluxbox_rviz.log 2>&1 &   # bg set by the fbsetbg shim (Dockerfile)
     sleep 1
     x11vnc -display "$RVIZ_DISPLAY" -rfbport "$RVIZ_VNC_PORT" -localhost \
         -forever -shared -nopw -quiet -bg >/tmp/x11vnc_rviz.log 2>&1
@@ -81,7 +81,14 @@ cd "$WS"
 # that check; they carry no ament index marker so they never show up in
 # `ros2 pkg list`. NOTE only h1_sim_bringup_mac.launch.py runs here — the other
 # launch files exec-launch the omitted packages (nav2, FAST_LIO, model_server...).
-PKGS="custom_ros_messages magpie_msgs h12_ros2_model h12_ros2_controller h12_safety_layer h1_bringup"
+# unitree_hg + h12_lowerbody_controller provide the optional lower-body stack
+# (walk/FAME policies). They build cheaply and are only *launched* when
+# HAMS_LOWERBODY is set (see the bringup), but building them always keeps
+# `ros2 run h12_lowerbody_controller fame_node` available in a shell. unitree_hg
+# needs ros-humble-rosidl-generator-dds-idl (added to the image); torch is
+# already present. NOTE: FAME balances the robot standing unsupported; the walk
+# policy currently does not stay up in the RoboCasa sim (see README).
+PKGS="custom_ros_messages magpie_msgs h12_ros2_model h12_ros2_controller h12_safety_layer h1_bringup unitree_hg h12_lowerbody_controller"
 H1_BRINGUP_STUB_DEPS="estop livox_ros_driver2 fast_lio model_server"
 
 for _dep in $H1_BRINGUP_STUB_DEPS; do

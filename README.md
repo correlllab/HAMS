@@ -249,6 +249,25 @@ rob_home
 Watch the motion in either viewer. (`rob_pose` takes a name and moves the robot;
 `rob_poses` only prints the list.)
 
+### Lower-body controller (standing free)
+
+By default an elastic-band tether holds the robot upright and only the upper body
+is controlled. Set `HAMS_LOWERBODY=fame` to run the RMA lower-body policy, which
+releases the tether and **balances the robot standing unsupported**:
+
+```bash
+HAMS_DISPLAY=vnc HAMS_RVIZ=vnc HAMS_LOWERBODY=fame \
+  docker compose -f docker/docker-compose.mac.yml up
+```
+
+Caveat: `HAMS_LOWERBODY=fame` **stands** (and squats via `/lowerbody/squat_cmd`)
+but does **not** locomote — it holds position. `HAMS_LOWERBODY=walk` runs the
+TorchScript walk policy, which currently does **not** stay upright in the RoboCasa
+sim (falls a few seconds after the tether releases); true forward walking needs a
+locomotion policy tuned for this simulator. (`torch` is already in the ros image;
+building `unitree_hg` needs `rosidl-generator-dds-idl`, which the image now
+includes.)
+
 ### macOS gotchas
 
 - **The host `docker` CLI socket is intermittent** under Colima — `docker …` may

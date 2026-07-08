@@ -31,7 +31,7 @@ def generate_launch_description():
     # MuJoCo publishes /clock with sim time; keep all nodes on it.
     sim_time_param = {'use_sim_time': True}
 
-    return LaunchDescription([
+    nodes = [
         Node(
             package='tf2_ros',
             executable='static_transform_publisher',
@@ -84,4 +84,25 @@ def generate_launch_description():
             parameters=[sim_time_param],
             output='screen',
         ),
-    ])
+    ]
+
+    # Optional lower-body locomotion controller (HAMS_LOWERBODY). Off by default:
+    # the elastic-band tether then holds the robot upright. The node self-sequences
+    # its band release (waits for the IK to finish) and publishes leg setpoints on
+    # /safety/lowcmd_lower_in for the safety_node to merge.
+    #   HAMS_LOWERBODY=fame  RMA standing/squatting policy — balances the robot
+    #                        standing UNSUPPORTED (verified). Does not locomote.
+    #   HAMS_LOWERBODY=walk  TorchScript walk policy — currently does NOT stay up
+    #                        in the RoboCasa sim (falls ~4s; here for completeness).
+    lowerbody = os.environ.get('HAMS_LOWERBODY', '').strip().lower()
+    _lowerbody_exec = {'fame': 'fame_node', 'walk': 'walking_node'}.get(lowerbody)
+    if _lowerbody_exec:
+        nodes.append(Node(
+            package='h12_lowerbody_controller',
+            executable=_lowerbody_exec,
+            name=_lowerbody_exec,
+            parameters=[sim_time_param],
+            output='screen',
+        ))
+
+    return LaunchDescription(nodes)

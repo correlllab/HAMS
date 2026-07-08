@@ -74,6 +74,11 @@ services:
       # can run either or both. View via docker/scripts/mac_vnc_tunnel.sh:
       #   HAMS_RVIZ=vnc docker compose -f docker/docker-compose.mac.yml up
       - HAMS_RVIZ=${HAMS_RVIZ:-0}
+      # Optional lower-body controller: HAMS_LOWERBODY=fame runs the RMA policy
+      # that balances the robot standing unsupported (releases the elastic band);
+      # =walk runs the walk policy (falls in this sim). Default (unset) keeps the
+      # band tether holding the robot upright with upper-body IK only.
+      - HAMS_LOWERBODY=${HAMS_LOWERBODY:-}
     volumes:
       - ../core_ws:/home/code/core_ws
       - ../CL_Assets:/home/code/CL_Assets:ro

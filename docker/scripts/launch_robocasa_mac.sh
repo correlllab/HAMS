@@ -41,7 +41,7 @@ start_vnc_stack() {
     xdpyinfo -display "$VNC_DISPLAY" >/dev/null 2>&1 \
         || { echo "[launch_robocasa_mac] Xvfb failed to start"; cat /tmp/xvfb.log; exit 1; }
 
-    fluxbox >/tmp/fluxbox.log 2>&1 &
+    fluxbox >/tmp/fluxbox.log 2>&1 &   # bg set by the fbsetbg shim (Dockerfile)
     sleep 1
 
     # -localhost: only accept VNC connections from within the VM (the SSH tunnel

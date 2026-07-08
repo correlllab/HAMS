@@ -111,6 +111,23 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libgl1-mesa-dri x11-utils \
     && rm -rf /var/lib/apt/lists/*
 
+# fluxbox's default style calls fbsetbg to set a wallpaper; with no wallpaper
+# setter installed it pops an xmessage "wallpaper cannot be set" error on the VNC
+# display. Replace fbsetbg with a shim that sets a solid root color via fbsetroot
+# (bundled with fluxbox) — clean background, no error dialog.
+RUN printf '#!/bin/sh\nexec fbsetroot -solid "#2b2b2b"\n' > /usr/bin/fbsetbg \
+    && chmod +x /usr/bin/fbsetbg
+
+# -----------------------------------------------------------------------------
+# rosidl DDS-IDL generator — needed to build unitree_hg (the Unitree message
+# package the lower-body walk/FAME controllers depend on). unitree_hg ships from
+# unitree_ros2/cyclonedds_ws and its CMake generates DDS IDL, which this
+# FastDDS-only slim image otherwise lacks. Only pulled in for the optional
+# lower-body stack (HAMS_LOWERBODY); torch is already present in the base image.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ros-humble-rosidl-generator-dds-idl \
+    && rm -rf /var/lib/apt/lists/*
+
 # Overlay the colcon install in interactive shells so `docker exec … bash` sees
 # the same packages as the running bringup (incl. h1_bringup, so
 # `ros2 launch h1_bringup <TAB>` works). launch_ros_mac.sh builds to
