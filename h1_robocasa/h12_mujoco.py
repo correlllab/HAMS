@@ -1,5 +1,6 @@
 import argparse
 import math
+import os
 import random
 import threading
 import time
@@ -192,13 +193,19 @@ def sim_loop(task, viewer=True, layout=None, style=None, seed=None):
     # unprefixed (ctor defaults). cameras: (mujoco name, /realsense/<ns>, frame_id).
     # Head rides the robot prefix; the eye-in-hand gripper cameras ride the gripper
     # prefixes (same as the hand bridges below).
+    # RGBD camera rendering (3x 256x256 offscreen renders per frame) is the
+    # heaviest per-step cost on CPU. HAMS_CAMERAS=0 drops them to speed the sim up
+    # for locomotion/SLAM (lidar + odom are unaffected).
+    _cameras_on = os.environ.get('HAMS_CAMERAS', '1').strip().lower() not in ('0', 'off', 'false', 'no')
+    _cameras = [
+        (f"{pfx}head_cam",          "head",       "camera_color_optical_frame"),
+        ("gripper0_left_hand_cam",  "left_hand",  "left_hand_camera_color_optical_frame"),
+        ("gripper0_right_hand_cam", "right_hand", "right_hand_camera_color_optical_frame"),
+    ] if _cameras_on else []
+    print(f"[h12_mujoco] RGBD cameras {'ON' if _cameras_on else 'OFF (HAMS_CAMERAS=0)'}")
     ros_bridge = RosSensorBridge(
         model, data,
-        cameras=[
-            (f"{pfx}head_cam",          "head",       "camera_color_optical_frame"),
-            ("gripper0_left_hand_cam",  "left_hand",  "left_hand_camera_color_optical_frame"),
-            ("gripper0_right_hand_cam", "right_hand", "right_hand_camera_color_optical_frame"),
-        ],
+        cameras=_cameras,
         cam_width=256, cam_height=256,   # all 3 cameras render at 256x256 (RoboCasa default)
         # MID-360 fidelity: 360x56 @ 10Hz ~= 201k pts/s (real ~200k), 0.1m near /
         # 40m far range, per-point offset_time for FAST-LIO deskew. el_rays/rate

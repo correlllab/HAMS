@@ -123,12 +123,17 @@ def generate_launch_description():
             name='pointcloud_to_laserscan',
             parameters=[{
                 'target_frame': 'pelvis',
-                'min_height': -0.90, 'max_height': 0.55,
+                # Relaxed vs h1_navigation's FAST-LIO tuning: the raw sim lidar in
+                # the cluttered kitchen needs a lower range_min (catch the counter
+                # the robot is right up against, while still dropping the body,
+                # which is <=0.35 m from pelvis) and a taller band (counter tops /
+                # cabinets). The tight nav config filtered every return out here.
+                'min_height': -0.85, 'max_height': 1.2,
                 'angle_min': -3.14159, 'angle_max': 3.14159,
                 'angle_increment': 0.0087,
-                'range_min': 0.6, 'range_max': 6.0,
+                'range_min': 0.4, 'range_max': 8.0,
                 'use_inf': True, 'scan_time': 0.0333,
-                'transform_tolerance': 0.3, 'queue_size': 20,
+                'transform_tolerance': 1.0, 'queue_size': 20,
             }, sim_time_param],
             remappings=[('cloud_in', '/livox/pointcloud'), ('scan', '/converted_scan')],
             output='screen',

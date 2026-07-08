@@ -345,7 +345,7 @@ class RosSensorBridge(Node):
             except Exception as e:
                 self.get_logger().warn(f"imu publish failed: {e}")
 
-        if sim_t - self._last_cam_sim_t >= self.cam_period:
+        if self._camera_specs and sim_t - self._last_cam_sim_t >= self.cam_period:
             self._last_cam_sim_t = sim_t
             try:
                 self._publish_camera_frame(stamp)
