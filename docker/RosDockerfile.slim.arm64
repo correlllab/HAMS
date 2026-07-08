@@ -111,8 +111,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libgl1-mesa-dri x11-utils \
     && rm -rf /var/lib/apt/lists/*
 
-# Overlay core_ws/install if present (created by launch_ros_mac.sh's colcon build).
-RUN echo '[ -f /home/code/core_ws/install/setup.bash ] && source /home/code/core_ws/install/setup.bash' >> /root/.bashrc
+# Overlay the colcon install in interactive shells so `docker exec … bash` sees
+# the same packages as the running bringup (incl. h1_bringup, so
+# `ros2 launch h1_bringup <TAB>` works). launch_ros_mac.sh builds to
+# /opt/core_ws/install (INSTALL_BASE, a named volume on the VM's native ext4 —
+# NOT the virtiofs-mounted /home/code/core_ws/install, which may hold a stale
+# host-side build). Source that same path here.
+RUN echo '[ -f /opt/core_ws/install/setup.bash ] && source /opt/core_ws/install/setup.bash' >> /root/.bashrc
 
 WORKDIR /home/code/core_ws
 

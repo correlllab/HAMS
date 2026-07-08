@@ -72,13 +72,22 @@ BUILD_BASE=/opt/core_ws/build
 INSTALL_BASE=/opt/core_ws/install
 cd "$WS"
 
-# Only the packages the minimal Mac bringup needs. h1_bringup itself is NOT
-# built: it declares exec-deps on the heavy fast_lio / model_server /
-# livox_ros_driver2 packages (which need the ML stack), and the minimal launch
-# file is run by absolute path so the package need not be installed. Everything
-# else in core_ws (model_server, h12_skills, FAST_LIO, cl_realsense,
-# magpie_control, nav2 ...) is intentionally skipped on this CPU-only image.
-PKGS="custom_ros_messages magpie_msgs h12_ros2_model h12_ros2_controller h12_safety_layer"
+# The packages the minimal Mac bringup needs. h1_bringup (ament_python, just
+# launch/config/rviz files) is included so `ros2 launch h1_bringup <file>`
+# resolves with tab completion — but colcon-ros refuses to build it until its
+# in-workspace exec_depends have a package.sh in the install space, and we
+# deliberately don't build the heavy ones (estop, livox_ros_driver2, fast_lio,
+# model_server — the LIO/ML/driver stack). Empty package.sh stubs (below) satisfy
+# that check; they carry no ament index marker so they never show up in
+# `ros2 pkg list`. NOTE only h1_sim_bringup_mac.launch.py runs here — the other
+# launch files exec-launch the omitted packages (nav2, FAST_LIO, model_server...).
+PKGS="custom_ros_messages magpie_msgs h12_ros2_model h12_ros2_controller h12_safety_layer h1_bringup"
+H1_BRINGUP_STUB_DEPS="estop livox_ros_driver2 fast_lio model_server"
+
+for _dep in $H1_BRINGUP_STUB_DEPS; do
+    mkdir -p "$INSTALL_BASE/$_dep/share/$_dep"
+    [ -e "$INSTALL_BASE/$_dep/share/$_dep/package.sh" ] || : > "$INSTALL_BASE/$_dep/share/$_dep/package.sh"
+done
 
 echo "[launch_ros_mac] colcon build --packages-select $PKGS"
 colcon build --symlink-install \
