@@ -74,8 +74,14 @@ class SimInterface:
         # on the floor — preferable to a stiff pose-hold snapshot, which
         # tries to freeze whatever chaotic mid-fall pose was sampled at the
         # moment of timeout and tends to NaN against contact dynamics.
-        self.last_cmd_time = time.time()
-        self.timeout = 0.1
+        # Measured in SIM time (data.time), NOT wall time. The headless CPU sim
+        # runs at ~0.2x real-time, so a 0.1s *wall* window was only ~20ms of sim
+        # time; the compute-starved control loop (policy inference sharing cores
+        # with MuJoCo + nav2 + slam) kept overshooting it, so the watchdog zeroed
+        # the motors and dropped the robot ~0.7s after the band released. In sim
+        # time the threshold is independent of how fast the sim actually runs.
+        self.last_cmd_time = 0.0  # sim seconds of the last received /lowcmd
+        self.timeout = float(os.environ.get('HAMS_CMD_TIMEOUT', '0.5'))  # sim seconds
         self.timeout_detected = False
         self.timeout_thread = RecurrentThread(
             interval=0.01, target=self.check_cmd_timeout, name='cmd_watchdog'
@@ -120,7 +126,7 @@ class SimInterface:
             return
         # Latch the command only (no data touch, no lock). write_ctrl turns it into
         # a torque every sim step against the CURRENT state.
-        self.last_cmd_time = time.time()
+        self.last_cmd_time = self.data.time  # sim time; watchdog compares in sim time
         for i in range(self.num_motor):
             mc = msg.motor_cmd[i]
             self._cmd_mode[i] = mc.mode
@@ -152,7 +158,9 @@ class SimInterface:
                 self.data.ctrl[ci] = 0.0
 
     def check_cmd_timeout(self):
-        current_time = time.time()
+        if self.data is None:
+            return
+        current_time = self.data.time  # sim time (paused sim -> no false timeout)
         if (current_time - self.last_cmd_time) > self.timeout:
             if not self.timeout_detected:
                 self.timeout_detected = True
