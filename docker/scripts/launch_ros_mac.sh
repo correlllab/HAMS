@@ -34,6 +34,12 @@ RVIZ_CONFIG="${RVIZ_CONFIG:-/home/code/h12_sim_scripts/h1_sim.rviz}"
 
 start_rviz_stack() {
     echo "[launch_ros_mac] starting RViz VNC stack on $RVIZ_DISPLAY ($RVIZ_GEOMETRY)"
+    # `docker restart` reuses the container FS: clear any stale X lock/socket from
+    # a previous run so Xvfb doesn't abort with "Server is already active".
+    dnum="${RVIZ_DISPLAY#:}"
+    pkill -f "Xvfb ${RVIZ_DISPLAY}" 2>/dev/null || true
+    sleep 0.3
+    rm -f "/tmp/.X${dnum}-lock" "/tmp/.X11-unix/X${dnum}" 2>/dev/null || true
     Xvfb "$RVIZ_DISPLAY" -screen 0 "$RVIZ_GEOMETRY" +extension GLX +render -noreset \
         >/tmp/xvfb_rviz.log 2>&1 &
     export DISPLAY="$RVIZ_DISPLAY"

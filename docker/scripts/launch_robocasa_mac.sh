@@ -30,6 +30,13 @@ VNC_GEOMETRY="${VNC_GEOMETRY:-1280x800x24}"
 # framebuffer. All children are killed on exit via the trap below.
 start_vnc_stack() {
     echo "[launch_robocasa_mac] starting VNC stack on $VNC_DISPLAY ($VNC_GEOMETRY)"
+    # `docker restart` reuses the container FS, so a stale /tmp/.X99-lock (and the
+    # abstract socket) from the previous run makes Xvfb abort with "Server is
+    # already active for display 99". Clear any leftovers first so restarts work.
+    dnum="${VNC_DISPLAY#:}"
+    pkill -f "Xvfb ${VNC_DISPLAY}" 2>/dev/null || true
+    sleep 0.3
+    rm -f "/tmp/.X${dnum}-lock" "/tmp/.X11-unix/X${dnum}" 2>/dev/null || true
     Xvfb "$VNC_DISPLAY" -screen 0 "$VNC_GEOMETRY" +extension GLX +render -noreset \
         >/tmp/xvfb.log 2>&1 &
     export DISPLAY="$VNC_DISPLAY"
