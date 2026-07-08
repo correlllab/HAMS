@@ -125,37 +125,52 @@ global_costmap:
         - obstacle_layer
         - inflation_layer
       footprint: "[ [0.20, 0.275], [0.20, -0.275], [-0.20, -0.275], [-0.20, 0.275] ]"
+      # NOTE: costmap-layer params go DIRECTLY under the plugin key. An extra
+      # `ros__parameters:` level here silently hides them, so nav2 falls back to
+      # defaults: the obstacle_layer ended up with NO observation sources (planner
+      # blind to live obstacles, driving into appliances) and the inflation_layer
+      # ignored its radius. The local_costmap below shows the correct (flat) form.
       static_layer:
         plugin: nav2_costmap_2d::StaticLayer
-        ros__parameters:
-          map_subscribe_topic: /map
-          trinary_map: false
-          unknown_cost_value: 0
-          lethal_cost_threshold: 100
-          track_unknown_space: true
+        map_subscribe_topic: /map
+        trinary_map: false
+        unknown_cost_value: 0
+        lethal_cost_threshold: 100
+        track_unknown_space: true
       obstacle_layer:
         plugin: nav2_costmap_2d::ObstacleLayer
-        ros__parameters:
-          enabled: true
-          obstacle_build_latch: false
-          laser_scan_topic: /converted_scan
+        enabled: true
+        obstacle_build_latch: false
+        observation_sources: laser_scan_sensor pointcloud_sensor
+        laser_scan_sensor:
+          topic: /converted_scan
           max_obstacle_range: 2.5
-          observation_sources: laser_scan_sensor
-          laser_scan_sensor:
-            topic: /converted_scan
-            max_obstacle_range: 2.5
-            obstacle_min_range: 0.6  # drop near-pelvis self-returns (defence in depth)
-            inf_is_valid: true
-            clear_buffer_on_each_layer: true
-            data_type: LaserScan
-            marking: true
-            clearing: true
+          obstacle_min_range: 0.6  # drop near-pelvis self-returns (defence in depth)
+          inf_is_valid: true
+          clear_buffer_on_each_layer: true
+          data_type: LaserScan
+          marking: true
+          clearing: true
+        # Full 3-D Livox cloud so the *planner* sees obstacles the flat scan slice
+        # misses (appliances, counters, overhangs). Height band is in the map frame:
+        # the floor is z~0 (pelvis stands at ~0.97 m), so 0.15 m drops floor returns
+        # and 1.8 m caps at head height. Robot self-returns are already stripped by
+        # the bridge's lidar_self_filter, so the robot never marks itself.
+        pointcloud_sensor:
+          topic: /livox/pointcloud
+          data_type: PointCloud2
+          min_obstacle_height: 0.15
+          max_obstacle_height: 1.8
+          obstacle_max_range: 5.0
+          raytrace_max_range: 6.0
+          marking: true
+          clearing: true
+          inf_is_valid: false
       inflation_layer:
         plugin: nav2_costmap_2d::InflationLayer
-        ros__parameters:
-          enabled: true
-          cost_scaling_factor: 3.0
-          inflation_radius: 0.2
+        enabled: true
+        cost_scaling_factor: 3.0
+        inflation_radius: 0.2
 local_costmap:
   local_costmap:
     ros__parameters:
@@ -179,11 +194,11 @@ local_costmap:
         enabled: True
         publish_voxel_map: True
         origin_z: 0.0
-        z_resolution: 0.05
-        z_voxels: 60            # 0.05 * 60 = 3.0 m tall (was 16 -> 0.8 m); contains the ~2 m sensor/obstacle plane in odom
-        max_obstacle_height: 3.0
+        z_resolution: 0.125     # nav2's voxel_grid HARD-CAPS z_voxels at 16; 0.125*16 = 2.0 m
+        z_voxels: 16            # (60 was silently clamped to 16 -> only 0.8 m tall, missing counter-height obstacles)
+        max_obstacle_height: 2.0
         mark_threshold: 0
-        observation_sources: scan
+        observation_sources: scan pointcloud
         scan:
           topic: /converted_scan
           max_obstacle_height: 3.0
@@ -194,6 +209,19 @@ local_costmap:
           raytrace_min_range: 0.0
           obstacle_max_range: 2.5
           obstacle_min_range: 0.6  # drop near-pelvis self-returns (defence in depth)
+        # 3-D Livox cloud for local avoidance of obstacles the flat scan misses.
+        # Height band excludes the floor (z~0) and caps at head height (see the
+        # global obstacle_layer's pointcloud_sensor note).
+        pointcloud:
+          topic: /livox/pointcloud
+          data_type: "PointCloud2"
+          min_obstacle_height: 0.15
+          max_obstacle_height: 1.8
+          clearing: True
+          marking: True
+          raytrace_max_range: 5.0
+          raytrace_min_range: 0.0
+          obstacle_max_range: 4.0
       static_layer:
         plugin: "nav2_costmap_2d::StaticLayer"
         map_subscribe_transient_local: True
