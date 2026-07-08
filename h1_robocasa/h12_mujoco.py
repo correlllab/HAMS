@@ -223,6 +223,16 @@ def sim_loop(task, viewer=True, layout=None, style=None, seed=None):
         imu_gyro_sensor=f"{pfx}livox_imu_gyro",
         imu_acc_sensor=f"{pfx}livox_imu_acc",
         base_body_id=odom_base_body_id,   # -> odom -> pelvis TF + /odom
+        # Drop the robot's own legs/arms from the lidar (self-returns otherwise map
+        # a phantom obstacle under the robot and nav2 rejects the start). Default on
+        # for this locomotion/SLAM/nav sim; HAMS_LIDAR_SELF_FILTER=0 restores them
+        # as occluders.
+        lidar_self_prefixes=(
+            (pfx, "gripper0_")
+            if os.environ.get("HAMS_LIDAR_SELF_FILTER", "1").strip().lower()
+            not in ("0", "off", "false", "no")
+            else ()
+        ),
         sim_lock=sim_lock,
     )
 

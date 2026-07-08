@@ -134,6 +134,7 @@ class RosSensorBridge(Node):
         odom_frame: str = "odom",
         base_frame: str = "pelvis",
         odom_rate_hz: float = 50.0,
+        lidar_self_prefixes: tuple = (),
         elastic_band=None,
         sim_lock=None,
     ):
@@ -164,6 +165,21 @@ class RosSensorBridge(Node):
             raise RuntimeError(f"body '{lidar_exclude_body}' not found in MJCF")
         self.lidar_exclude_body_id = int(torso_id)
         self.geom_excluded = (model.geom_bodyid == self.lidar_exclude_body_id)
+        # Optional self-return filter: mj_multiRay's bodyexclude only drops ONE
+        # body (the torso the lidar sits on), so the downward rays still hit the
+        # robot's own legs/arms/grippers and map a phantom obstacle under the robot
+        # (nav2 then rejects the start as "lethal space"). When lidar_self_prefixes
+        # is given, flag every geom whose body name starts with one of them so
+        # those hits are dropped in _publish_lidar_scan. Off by default (the limbs
+        # occlude like real obstacles); enabled for locomotion/SLAM/nav.
+        self.geom_is_robot = np.zeros(model.ngeom, dtype=bool)
+        if lidar_self_prefixes:
+            _pfx = tuple(lidar_self_prefixes)
+            for g in range(model.ngeom):
+                bn = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_BODY,
+                                       int(model.geom_bodyid[g])) or ""
+                if bn.startswith(_pfx):
+                    self.geom_is_robot[g] = True
         # mj_multiRay / mj_ray require a (6, 1) column vector here.
         self.lidar_geomgroup = np.array([1, 1, 1, 1, 1, 1], dtype=np.uint8).reshape(6, 1)
 
@@ -541,6 +557,14 @@ class RosSensorBridge(Node):
             self.lidar_max_range,
         )
         hit_dists = dists.ravel()
+
+        # Drop self-returns: rays that hit the robot's own body (legs/arms/grippers
+        # — the torso is already excluded at cast time). Uses the per-geom robot
+        # mask so real obstacles are kept even when a limb is at the same range.
+        if self.geom_is_robot.any():
+            gid = geomids.ravel()
+            self_hit = (gid >= 0) & self.geom_is_robot[np.where(gid >= 0, gid, 0)]
+            hit_dists = np.where(self_hit, -1.0, hit_dists)
 
         # Points in lidar-local frame: local_dir * distance.
         valid = (hit_dists >= self.lidar_min_range) & (hit_dists <= self.lidar_max_range)
