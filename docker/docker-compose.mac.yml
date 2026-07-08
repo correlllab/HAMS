@@ -85,6 +85,10 @@ services:
       # HAMS_SLAM=1 adds pointcloud_to_laserscan + slam_toolbox to the bringup:
       # the Livox cloud -> 2D scan -> occupancy /map against the sim's /odom.
       - HAMS_SLAM=${HAMS_SLAM:-0}
+      # HAMS_NAV2=1 adds the nav2 stack (implies HAMS_SLAM for the map): plans a
+      # collision-free path on the SLAM map and drives /cmd_vel (the walk policy
+      # follows it). Send goals via RViz "2D Nav Goal" or /navigate_to_pose.
+      - HAMS_NAV2=${HAMS_NAV2:-0}
     volumes:
       - ../core_ws:/home/code/core_ws
       - ../CL_Assets:/home/code/CL_Assets:ro

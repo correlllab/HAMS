@@ -137,6 +137,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         ros-humble-pointcloud-to-laserscan \
     && rm -rf /var/lib/apt/lists/*
 
+# Optional autonomous navigation (HAMS_NAV2=1): the nav2 stack plans a
+# collision-free path on the SLAM map + lidar costmap and drives /cmd_vel (which
+# the walk policy follows). See nav2_config_mac.yaml.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ros-humble-nav2-bringup \
+    && rm -rf /var/lib/apt/lists/*
+
 # Overlay the colcon install in interactive shells so `docker exec … bash` sees
 # the same packages as the running bringup (incl. h1_bringup, so
 # `ros2 launch h1_bringup <TAB>` works). launch_ros_mac.sh builds to

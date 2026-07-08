@@ -20,6 +20,8 @@ import os
 
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
+from launch.actions import IncludeLaunchDescription
+from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch_ros.actions import Node
 
 ASSETS_DIR = '/home/code/CL_Assets'
@@ -149,6 +151,25 @@ def generate_launch_description():
                 sim_time_param,
             ],
             output='screen',
+        ))
+
+    # Optional autonomous navigation (HAMS_NAV2=1, implies SLAM for the map): the
+    # nav2 stack plans a collision-free path on the SLAM map + lidar costmap and
+    # drives it via /cmd_vel, which the walk policy consumes (nav2's
+    # velocity_smoother publishes /cmd_vel). Send goals with the RViz "2D Nav Goal"
+    # tool or the /navigate_to_pose action. The robot must be in walk mode
+    # (/lowerbody/start_walk) and standing in open floor — nav2 rejects a goal if
+    # the robot's start cell is occupied (e.g. pressed against a counter).
+    # nav2_config_mac.yaml is nav2_config.yaml with the odom frame swapped from
+    # FAST-LIO's camera_init to the sim's odom.
+    if os.environ.get('HAMS_NAV2', '').strip().lower() in ('1', 'true', 'on'):
+        nav2_launch = os.path.join(
+            get_package_share_directory('nav2_bringup'), 'launch', 'navigation_launch.py')
+        nav2_cfg = os.path.join(
+            get_package_share_directory('h1_bringup'), 'config', 'nav2_config_mac.yaml')
+        nodes.append(IncludeLaunchDescription(
+            PythonLaunchDescriptionSource(nav2_launch),
+            launch_arguments={'params_file': nav2_cfg, 'use_sim_time': 'true'}.items(),
         ))
 
     return LaunchDescription(nodes)
