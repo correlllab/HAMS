@@ -46,7 +46,7 @@ Visualization Manager:
         Value: /robot_description
     - Class: rviz_default_plugins/PointCloud2
       Name: Lidar
-      Enabled: true
+      Enabled: false
       Topic:
         Depth: 5
         Durability Policy: Volatile
