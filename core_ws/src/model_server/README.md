@@ -12,6 +12,7 @@ retired independently.
 | `gemini_server` | `/gemini_query` | `custom_ros_messages/srv/GeminiQuery` | Image/text → Gemini text. Needs `GEMINI_API_KEY` (or `GOOGLE_API_KEY`). |
 | `sam_server` | `/sam_segment` | `custom_ros_messages/srv/SamSegment` | SAM3 promptable segmentation. Loads `weights/sam3.pt`. |
 | `graspgen_server` | `/graspgen` | `custom_ros_messages/srv/GraspGen` | GraspGenX 6-DOF grasp planning. Loads `weights/graspgen/release/{gen,dis}`. |
+| `yolo_server` | pub/sub: `<image_topic>/detections` | `custom_ros_messages/msg/DetectionBundle` | YOLO-World open-vocabulary detection. Subscribes to N `image_topics` (CompressedImage), publishes a DetectionBundle per input topic at `publish_rate_hz` (1 Hz). Classes come from the live `queries` param. Loads `weights/yolo_world_battery_best.pt`. |
 
 Run with `ros2 run model_server <executable>`.
 
@@ -22,6 +23,7 @@ All checkpoints live under `weights/`, tracked with Git LFS:
 ```
 weights/
   sam3.pt                                    # SAM3 (facebook/sam3)
+  yolo_world_battery_best.pt                 # YOLO-World, fine-tuned for the battery workcell
   graspgen/release/gen/{config.yaml,epoch_736.pth}   # GraspGenX generator
   graspgen/release/dis/{config.yaml,epoch_1056.pth}  # GraspGenX discriminator
 ```
@@ -36,4 +38,5 @@ Servers resolve weights relative to this package via `__file__` (works with
 
 ROS deps are in `package.xml`. The model libraries are pip-installed in the ros
 container and have no rosdep keys: `google-genai`, `pillow` (gemini); `torch`,
-`pillow`, `sam3` (sam); `torch`, `graspgenx` (graspgen).
+`pillow`, `sam3` (sam); `torch`, `graspgenx` (graspgen); `torch`, `ultralytics`
+(yolo).

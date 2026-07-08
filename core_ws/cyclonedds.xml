@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!--
+  CycloneDDS runtime tuning for the HAMS ROS 2 stack.
+
+  Wired into the `ros` docker-compose profile: this file is bind-mounted to
+  /home/code/cyclonedds.xml and pointed at by CYCLONEDDS_URI. Edit here and
+  restart the container to apply.
+
+  Problem it fixes: bursty high-bandwidth sensor traffic (camera images, Livox
+  point clouds) briefly exceeds the default 208 KB kernel UDP receive buffer,
+  so the kernel drops datagrams -> lost DDS fragments -> stalled / laggy topics
+  even though the gigabit wire has headroom. The tell is `Udp ... RcvbufErrors`
+  climbing in /proc/net/snmp.
+
+  NOTE: SocketReceiveBufferSize below is only *requested*; the kernel clamps it
+  to net.core.rmem_max. You MUST raise that on the host too or this has no
+  effect (see README "Network / DDS tuning"):
+      sudo sysctl -w net.core.rmem_max=2147483647
+-->
+<CycloneDDS xmlns="https://cdds.io/config"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="https://cdds.io/config https://raw.githubusercontent.com/eclipse-cyclonedds/cyclonedds/master/etc/cyclonedds.xsd">
+  <Domain Id="any">
+    <Internal>
+      <!-- Ask the kernel for a 16 MB UDP receive buffer (capped by
+           net.core.rmem_max on the host). Absorbs the sensor bursts that
+           overflowed the 208 KB default. -->
+      <SocketReceiveBufferSize min="16MB"/>
+    </Internal>
+
+    <!-- OPTIONAL: if DDS discovery is slow or binds the wrong NIC (wifi /
+         tailscale instead of the wired robot link), pin the interface:
+    <General>
+      <Interfaces>
+        <NetworkInterface name="eno1" priority="default" multicast="default"/>
+      </Interfaces>
+    </General>
+    -->
+  </Domain>
+</CycloneDDS>

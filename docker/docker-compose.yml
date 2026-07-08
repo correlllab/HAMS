@@ -95,6 +95,12 @@ services:
       - NVIDIA_DRIVER_CAPABILITIES=all
       - QT_X11_NO_MITSHM=1
       - ROS_DOMAIN_ID=${ROS_DOMAIN_ID:-1}
+      # CycloneDDS runtime tuning — enlarges the UDP receive buffer so bursty
+      # sensor traffic (camera images, Livox point clouds) stops overflowing the
+      # socket buffer and dropping DDS fragments. Config file bind-mounted below;
+      # also raise net.core.rmem_max on the host or this has no effect
+      # (see README "Network / DDS tuning").
+      - CYCLONEDDS_URI=file:///home/code/cyclonedds.xml
       # Gemini API key for the vision pipeline's gemini backbone + h12_skills.
       # Passed through from the host shell: export GEMINI_API_KEY before running.
       - GEMINI_API_KEY=${GEMINI_API_KEY:-}
@@ -110,6 +116,10 @@ services:
       - /tmp/.X11-unix:/tmp/.X11-unix:rw
       - ${XAUTHORITY:-$HOME/.Xauthority}:/root/.Xauthority:ro
       - ../core_ws:/home/code/core_ws
+      # CycloneDDS tuning config (see CYCLONEDDS_URI above). core_ws is already
+      # mounted, but bind the file explicitly and read-only so the setting is
+      # obvious and can't be clobbered from inside the container.
+      - ../core_ws/cyclonedds.xml:/home/code/cyclonedds.xml:ro
       - ../CL_Assets:/home/code/CL_Assets:ro
       # Stage the magpie GraspGenX gripper description into the (image-baked)
       # GraspGenX assets so gripper_name=magpie resolves. Mount the LEAF dirs only —

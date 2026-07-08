@@ -23,6 +23,22 @@ checkpoint into this directory:
 Alternatively, set `SAM3_MODEL = None` in `sam_server.py` to let SAM3
 auto-download from HuggingFace on first run (also requires HF auth).
 
+## YOLO-World — `yolo_world_battery_best.pt`
+
+Open-vocabulary detection model loaded by `yolo_server` (`YOLO_MODEL`). This is
+our fine-tuned YOLO-World checkpoint for the battery workcell (a full Ultralytics
+export, e.g. `runs/.../weights/best.pt` renamed), loaded directly at startup from:
+
+    core_ws/src/model_server/weights/yolo_world_battery_best.pt
+
+Base model / source: https://docs.ultralytics.com/models/yolo-world/
+
+If this file is absent, `ultralytics` treats `YOLO_MODEL` as a checkpoint name and
+tries to download it — so to run the stock open-vocabulary base instead, set
+`YOLO_MODEL = "yolov8x-worldv2.pt"` in `yolo_server.py` (auto-downloaded on first
+run). A fine-tuned export saved as a `{'state_dict': ...}` dict is also accepted —
+it is loaded (non-strict) on top of the base architecture.
+
 ## GraspGenX — `graspgen/release/`
 
 6-DOF grasp generation model (generator + discriminator) loaded by

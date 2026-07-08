@@ -32,6 +32,7 @@ setup(
             'gemini_server = model_server.gemini_server:RunGeminiServer',
             'sam_server = model_server.sam_server:RunSamServer',
             'graspgen_server = model_server.graspgen_server:main',
+            'yolo_server = model_server.yolo_server:RunYoloServer',
         ],
     },
 )

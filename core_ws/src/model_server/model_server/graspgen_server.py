@@ -58,7 +58,7 @@ except Exception:                                 # viser not installed
 # assets via bind mount (no rebuild). The GraspGen.srv `gripper_name` field
 # overrides per request.
 DEFAULT_GRIPPER = 'magpie'
-MIN_OBJECT_POINTS = 100
+MIN_OBJECT_POINTS = 30
 # RViz grasp markers: how many of the ranked grasps to draw. Each is drawn as an
 # arrow from the GraspGenX pose ORIGIN (the gripper base, where the IK pins
 # *_graspgenx_frame) along +Z (approach) to the CONTACT point where the fingers

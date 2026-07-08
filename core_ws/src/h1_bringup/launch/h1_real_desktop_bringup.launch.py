@@ -74,6 +74,22 @@ def generate_launch_description():
             output='screen',
         ),
 
+        # yolo_server: YOLO-World open-vocabulary detection publisher. Subscribes
+        # to the head + both hand color cameras (its DEFAULT_IMAGE_TOPICS) and
+        # publishes a DetectionBundle on <image_topic>/detections at 1 Hz per cam,
+        # using the fine-tuned battery weights (weights/yolo_world_battery_best.pt).
+        # Detects the battery-workcell classes by default (DEFAULT_QUERIES: Bolt,
+        # BusBar, InteriorScrew, Nut, OrageCove, Screw, ScrewHole). The vocabulary
+        # is read live from the `queries` param — retune at runtime, e.g.:
+        #   ros2 param set /yolo_server queries "['Bolt','Nut','Screw']"
+        Node(
+            package='model_server',
+            executable='yolo_server',
+            name='yolo_server',
+            parameters=[sim_time_param, model_log_params],
+            output='screen',
+        ),
+
         # graspgen_server + h12_skills: the GraspGenX planning service and the
         # /skill/* action servers. The grasp skill chains gemini -> sam ->
         # graspgen -> frame_task. graspgen_server loads a heavy GPU model, so

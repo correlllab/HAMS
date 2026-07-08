@@ -128,6 +128,50 @@ the bridge currently `unset`s `ROS_DOMAIN_ID` and pins itself to channel 1
 regardless of the host setting — bridging to a non-default domain is a
 known gap.
 
+## Network / DDS tuning
+
+The stack moves bursty, high-bandwidth sensor data (camera images, Livox point
+clouds) over CycloneDDS. On a gigabit link the wire has headroom, but the
+**default 208 KB kernel UDP receive buffer** overflows on bursts, so the kernel
+silently drops datagrams. Lost DDS fragments mean whole point-cloud/image
+samples stall or drop — topics go laggy even though the network isn't full. The
+tell is `RcvbufErrors` climbing in `/proc/net/snmp`.
+
+Two settings fix this and **both are required**:
+
+1. **Host kernel buffers.** The containers run `network_mode: host`, so these
+   are the host's `net.core` sysctls. CycloneDDS can only *request* a large
+   socket buffer — the kernel clamps it to `net.core.rmem_max` — so this must be
+   raised or step 2 has no effect. For the current session:
+
+   ```bash
+   sudo sysctl -w net.core.rmem_max=2147483647
+   sudo sysctl -w net.core.rmem_default=16777216
+   sudo sysctl -w net.core.netdev_max_backlog=10000
+   ```
+
+   To persist across reboots, put them in `/etc/sysctl.d/10-cyclonedds.conf`:
+
+   ```
+   net.core.rmem_max=2147483647
+   net.core.rmem_default=16777216
+   net.core.netdev_max_backlog=10000
+   ```
+
+   then apply with `sudo sysctl --system`.
+
+2. **CycloneDDS config.** `core_ws/cyclonedds.xml` requests a 16 MB receive
+   buffer. The `ros` profile wires it in automatically — `docker-compose.yml`
+   bind-mounts it to `/home/code/cyclonedds.xml` and sets
+   `CYCLONEDDS_URI=file:///home/code/cyclonedds.xml`. Edit the file and restart
+   the container to change the tuning (e.g. to pin the DDS network interface).
+
+Verify under load — `RcvbufErrors` should stop climbing:
+
+```bash
+docker exec hams_ros grep '^Udp:' /proc/net/snmp   # watch the RcvbufErrors column
+```
+
 ## Troubleshooting
 
 - X11 / GUI: run `xhost +local:docker` once per session if rviz, the MuJoCo

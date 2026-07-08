@@ -86,7 +86,7 @@ GEMINI_TIMEOUT_SEC = 240.0
 # the server would reject is dropped client-side with an accurate message.
 DEPTH_MIN_M = 0.1
 DEPTH_MAX_M = 3.0
-MIN_GRASP_POINTS = 100
+MIN_GRASP_POINTS = 30
 
 # Debug/visualization TF frames (e.g. the grasp target) are re-broadcast at this
 # period so they stay alive in RViz instead of expiring after a single send.
