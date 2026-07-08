@@ -100,6 +100,16 @@ rob_stop() {
 # rob_odom — current base position in the odom (world) frame.
 rob_odom() { timeout 5 ros2 topic echo /odom --field pose.pose.position --once; }
 
+# rob_explore — autonomous frontier-based exploration (needs HAMS_SLAM=1 HAMS_NAV2=1).
+# Engages walk mode, then repeatedly navigates to the nearest unexplored frontier on
+# the SLAM map until it's fully mapped. Best after rob_stand (stable stance). Ctrl-C
+# to stop. Watch the map grow in RViz (6081).
+rob_explore() {
+    ros2 service call /lowerbody/start_walk std_srvs/srv/Trigger >/dev/null 2>&1
+    python3 /home/code/h12_sim_scripts/frontier_explore.py
+}
+
 echo "robot_cli loaded."
 echo "  postures : rob_pose t_pose | rob_grip right close"
 echo "  locomote : rob_stand -> rob_walk -> rob_go 0.4 0 0.3 (fwd+turn) -> rob_stop   (needs HAMS_LOWERBODY=switch)"
+echo "  explore  : rob_stand -> rob_explore   (autonomous frontier mapping; needs HAMS_SLAM=1 HAMS_NAV2=1)"
