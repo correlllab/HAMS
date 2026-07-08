@@ -128,6 +128,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         ros-humble-rosidl-generator-dds-idl \
     && rm -rf /var/lib/apt/lists/*
 
+# 2D SLAM (optional, HAMS_SLAM=1): slam_toolbox builds an occupancy map from a
+# laserscan; pointcloud_to_laserscan flattens the Livox cloud into that scan.
+# Sim ground-truth /odom (from the mujoco bridge) is the odometry source, so no
+# FAST-LIO is needed.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ros-humble-slam-toolbox \
+        ros-humble-pointcloud-to-laserscan \
+    && rm -rf /var/lib/apt/lists/*
+
 # Overlay the colcon install in interactive shells so `docker exec … bash` sees
 # the same packages as the running bringup (incl. h1_bringup, so
 # `ros2 launch h1_bringup <TAB>` works). launch_ros_mac.sh builds to

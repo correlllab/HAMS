@@ -169,6 +169,17 @@ def sim_loop(task, viewer=True, layout=None, style=None, seed=None):
     sim_lock = threading.Lock()
     pfx = env.robots[0].robot_model.naming_prefix   # "robot0_"
 
+    # Body carrying the pelvis free joint — its world pose is ground-truth base
+    # odometry, which the bridge publishes as odom -> pelvis TF + /odom (feeds
+    # SLAM without needing FAST-LIO).
+    odom_base_body_id = -1
+    try:
+        _fj = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT,
+                                f"{pfx}{h1_2_robosuite.FREE_JOINT_NAME}")
+        odom_base_body_id = int(model.jnt_bodyid[_fj])
+    except Exception as e:
+        print(f"[h12_mujoco] base odom body resolve skipped: {e}")
+
     # DDS control bridge: publishes rt/lowstate, subscribes rt/lowcmd, drives the
     # 27 body motors by name via the resolver (grippers handled by the hand
     # bridges below; gripper ctrl indices are disjoint from the body motors).
@@ -199,6 +210,7 @@ def sim_loop(task, viewer=True, layout=None, style=None, seed=None):
         imu_quat_sensor=f"{pfx}livox_imu_quat",
         imu_gyro_sensor=f"{pfx}livox_imu_gyro",
         imu_acc_sensor=f"{pfx}livox_imu_acc",
+        base_body_id=odom_base_body_id,   # -> odom -> pelvis TF + /odom
         sim_lock=sim_lock,
     )
 

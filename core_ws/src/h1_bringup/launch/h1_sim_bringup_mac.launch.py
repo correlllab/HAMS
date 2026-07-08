@@ -18,6 +18,7 @@ Launch by path from the slim ROS container:
 """
 import os
 
+from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch_ros.actions import Node
 
@@ -90,18 +91,58 @@ def generate_launch_description():
     # the elastic-band tether then holds the robot upright. The node self-sequences
     # its band release (waits for the IK to finish) and publishes leg setpoints on
     # /safety/lowcmd_lower_in for the safety_node to merge.
-    #   HAMS_LOWERBODY=fame  RMA standing/squatting policy — balances the robot
-    #                        standing UNSUPPORTED (verified). Does not locomote.
-    #   HAMS_LOWERBODY=walk  TorchScript walk policy — currently does NOT stay up
-    #                        in the RoboCasa sim (falls ~4s; here for completeness).
+    #   HAMS_LOWERBODY=fame   RMA standing/squatting policy — balances the robot
+    #                         standing UNSUPPORTED (verified). Does not locomote.
+    #   HAMS_LOWERBODY=walk   TorchScript walk policy on its own (marches in place;
+    #                         topples in the cluttered kitchen).
+    #   HAMS_LOWERBODY=switch switchable controller: band-held idle until you call
+    #                         /lowerbody/start_{fame,walk}; gated handover between
+    #                         stand (FAME) and locomotion (walk). This is the one to
+    #                         use for stand<->walk. Starts idle by default.
     lowerbody = os.environ.get('HAMS_LOWERBODY', '').strip().lower()
-    _lowerbody_exec = {'fame': 'fame_node', 'walk': 'walking_node'}.get(lowerbody)
+    _lowerbody_exec = {'fame': 'fame_node', 'walk': 'walking_node',
+                       'switch': 'lowerbody_controller_node'}.get(lowerbody)
     if _lowerbody_exec:
         nodes.append(Node(
             package='h12_lowerbody_controller',
             executable=_lowerbody_exec,
             name=_lowerbody_exec,
             parameters=[sim_time_param],
+            output='screen',
+        ))
+
+    # Optional 2D SLAM (HAMS_SLAM=1): pointcloud_to_laserscan flattens the Livox
+    # hemisphere cloud into a horizontal scan, and slam_toolbox builds an occupancy
+    # /map from it against the sim's ground-truth /odom (odom -> pelvis). No
+    # FAST-LIO needed. p2l params match h1_navigation.launch.py but are fed from
+    # the raw /livox/pointcloud instead of FAST-LIO's registered cloud.
+    if os.environ.get('HAMS_SLAM', '').strip().lower() in ('1', 'true', 'on'):
+        nodes.append(Node(
+            package='pointcloud_to_laserscan',
+            executable='pointcloud_to_laserscan_node',
+            name='pointcloud_to_laserscan',
+            parameters=[{
+                'target_frame': 'pelvis',
+                'min_height': -0.90, 'max_height': 0.55,
+                'angle_min': -3.14159, 'angle_max': 3.14159,
+                'angle_increment': 0.0087,
+                'range_min': 0.6, 'range_max': 6.0,
+                'use_inf': True, 'scan_time': 0.0333,
+                'transform_tolerance': 0.3, 'queue_size': 20,
+            }, sim_time_param],
+            remappings=[('cloud_in', '/livox/pointcloud'), ('scan', '/converted_scan')],
+            output='screen',
+        ))
+        nodes.append(Node(
+            package='slam_toolbox',
+            executable='async_slam_toolbox_node',
+            name='slam_toolbox',
+            parameters=[
+                os.path.join(get_package_share_directory('h1_bringup'),
+                             'config', 'slam_toolbox_h1.yaml'),
+                {'odom_frame': 'odom', 'scan_topic': '/converted_scan'},
+                sim_time_param,
+            ],
             output='screen',
         ))
 

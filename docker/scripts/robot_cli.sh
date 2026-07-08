@@ -75,4 +75,31 @@ rob_reach() {
     return 1
 }
 
-echo "robot_cli loaded. Try: rob_poses  (lists names) | rob_pose t_pose  (MOVES) | rob_grip right close"
+# --- Lower-body locomotion (needs HAMS_LOWERBODY=switch) ------------------------
+# The switchable controller starts band-held idle; rob_stand engages FAME (stand
+# free), rob_walk hands over to the walk policy, rob_go drives /cmd_vel.
+
+rob_stand() { ros2 service call /lowerbody/start_fame std_srvs/srv/Trigger; }  # stand (FAME)
+rob_walk()  { ros2 service call /lowerbody/start_walk std_srvs/srv/Trigger; }  # locomotion mode
+
+# rob_go <vx> [vy] [wz] [secs]  — drive the walk policy (m/s, m/s, rad/s).
+# Publishes /cmd_vel at 20 Hz for `secs` (default 6). vx>0 forward, wz>0 turn left.
+rob_go() {
+    local vx="${1:-0.4}" vy="${2:-0.0}" wz="${3:-0.0}" secs="${4:-6}"
+    echo "[rob_go] vx=$vx vy=$vy wz=$wz for ${secs}s"
+    timeout "$secs" ros2 topic pub -r 20 /cmd_vel geometry_msgs/msg/Twist \
+        "{linear: {x: $vx, y: $vy}, angular: {z: $wz}}"
+}
+
+# rob_stop — zero velocity and switch back to FAME (stand still).
+rob_stop() {
+    ros2 topic pub --once /cmd_vel geometry_msgs/msg/Twist "{}" >/dev/null 2>&1
+    rob_stand
+}
+
+# rob_odom — current base position in the odom (world) frame.
+rob_odom() { timeout 5 ros2 topic echo /odom --field pose.pose.position --once; }
+
+echo "robot_cli loaded."
+echo "  postures : rob_pose t_pose | rob_grip right close"
+echo "  locomote : rob_stand -> rob_walk -> rob_go 0.4 0 0.3 (fwd+turn) -> rob_stop   (needs HAMS_LOWERBODY=switch)"

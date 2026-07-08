@@ -32,12 +32,15 @@ import numpy as np
 import rclpy
 from builtin_interfaces.msg import Time as TimeMsg
 from PIL import Image as PILImage
+from geometry_msgs.msg import TransformStamped
 from livox_ros_driver2.msg import CustomMsg, CustomPoint
+from nav_msgs.msg import Odometry
 from rclpy.node import Node
 from rclpy.qos import HistoryPolicy, QoSProfile, ReliabilityPolicy, qos_profile_sensor_data
 from rosgraph_msgs.msg import Clock
 from sensor_msgs.msg import CameraInfo, CompressedImage, Image, Imu, PointCloud2, PointField
 from std_srvs.srv import Trigger
+from tf2_ros import TransformBroadcaster
 
 
 def _sim_time_to_msg(sim_time: float) -> TimeMsg:
@@ -127,6 +130,10 @@ class RosSensorBridge(Node):
         imu_acc_sensor: str = "livox_imu_acc",
         imu_frame: str = "lidar_link",
         imu_rate_hz: float = 100.0,
+        base_body_id: int = -1,
+        odom_frame: str = "odom",
+        base_frame: str = "pelvis",
+        odom_rate_hz: float = 50.0,
         elastic_band=None,
         sim_lock=None,
     ):
@@ -257,6 +264,18 @@ class RosSensorBridge(Node):
         self.imu_gyro_adr, self.imu_gyro_dim = self._sensor_adr(imu_gyro_sensor)
         self.imu_acc_adr, self.imu_acc_dim = self._sensor_adr(imu_acc_sensor)
 
+        # Ground-truth base odometry (odom -> base_frame TF + /odom). The sim knows
+        # the pelvis world pose exactly, so we publish it directly instead of
+        # running FAST-LIO. This is the odom source SLAM (slam_toolbox) consumes.
+        self.base_body_id = int(base_body_id)
+        self.odom_frame = odom_frame
+        self.base_frame = base_frame
+        self.odom_period = 1.0 / odom_rate_hz
+        self._last_odom_sim_t = 0.0
+        if self.base_body_id >= 0:
+            self._tf_broadcaster = TransformBroadcaster(self)
+            self.pub_odom = self.create_publisher(Odometry, "/odom", 10)
+
         if elastic_band is not None:
             self.create_service(
                 Trigger, "/elastic_band/toggle", self._on_elastic_band_toggle
@@ -312,6 +331,13 @@ class RosSensorBridge(Node):
         clock_msg.clock = stamp
         self.pub_clock.publish(clock_msg)
 
+        if self.base_body_id >= 0 and sim_t - self._last_odom_sim_t >= self.odom_period:
+            self._last_odom_sim_t = sim_t
+            try:
+                self._publish_odom(stamp)
+            except Exception as e:
+                self.get_logger().warn(f"odom publish failed: {e}")
+
         if sim_t - self._last_imu_sim_t >= self.imu_period:
             self._last_imu_sim_t = sim_t
             try:
@@ -354,6 +380,41 @@ class RosSensorBridge(Node):
         msg.linear_acceleration.y = float(a[1])
         msg.linear_acceleration.z = float(a[2])
         self.pub_imu.publish(msg)
+
+    def _publish_odom(self, stamp: TimeMsg) -> None:
+        # Ground-truth pelvis pose in the sim world (used as the odom frame).
+        # MuJoCo quaternions are (w, x, y, z); ROS wants (x, y, z, w).
+        pos = self.data.xpos[self.base_body_id]
+        quat = self.data.xquat[self.base_body_id]
+        px, py, pz = float(pos[0]), float(pos[1]), float(pos[2])
+        qw, qx, qy, qz = (float(quat[0]), float(quat[1]),
+                          float(quat[2]), float(quat[3]))
+
+        tf = TransformStamped()
+        tf.header.stamp = stamp
+        tf.header.frame_id = self.odom_frame
+        tf.child_frame_id = self.base_frame
+        tf.transform.translation.x = px
+        tf.transform.translation.y = py
+        tf.transform.translation.z = pz
+        tf.transform.rotation.x = qx
+        tf.transform.rotation.y = qy
+        tf.transform.rotation.z = qz
+        tf.transform.rotation.w = qw
+        self._tf_broadcaster.sendTransform(tf)
+
+        odom = Odometry()
+        odom.header.stamp = stamp
+        odom.header.frame_id = self.odom_frame
+        odom.child_frame_id = self.base_frame
+        odom.pose.pose.position.x = px
+        odom.pose.pose.position.y = py
+        odom.pose.pose.position.z = pz
+        odom.pose.pose.orientation.x = qx
+        odom.pose.pose.orientation.y = qy
+        odom.pose.pose.orientation.z = qz
+        odom.pose.pose.orientation.w = qw
+        self.pub_odom.publish(odom)
 
     def _publish_camera_frame(self, stamp: TimeMsg) -> None:
         if self._renderer is None:

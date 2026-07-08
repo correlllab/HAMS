@@ -14,7 +14,7 @@ Visualization Manager:
   Name: root
   Global Options:
     Background Color: 48; 48; 48
-    Fixed Frame: pelvis
+    Fixed Frame: odom
     Frame Rate: 20
   Displays:
     - Class: rviz_default_plugins/Grid
@@ -61,6 +61,32 @@ Visualization Manager:
       Axis: Z
       Autocompute Value Bounds:
         Autocompute Bounds: true
+    - Class: rviz_default_plugins/Map
+      Name: Map
+      Enabled: true
+      Topic:
+        Depth: 5
+        Durability Policy: Transient Local
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /map
+      Color Scheme: map
+      Draw Behind: true
+      Alpha: 0.7
+    - Class: rviz_default_plugins/LaserScan
+      Name: Scan
+      Enabled: true
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Best Effort
+        Value: /converted_scan
+      Style: Points
+      Size (Pixels): 4
+      Color: 255; 85; 0
+      Color Transformer: FlatColor
+      Decay Time: 0
   Tools:
     - Class: rviz_default_plugins/MoveCamera
     - Class: rviz_default_plugins/Select
@@ -70,14 +96,14 @@ Visualization Manager:
     Current:
       Class: rviz_default_plugins/Orbit
       Name: Current View
-      Distance: 3.5
+      Distance: 9.0
       Focal Point:
         X: 0
         Y: 0
-        Z: 0.6
-      Pitch: 0.35
-      Yaw: 0.8
-      Target Frame: <Fixed Frame>
+        Z: 0
+      Pitch: 1.2
+      Yaw: 3.14
+      Target Frame: pelvis
 Window Geometry:
   Displays:
     collapsed: false
