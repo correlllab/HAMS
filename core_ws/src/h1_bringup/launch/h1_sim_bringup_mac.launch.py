@@ -7,6 +7,7 @@ slim arm64 ROS image intentionally omits.
 
 Nodes started:
   * static camera_link -> camera_color_optical_frame TF
+  * static livox_link -> lidar_link TF (so RViz can place /livox/pointcloud)
   * joint_state_publisher      (h12_ros2_controller)
   * robot_state_publisher
   * frame_task_server          (h12_ros2_controller, Pink IK)
@@ -38,6 +39,18 @@ def generate_launch_description():
             arguments=['0', '0', '0',
                        '-1.5707963267948966', '0', '-1.5707963267948966',
                        'camera_link', 'camera_color_optical_frame'],
+            parameters=[sim_time_param],
+            output='screen',
+        ),
+        # The MuJoCo lidar bridge stamps /livox/{lidar,pointcloud} with frame_id
+        # 'lidar_link', which is co-located with the URDF's 'livox_link' mount but
+        # is not itself a URDF link. Publish the identity bridge so RViz (and any
+        # lidar consumer) can transform the cloud into the robot/TF tree.
+        Node(
+            package='tf2_ros',
+            executable='static_transform_publisher',
+            name='lidar_frame_broadcaster',
+            arguments=['0', '0', '0', '0', '0', '0', 'livox_link', 'lidar_link'],
             parameters=[sim_time_param],
             output='screen',
         ),
