@@ -39,6 +39,10 @@ services:
       # HAMS_CAMERAS=0 drops the 3 RGBD camera renders (the heaviest per-step CPU
       # cost) to speed the sim up for locomotion/SLAM. Lidar + odom are unaffected.
       - HAMS_CAMERAS=${HAMS_CAMERAS:-1}
+      # HAMS_SPAWN_BACKOFF (metres) backs the robot off the counter into open floor
+      # at spawn (default 0 = at the counter for manipulation). ~1.0 gives nav2 room
+      # to plan (it rejects a goal when the robot's start cell is occupied).
+      - HAMS_SPAWN_BACKOFF=${HAMS_SPAWN_BACKOFF:-0}
       # rclpy runs on FastDDS so it does not load a 2nd CycloneDDS libddsc
       # alongside unitree_sdk2py's (arm64 in-process coexistence fix).
       - RMW_IMPLEMENTATION=rmw_fastrtps_cpp

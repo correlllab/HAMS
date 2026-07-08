@@ -129,9 +129,14 @@ def sim_loop(task, viewer=True, layout=None, style=None, seed=None):
         init_qpos = _initial_motor_qpos()
         data.qpos[resolver.motor_qpos] = init_qpos
         data.qvel[:] = 0.0
+        # HAMS_SPAWN_BACKOFF backs the robot further off the counter into open
+        # floor (default 0 = at the counter for manipulation). Set ~1.0 for nav2,
+        # which needs the robot's start cell to be free to plan.
+        _spawn_backoff = float(os.environ.get("HAMS_SPAWN_BACKOFF", "0") or 0)
         h1_2_robosuite.place_robot_collision_free(
             env, env.init_robot_base_pos,
             h1_2_robosuite._euler_to_wxyz(getattr(env, "init_robot_base_ori", None)),
+            extra_backoff=_spawn_backoff,
         )
         print("[h12_mujoco] initial stance from baked-in sim defaults")
     except Exception as e:
