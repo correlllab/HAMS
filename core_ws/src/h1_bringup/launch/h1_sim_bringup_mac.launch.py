@@ -125,15 +125,18 @@ def generate_launch_description():
             name='pointcloud_to_laserscan',
             parameters=[{
                 'target_frame': 'pelvis',
-                # Relaxed vs h1_navigation's FAST-LIO tuning: the raw sim lidar in
-                # the cluttered kitchen needs a lower range_min (catch the counter
-                # the robot is right up against, while still dropping the body,
-                # which is <=0.35 m from pelvis) and a taller band (counter tops /
-                # cabinets). The tight nav config filtered every return out here.
+                # Relaxed vs h1_navigation's FAST-LIO tuning for the raw sim lidar:
+                # a taller band (counter tops / cabinets). range_min 0.65 drops the
+                # robot's OWN legs/feet — the torso lidar looks down and returns them
+                # at ~0.4 m; mapping those puts a phantom obstacle under the robot and
+                # nav2 rejects the start as "lethal space". 0.65 clears the body while
+                # still catching the counter (the robot spawns ~1 m off it via
+                # HAMS_SPAWN_BACKOFF). Lower it only if you also see real obstacles
+                # missed at close range.
                 'min_height': -0.85, 'max_height': 1.2,
                 'angle_min': -3.14159, 'angle_max': 3.14159,
                 'angle_increment': 0.0087,
-                'range_min': 0.4, 'range_max': 8.0,
+                'range_min': 0.65, 'range_max': 8.0,
                 'use_inf': True, 'scan_time': 0.0333,
                 'transform_tolerance': 1.0, 'queue_size': 20,
             }, sim_time_param],
