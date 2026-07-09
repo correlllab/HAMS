@@ -1,0 +1,155 @@
+# ==============================
+# Apple-Silicon (arm64) / CPU-only fork of RobocasaDockerfile.
+# MuJoCo 3.3.1 sim on hams_base (arm64). Identical to the stock Dockerfile
+# except the default render backend is OSMesa (pure-software, CPU) instead of
+# EGL, since there is no NVIDIA GPU under Colima. Source tree bind-mounted at
+# runtime (docker-compose.mac.yml -> /home/code/h1_robocasa).
+#
+# Build:  docker build -t hams_sim_robocasa:latest -f docker/RobocasaDockerfile.arm64 .
+# ==============================
+FROM hams_base:latest
+
+ARG http_proxy
+ARG https_proxy
+ENV http_proxy=${http_proxy}
+ENV https_proxy=${https_proxy}
+
+# Default backend baked into the image. On Apple Silicon there is no EGL/GPU
+# path, so default to OSMesa (software). launch_robocasa_mac.sh also exports
+# MUJOCO_GL=osmesa explicitly.
+ENV MUJOCO_GL=osmesa
+
+# MuJoCo runtime graphics libs (OSMesa for headless software rendering; EGL
+# libs kept for parity though unused on CPU).
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        libegl1-mesa libosmesa6 \
+    && rm -rf /var/lib/apt/lists/*
+
+# MuJoCo Python binding + Pillow for image encoding. Pinned to 3.3.1 to match
+# Robocasa's hard pin (see below).
+RUN uv pip install --system --no-cache \
+        "mujoco==3.3.1" \
+        "numpy>=2.2.6" \
+        "Pillow>=10.0"
+
+# Robocasa kitchen scenes. Both packages are git-only. robosuite is pinned to
+# master per robocasa.ai. Side effect: lerobot (a Robocasa transitive) pins
+# torch==2.7.1 (CPU) — fine here.
+RUN git clone --depth 1 https://github.com/ARISE-Initiative/robosuite /opt/robosuite && \
+    uv pip install --system --no-cache -e /opt/robosuite
+
+RUN git clone --depth 1 https://github.com/robocasa/robocasa /opt/robocasa && \
+    uv pip install --system --no-cache -e /opt/robocasa
+
+# Robocasa & robosuite setup scripts (create the macros file, silence warnings).
+RUN python /opt/robosuite/robosuite/scripts/setup_macros.py && \
+    python /opt/robocasa/robocasa/scripts/setup_macros.py
+
+# Optional robosuite/robocasa deps that print "WARNING: not installed" otherwise.
+RUN git clone --depth 1 https://github.com/ARISE-Initiative/robosuite_models /opt/robosuite_models && \
+    uv pip install --system --no-cache -e /opt/robosuite_models && \
+    git clone --depth 1 https://github.com/NVlabs/mimicgen /opt/mimicgen && \
+    uv pip install --system --no-cache -e /opt/mimicgen && \
+    uv pip install --system --no-cache --no-deps "mink==0.0.5"
+
+# Robocasa's textures, fixtures, and objects (~10 GB) — required for any
+# `--scene kitchen` run. `echo y` answers the interactive confirmation.
+RUN echo y | python -m robocasa.scripts.download_kitchen_assets --type all
+
+WORKDIR /home/code/h1_robocasa
+
+CMD ["/bin/bash"]
+
+# -----------------------------------------------------------------------------
+# msgs_ws toolchain — minimal colcon + ament + rosidl_default_generators so
+# launch_robocasa*.sh can build the IDL-only workspace at every container start.
+# -----------------------------------------------------------------------------
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        python3-colcon-common-extensions \
+        ros-humble-ament-cmake \
+        ros-humble-ament-cmake-auto \
+        ros-humble-ament-cmake-python \
+        ros-humble-rosidl-default-generators \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN mkdir -p /home/code/msgs_ws/src
+
+# -----------------------------------------------------------------------------
+# Livox-SDK2 — required by livox_ros_driver2's C++ library.
+# -----------------------------------------------------------------------------
+RUN git clone --depth 1 https://github.com/Livox-SDK/Livox-SDK2.git /tmp/Livox-SDK2 && \
+    cd /tmp/Livox-SDK2 && mkdir build && cd build && \
+    cmake .. -DCMAKE_POLICY_VERSION_MINIMUM=3.5 && make -j"$(nproc)" && make install && \
+    ldconfig && \
+    rm -rf /tmp/Livox-SDK2
+
+# -----------------------------------------------------------------------------
+# apt deps required by livox_ros_driver2's C++ build.
+# -----------------------------------------------------------------------------
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        libpcl-dev libapr1-dev \
+        ros-humble-pcl-conversions ros-humble-pcl-ros \
+        ros-humble-rclcpp-components ros-humble-rcl-interfaces \
+        ros-humble-rosbag2 \
+        ros-humble-sensor-msgs ros-humble-std-msgs \
+    && rm -rf /var/lib/apt/lists/*
+
+# -----------------------------------------------------------------------------
+# livox_ros_driver2 baked into the image so the mujoco bridge can publish
+# livox_ros_driver2/msg/CustomMsg on /livox/lidar.
+# -----------------------------------------------------------------------------
+COPY core_ws/src/livox_ros_driver2 /opt/livox_ws/src/livox_ros_driver2
+RUN bash -c "source /opt/ros/humble/setup.bash && \
+             cd /opt/livox_ws/src/livox_ros_driver2 && \
+             ./build.sh humble"
+
+# -----------------------------------------------------------------------------
+# FastDDS RMW for the ROS (rclpy) layer — arm64 coexistence fix.
+#
+# h12_mujoco.py runs unitree_sdk2py DDS (rt/lowstate|lowcmd via the `cyclonedds`
+# PyPI binding, linked to the source-built libddsc) AND rclpy (ROS topics) in the
+# SAME process. If rclpy also uses rmw_cyclonedds_cpp, two separate CycloneDDS C
+# libraries load into one process and, on arm64, the second stack to create DDS
+# entities crashes / returns an invalid handle. Running rclpy on FastDDS instead
+# keeps the two stacks fully independent (cyclonedds for rt/low*, FastDDS for ROS
+# topics); RMW_IMPLEMENTATION is set to rmw_fastrtps_cpp in docker-compose.mac.yml.
+# Both sim + ROS containers use FastDDS for ROS topics, so they still interop.
+# Appended last so it does not bust the heavy mujoco/robocasa/asset layers above.
+# -----------------------------------------------------------------------------
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ros-humble-rmw-fastrtps-cpp \
+    && rm -rf /var/lib/apt/lists/*
+
+# -----------------------------------------------------------------------------
+# Optional VNC/noVNC display stack (Apple-Silicon only).
+#
+# MuJoCo's interactive GLFW window CANNOT be forwarded to macOS XQuartz: on
+# Apple Silicon XQuartz's indirect GLX advertises no modern fbConfigs, so the
+# container's Mesa fails with "No matching fbConfigs / GLXBadContext". Instead we
+# render *in-container* with software GL (llvmpipe, from libgl1-mesa-dri) into a
+# virtual X display (Xvfb) and stream the pixels out over VNC/noVNC — the GL
+# never leaves the container, so XQuartz's GLX limits are irrelevant. Proven to
+# give MuJoCo a full OpenGL 4.5 context.
+#
+# Enabled at runtime via HAMS_DISPLAY=vnc (see launch_robocasa_mac.sh); with the
+# default HAMS_DISPLAY=headless none of these run and the image behaves exactly
+# as before (OSMesa offscreen). Appended last so it never busts the heavy
+# mujoco/robocasa/asset layers above.
+#   xvfb            virtual framebuffer X server
+#   x11vnc          exports the Xvfb display as a VNC server
+#   novnc/websockify browser (HTML5) VNC client + WebSocket bridge
+#   fluxbox         minimal WM so the MuJoCo window is framed/manageable
+#   libgl1-mesa-dri llvmpipe software OpenGL (swrast_dri.so)
+#   x11-utils       xdpyinfo, for the Xvfb readiness check
+# -----------------------------------------------------------------------------
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        xvfb x11vnc novnc websockify fluxbox \
+        libgl1-mesa-dri x11-utils \
+    && rm -rf /var/lib/apt/lists/*
+
+# fluxbox's default style calls fbsetbg to set a wallpaper; with no wallpaper
+# setter installed it pops an xmessage "wallpaper cannot be set" error on the VNC
+# display. Replace fbsetbg with a shim that sets a solid root color via fbsetroot
+# (bundled with fluxbox) — clean background, no error dialog.
+RUN printf '#!/bin/sh\nexec fbsetroot -solid "#2b2b2b"\n' > /usr/bin/fbsetbg \
+    && chmod +x /usr/bin/fbsetbg

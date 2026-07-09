@@ -209,3 +209,171 @@ ros2 action send_goal /skill/grasp custom_ros_messages/action/SkillGrasp \
   "{target_object: 'vertical fridge handle', arm: 'right', timeout: {sec: 60, nanosec: 0}}" \
   --feedback
 ```
+
+## macOS (Apple Silicon) — headless CPU port
+
+On Apple-Silicon Macs there is a self-contained, CPU-only port that runs **just
+ROS 2 + MuJoCo/RoboCasa** — Isaac is dropped and there is no NVIDIA/EGL path, so
+MuJoCo renders in software (OSMesa/llvmpipe). It uses its own standalone compose
+file, `docker/docker-compose.mac.yml`, and runs the ROS layer on **FastDDS**
+instead of CycloneDDS (an arm64 in-process coexistence fix). None of the x86
+instructions above apply — use this section instead.
+
+### Prerequisites
+
+- [Colima](https://github.com/abiosoft/colima) + the Docker CLI
+  (`brew install colima docker docker-compose`). No Docker Desktop, no NVIDIA
+  toolkit, and no XQuartz (see the GUI note below).
+- Git LFS and submodules, exactly as in [Prerequisites](#prerequisites) above.
+- No `docker/.env` is needed; the Mac compose only reads `ROS_DOMAIN_ID`
+  (optional, defaults to `1`), `HAMS_DISPLAY`, and `HAMS_RVIZ`.
+- Start the VM with enough resources — one software-GL viewer alone uses ~5
+  cores, and running both the MuJoCo viewer and RViz wants headroom:
+
+  ```bash
+  colima start --cpu 12 --memory 24     # sized for a 14-core / 48 GB Mac; scale to yours
+  ```
+
+### Build and run
+
+```bash
+# build both arm64 images (robocasa + ros); the base image builds automatically
+docker compose -f docker/docker-compose.mac.yml build
+
+# headless (no viewer) — the default
+docker compose -f docker/docker-compose.mac.yml up
+```
+
+The first run is slow (colcon builds the message + controller workspaces into
+named volumes); later runs are cached and fast. Both containers use
+`network_mode: host` + `ipc: host` so FastDDS's shared-memory transport works
+across them.
+
+> **Always bring both containers up together.** If RoboCasa runs alone for more
+> than a few seconds it releases the robot's motors ("Command timeout"), the H1
+> collapses under gravity, and when the ROS controller then connects it reads the
+> fallen pose and trips its e-stop. `docker compose … up` (both services) engages
+> the controller before the robot can fall.
+
+### Viewing the GUIs (MuJoCo viewer + RViz)
+
+MuJoCo's and RViz's OpenGL windows **cannot** be forwarded to XQuartz —
+Apple-Silicon XQuartz has broken indirect GLX. Instead each is rendered
+in-container with software GL into a virtual display and streamed to your browser
+over noVNC. Enable them per-viewer:
+
+```bash
+# MuJoCo viewer on :6080, RViz on :6081 (set either or both)
+HAMS_DISPLAY=vnc HAMS_RVIZ=vnc docker compose -f docker/docker-compose.mac.yml up -d
+
+# open the SSH tunnel to both noVNC ports (Colima does not forward container ports)
+./docker/scripts/mac_vnc_tunnel.sh     # --open also opens the browser; --stop closes the tunnel
+```
+
+Then open:
+
+- **MuJoCo viewer** → <http://localhost:6080/vnc.html>
+- **RViz** (RobotModel + TF) → <http://localhost:6081/vnc.html>
+
+`HAMS_DISPLAY` (RoboCasa/MuJoCo) and `HAMS_RVIZ` (ROS/RViz) are independent — set
+either or both; the defaults are headless.
+
+### Driving the robot
+
+Bringup starts automatically in the `ros` container (`joint_state_publisher`,
+`robot_state_publisher`, the `frame_task_server` IK solver, `safety_node`). To
+command the H1, source the helper and send joint-space postures or gripper
+commands:
+
+```bash
+docker exec -it hams_ros bash          # if the host docker CLI is flaky: colima ssh, then docker exec …
+source /home/code/h12_sim_scripts/robot_cli.sh
+
+rob_poses                # list postures
+rob_pose t_pose          # MOVE: home t_pose arms_front arms_overhead elbow_only … (rob_poses lists all)
+rob_grip right close     # open/close a gripper
+rob_home
+```
+
+Watch the motion in either viewer. (`rob_pose` takes a name and moves the robot;
+`rob_poses` only prints the list.)
+
+### Lower-body controller (standing free)
+
+By default an elastic-band tether holds the robot upright and only the upper body
+is controlled. Set `HAMS_LOWERBODY=fame` to run the RMA lower-body policy, which
+releases the tether and **balances the robot standing unsupported**:
+
+```bash
+HAMS_DISPLAY=vnc HAMS_RVIZ=vnc HAMS_LOWERBODY=fame \
+  docker compose -f docker/docker-compose.mac.yml up
+```
+
+`HAMS_LOWERBODY=fame` **stands** (and squats via `/lowerbody/squat_cmd`) but holds
+position — it does not locomote. For **stand *and* walk**, use the switchable
+controller instead:
+
+```bash
+HAMS_DISPLAY=vnc HAMS_RVIZ=vnc HAMS_LOWERBODY=switch \
+  docker compose -f docker/docker-compose.mac.yml up
+```
+
+It starts band-held idle; `rob_stand` engages FAME (stand free), `rob_walk` hands
+over to the TorchScript walk policy, and `rob_go <vx> <vy> <wz>` drives it. The
+walk policy **does stay upright** now, handed over from a settled FAME stance — the
+earlier "falls a few seconds after the tether releases" was a too-tight motor
+watchdog on the slow sim (see gotchas). Launching the raw policy directly
+(`HAMS_LOWERBODY=walk`) still just marches in place; use `switch`. (`torch` is
+already in the ros image; building `unitree_hg` needs `rosidl-generator-dds-idl`,
+which the image now includes.)
+
+### Navigation demo (SLAM + nav2 + frontier exploration)
+
+The robot can map the kitchen and drive itself around autonomously — 2D SLAM from
+the lidar, nav2 planning collision-free paths on a costmap that includes the full
+3D cloud, and a frontier explorer sending goals. Full walkthrough:
+**[docs/NAVIGATION_DEMO.md](docs/NAVIGATION_DEMO.md)**. In short:
+
+```bash
+HAMS_DISPLAY=vnc HAMS_RVIZ=vnc HAMS_CAMERAS=0 \
+HAMS_LOWERBODY=switch HAMS_SLAM=1 HAMS_NAV2=1 HAMS_SPAWN_BACKOFF=1.5 \
+  docker compose -f docker/docker-compose.mac.yml up -d
+# then, inside hams_ros:
+#   source /home/code/h12_sim_scripts/robot_cli.sh
+#   rob_stand    # FAME stand (wait ~15 s sim time for the tether to release)
+#   rob_explore  # walk handover + autonomous frontier exploration
+```
+
+Watch the map, costmap, and green plan build in RViz (<http://localhost:6081/vnc.html>).
+
+### ROS debugging MCP server (optional)
+
+`HAMS_ROS_MCP=1` starts an in-container MCP server that exposes ROS-inspection and
+robot-driving tools (`robot_status`, `wait_for`, `costmap_summary`, `drive`, …) to
+Claude Code over the same SSH tunnel as the viewers. Setup and tool list:
+**[docs/ROS_MCP_DEBUG.md](docs/ROS_MCP_DEBUG.md)**.
+
+### macOS gotchas
+
+- **The host `docker` CLI socket is intermittent** under Colima — `docker …` may
+  fail with "Cannot connect to the Docker daemon" while the VM and containers are
+  perfectly healthy. Use `colima ssh -- docker …` as the reliable fallback, or
+  `colima stop && colima start` to relink the socket (this restarts the containers).
+- **Cartesian reaching is disabled.** The `/frame_task` action currently crashes
+  the controller node, so `rob_reach` is a no-op stub — drive the robot in joint
+  space with `rob_pose` for now.
+- **Two viewers use two displays.** RoboCasa renders on X display `:99` and RViz
+  on `:100`; they must differ because the containers share one network namespace
+  (`network_mode: host`). The launchers already handle this.
+- **Restart the two containers coherently.** The RoboCasa container owns `/clock`.
+  Restarting it alone resets sim time to 0 while the ROS side keeps its old clock →
+  TF extrapolation errors and a frozen `0×0` SLAM map. After restarting/recreating
+  `robocasa`, restart `hams_ros` too so it resyncs to the fresh clock.
+- **`HAMS_SPAWN_BACKOFF` is baked at container-create.** `docker restart` reuses the
+  old value; use `docker compose up --force-recreate --no-deps robocasa` (with the
+  env set) to change it. For nav, `1.5`–`2.0` keeps the robot off the counters.
+- **The sim motor watchdog is sim-time based.** The low-level interface zeroes the
+  motors if no `rt/lowcmd` arrives within `HAMS_CMD_TIMEOUT` (default `0.5`) seconds
+  **of sim time** — measured in sim time on purpose, because a wall-clock timeout is
+  far too tight on a sim running ~0.2× real-time (it used to drop the robot ~0.7 s
+  after the tether released). Bump `HAMS_CMD_TIMEOUT` if a heavier scene still trips it.
