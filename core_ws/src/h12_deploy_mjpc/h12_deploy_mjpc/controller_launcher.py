@@ -23,6 +23,7 @@ import threading
 import rclpy
 from ament_index_python.packages import get_package_prefix
 from rclpy.node import Node
+from rclpy.duration import Duration
 from std_srvs.srv import Trigger
 
 
@@ -36,7 +37,6 @@ def _band_worker(node: Node, delay_sec: float, stop: threading.Event) -> None:
     the node clock is system time and this degrades to the old wall behavior.
     spin_once() here also services the /clock subscription (nothing else spins
     this node)."""
-    from rclpy.duration import Duration
     t0 = None
     while not stop.is_set() and rclpy.ok():
         rclpy.spin_once(node, timeout_sec=0.1)

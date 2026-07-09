@@ -417,7 +417,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 #    pull newer tasks; that re-clones AND recompiles. Pinning keeps the build
 #    reproducible despite the moving branch + Docker layer cache. MJPC_REF must be
 #    reachable from extended_hw (fetched over https; no build-time SSH keys).
-ARG MJPC_REF=c49e47efaf2c82b6ce26a980c43f76d11d15a757
+#    This hardcoded default is only the fallback for a bare `docker build`;
+#    docker_build.sh overrides it with the live `mujoco_mpc` submodule pin
+#    (git rev-parse HEAD:mujoco_mpc), so the baked MJPC can't drift from the gitlink.
+ARG MJPC_REF=c7fc99f5028d2c09d14060d6d85202a377eefe49
 RUN git clone --branch extended_hw --single-branch \
         https://github.com/badinkajink/mujoco_mpc.git /home/code/mujoco_mpc \
     && git -C /home/code/mujoco_mpc checkout --quiet "${MJPC_REF}"

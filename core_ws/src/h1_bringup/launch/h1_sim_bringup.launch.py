@@ -143,13 +143,43 @@ def generate_launch_description():
         # Switchable lower-body RL controller (walk / FAME stand-squat).
         # Auto-engages the FAME standing policy; switch via /lowerbody/start_walk
         # or /lowerbody/set_policy (waits for a safe handover before committing).
+        # Node(
+        #     package='h12_lowerbody_rl',
+        #     executable='lowerbody_controller_node',
+        #     name='lowerbody_controller_node',
+        #     parameters=[sim_time_param, {'active_policy': 'fame'}],
+        #     output='screen',
+        # ),
+
+        # --- MJPC lower-body base estimator (RW-EKF) -> rt/sportmodestate_est ---
         Node(
-            package='h12_lowerbody_rl',
-            executable='lowerbody_controller_node',
-            name='lowerbody_controller_node',
-            parameters=[sim_time_param, {'active_policy': 'fame'}],
+            package='h12_deploy_mjpc',
+            executable='estimator_node',
+            name='h12_deploy_mjpc_estimator',   # MUST match the yaml key
+            parameters=[
+                sim_time_param,
+                os.path.join(get_package_share_directory('h1_bringup'),
+                            'config', 'mjpc_sim.yaml'),
+            ],
             output='screen',
         ),
+
+        # --- MJPC lower-body balance controller (spawns mjpc_lowerbody_core) ---
+        Node(
+            package='h12_deploy_mjpc',
+            executable='mjpc_deploy_lowerbody_controller',
+            name='mjpc_deploy_lowerbody_controller',   # MUST match the yaml key
+            parameters=[
+                sim_time_param,
+                os.path.join(get_package_share_directory('h1_bringup'),
+                            'config', 'mjpc_sim.yaml'),
+            ],
+            # mjpc resolves task model XMLs relative to MJPC_TASKS_DIR; without it
+            # the model is null -> mj_makeData segfault on startup.
+            additional_env={'MJPC_TASKS_DIR': '/home/code/mujoco_mpc/build/mjpc/tasks'},
+            output='screen',
+        ),
+
 
         # graspgen_server: GraspGenX 6-DOF grasp-planning service (`graspgen`).
         # Heavy GPU model (checkpoints + magpie gripper description), so it's

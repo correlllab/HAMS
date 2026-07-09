@@ -82,6 +82,11 @@ services:
     build:
       context: ..
       dockerfile: docker/RosDockerfile
+      # MJPC_REF is exported by docker_build.sh from the mujoco_mpc submodule
+      # pin (git rev-parse HEAD:mujoco_mpc); if unset, RosDockerfile's default
+      # applies. This keeps the baked MJPC in lockstep with the gitlink.
+      args:
+        - MJPC_REF
     image: hams_ros:latest
     runtime: nvidia
     privileged: true
