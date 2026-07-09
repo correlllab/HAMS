@@ -356,3 +356,185 @@ RUN grep -viE '^psutil==' /opt/graspgenx-constraints.txt \
 # right now. The HF checkpoint repo (adithyamurali/GraspGenXModel, ~1.7 GB) IS
 # fetchable but is intentionally not baked here, to keep the image lean.
 RUN mkdir -p "$GRASPGENX_CHECKPOINT_DIR" "$GRASPGENX_GRIPPER_CFG_DIR"
+
+# -----------------------------------------------------------------------------
+# MuJoCo MPC (MJPC) — badinkajink/mujoco_mpc @ extended_hw_patched, cloned to
+# /home/code/mujoco_mpc, built, and installed so later code can `import
+# mujoco_mpc` (the gRPC Agent API for real-time predictive control, e.g. the
+# h12_lowerbody_rl).
+#
+# Appended last (same reasoning as the GraspGenX / nav2 / tk blocks above) so
+# iterating here can't bust the heavy apt / pip / SAM / robocasa layers earlier
+# in the file. NOTE: this is the single heaviest layer in the image — CMake
+# FetchContent pulls and builds MuJoCo 3.2.3, gRPC, abseil, glfw, googletest,
+# menagerie, dm_control and the h1_mujoco model from source; the gRPC fetch+build
+# alone is ~10-20 min, so expect a long build (and it links best with several GB
+# of RAM at -j$(nproc); lower -j if it OOMs).
+#
+# DEV LOOP: /home/code/mujoco_mpc is a BUILD-TIME-ONLY checkout — it is compiled,
+# its package is installed into dist-packages (the DURABLE import target), its
+# build tree is stashed to /opt/mjpc-build-seed, and then the source clone is
+# REMOVED (step 4). At runtime the docker-compose `ros` service bind-mounts the
+# ../mujoco_mpc submodule back over /home/code/mujoco_mpc (host-editable source),
+# and launch_ros.sh hydrates a persistent build cache from the seed so the first
+# in-container `rebuild_mjpc.sh` is incremental, not a cold ~15-min rebuild.
+# The submodule + MJPC_REF are pinned to the SAME patched-fork SHA so the mounted
+# source matches the baked install byte-for-byte until a deliberate bump.
+# -----------------------------------------------------------------------------
+
+# 1. C++ build deps. Mirrors upstream CI (.github/workflows/build.yml): clang-13
+#    + ninja + the GLFW/X11 dev headers the simulate/mjpc UI links against (the
+#    configure step processes the whole project — add_subdirectory(mjpc) +
+#    findorfetch glfw — so the X11 -dev headers are required even though we only
+#    build the agent_server target). `patch` is needed because mjpc/tasks builds
+#    its task XMLs by applying *.patch files to menagerie/dm_control models.
+#    clang-13 is the ONLY compiler upstream tests, so we build with it rather
+#    than the image's default gcc-12 (the build links the gcc-12 libstdc++, NOT
+#    libc++, exactly as CI does — so libc++-*-dev are deliberately NOT installed:
+#    libc++abi-13-dev pulls libunwind-13-dev, which Conflicts with libunwind-dev
+#    and would make apt silently REMOVE libceres-dev -> ros-humble-navigation2 /
+#    nav2-bringup / slam-toolbox, breaking h1_navigation.launch.py).
+#    llvm-13 + lld-13: MuJoCo builds its deps (ccd, qhull, …) with LTO/IPO, so
+#    CMake archives/links them with clang's `llvm-ar`/`llvm-ranlib`/`ld.lld`
+#    rather than GNU binutils. The bare `clang-13` package doesn't ship those —
+#    without llvm-13, `cmake -DCMAKE_C_COMPILER=clang-13` records
+#    `CMAKE_C_COMPILER_AR-NOTFOUND` and the libccd.a archive step dies. (CI's
+#    GitHub runners pass because they have the full LLVM toolchain preinstalled.)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        clang-13 llvm-13 lld-13 \
+        ninja-build zlib1g-dev patch \
+        libgl1-mesa-dev libxinerama-dev libxcursor-dev libxrandr-dev libxi-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# 2. Clone the extended_hw branch (which now carries the merged build fixes:
+#    ui_agent_server removal, magpie patch->copy, case-insensitive .STL globs) and
+#    PIN to a commit via the MJPC_REF arg so the mounted submodule source and this
+#    baked build are byte-identical — a hard requirement for the runtime
+#    incremental-build cache to stay warm.
+#    The fork moves fast and agent_server is COMPILED from this checkout, so the
+#    baked binary only knows the tasks present at MJPC_REF — bump it (edit here or
+#    `--build-arg MJPC_REF=<sha>`, AND move the submodule gitlink to match) to
+#    pull newer tasks; that re-clones AND recompiles. Pinning keeps the build
+#    reproducible despite the moving branch + Docker layer cache. MJPC_REF must be
+#    reachable from extended_hw (fetched over https; no build-time SSH keys).
+ARG MJPC_REF=c49e47efaf2c82b6ce26a980c43f76d11d15a757
+RUN git clone --branch extended_hw --single-branch \
+        https://github.com/badinkajink/mujoco_mpc.git /home/code/mujoco_mpc \
+    && git -C /home/code/mujoco_mpc checkout --quiet "${MJPC_REF}"
+
+# 3. Python runtime + build deps for the gRPC Agent API, added WITHOUT disturbing
+#    the pinned env. agent.py imports only grpc + mujoco + numpy + protobuf, so
+#    that — plus grpcio-tools for build-time proto generation — is all we add.
+#    mujoco is pinned to 3.2.3 to match the C++ MuJoCo the server is built against
+#    (CMakeLists MUJOCO_MPC_MUJOCO_GIT_TAG=088079e == mjVERSION 323): Agent.init()
+#    ships the model to agent_server as version-specific `mjb` bytes, so the
+#    Python `mujoco` and the C++ server MUST be the same version. (This downgrades
+#    mujoco 3.10 -> 3.2.3, tripping a cosmetic `mink requires mujoco>=3.8.1` pip
+#    warning — harmless here: nothing in the repo imports mink.)
+#    Constraint = the full GraspGenX freeze MINUS the packages we deliberately
+#    add/resolve, so torch/numpy<2 stay pinned while grpc + mujoco resolve
+#    mutually compatibly. grpcio-tools pulls protobuf 7.35.1 -> 6.33.6 (verified
+#    safe: google-genai/transformers don't pin protobuf) and yanks setuptools up
+#    to 82 — the latter is re-clamped back to 59.6.0 in step 6 below.
+RUN grep -viE '^(grpcio|grpcio-tools|grpcio-status|protobuf|mujoco)==' \
+        /opt/graspgenx-constraints.txt > /opt/mjpc-constraints.txt \
+    && PIP_CONSTRAINT=/opt/mjpc-constraints.txt pip install --no-cache-dir \
+        grpcio grpcio-tools protobuf "mujoco==3.2.3"
+
+# 4. Build the C++ agent_server, install the importable `mujoco_mpc` package,
+#    stage libmujoco, STASH the warm build tree as the incremental-cache seed,
+#    then REMOVE the source clone. The three source fixes that used to be sed'd
+#    in here now live as commits on extended_hw_patched, so the seed and the
+#    runtime-mounted submodule source are byte-identical (a hard requirement for
+#    the runtime incremental-build cache) and there is NO in-Dockerfile patching.
+#    The original gotchas still hold and are satisfied by those committed fixes
+#    plus build-first ordering:
+#      (a) setup.py's build_py.copy_task_assets asserts build/mjpc/tasks exists,
+#          which only CMake (build_ext) produces — so run the CMake build FIRST;
+#          the install's build_ext re-config is then an incremental no-op. Building
+#          just agent_server pulls the copy_resources / copy_model_resources ALL
+#          targets that populate build/mjpc/tasks.
+#      (b) extended_hw deleted the standalone ui_agent_server executable, so the
+#          fork's setup.py no longer --targets/copies it (it aborted Ninja).
+#      (c) the stale h1_2_modified_magpie.xml.patch is replaced by a direct CMake
+#          copy of the base model in the fork's mjpc/tasks/CMakeLists.txt.
+#      (d) copy_task_assets globs are case-insensitive in the fork, so the H1-2
+#          UPPERCASE .STL meshes reach site-packages.
+#
+#    Install via --single-version-externally-managed --record: copies the FULL
+#    build_lib tree (agent_server binary + generated proto/ + task XML/mesh assets)
+#    into dist-packages AND does NOT easy_install setup.py's heavy install_requires
+#    (brax / mujoco-mjx / jax), which would shatter the numpy<2 / cu130-torch pins;
+#    the gRPC Agent path needs none of them. dist-packages is the DURABLE import
+#    target — it survives the `rm -rf` of the source clone below, so `import
+#    mujoco_mpc` works at runtime with ZERO rebuild (before any dev rebuild).
+#
+#    agent_server is dynamically linked against libmujoco.so.3.2.3 (RUNPATH points
+#    into build/lib) and setup.py copies ONLY the executable — not that .so. So
+#    stash the build's OWN libmujoco.so* into /usr/local/lib + ldconfig. It MUST be
+#    this exact .so: the pip mujoco==3.2.3 wheel ships a same-soname libmujoco but
+#    from a different 3.2.3 commit (not ABI-identical) — substituting it makes
+#    agent_server misread mjModel (garbled sensor names, bogus cost errors).
+#
+#    SEED (dev loop): instead of `rm -rf build`, snapshot the post-install build
+#    tree to /opt/mjpc-build-seed with `cp -a` (preserves mtimes/symlinks/_deps
+#    stamps/.ninja_deps so it stays warm). The build is done IN-TREE at
+#    /home/code/mujoco_mpc/build — the exact path the runtime container_cache
+#    build mount lands on — so CMakeCache's absolute paths stay valid when the
+#    seed is hydrated back there by launch_ros.sh. That makes the first
+#    in-container rebuild_mjpc.sh incremental instead of a cold ~15-min rebuild.
+#    The seed grows the image ~3-8 GB (full _deps tree) — the deliberate cost of a
+#    warm first rebuild; only _deps/.git metadata (never used by the build) is
+#    trimmed. Then the source clone is removed (the ../mujoco_mpc submodule bind
+#    mount re-supplies it, host-editable, at runtime).
+RUN cd /home/code/mujoco_mpc \
+    && cmake -S . -B build -G Ninja \
+        -DCMAKE_C_COMPILER=clang-13 -DCMAKE_CXX_COMPILER=clang++-13 \
+        -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF \
+        -DMJPC_BUILD_GRPC_SERVICE=ON \
+        -DMJPC_BUILD_TESTS=OFF -DMJPC_GRPC_BUILD_TESTS=OFF -DPYMJPC_BUILD_TESTS=OFF \
+    && cmake --build build --target agent_server -j"$(nproc)" \
+    && cd python \
+    && CC=clang-13 CXX=clang++-13 CMAKE_GENERATOR=Ninja \
+       python setup.py install --single-version-externally-managed \
+                               --record /tmp/mjpc-install-files.txt \
+    && rm -f /tmp/mjpc-install-files.txt \
+    && cp -a /home/code/mujoco_mpc/build/lib/libmujoco.so* /usr/local/lib/ \
+    && ldconfig \
+    && cp -a /home/code/mujoco_mpc/build /opt/mjpc-build-seed \
+    # Stamp the seed with the ref it was built at: launch_ros.sh's hydrate uses it
+    # to re-touch only the files that changed when the mounted submodule is AHEAD
+    # of this image (otherwise the blanket back-date makes a stale build look warm).
+    && echo "${MJPC_REF}" > /opt/mjpc-build-seed/.mjpc_ref \
+    && find /opt/mjpc-build-seed/_deps -maxdepth 2 -name .git -prune -exec rm -rf {} + 2>/dev/null || true \
+    && rm -rf /home/code/mujoco_mpc
+
+# 5. Restore the setuptools/wheel clamp that step 3's grpcio-tools bumped to 82
+#    (same rationale + ghost-removal as steps 7 & 9 far above: colcon's
+#    python_setup_py and torch both require setuptools<80, and the 82-era
+#    distutils-precedence.pth makes every Python invocation print a
+#    `_distutils_hack` ModuleNotFoundError).
+RUN rm -rf /usr/local/lib/python3.10/dist-packages/setuptools \
+           /usr/local/lib/python3.10/dist-packages/setuptools-*.dist-info \
+           /usr/local/lib/python3.10/dist-packages/pkg_resources \
+           /usr/local/lib/python3.10/dist-packages/pkg_resources-*.dist-info \
+           /usr/local/lib/python3.10/dist-packages/_distutils_hack \
+           /usr/local/lib/python3.10/dist-packages/wheel \
+           /usr/local/lib/python3.10/dist-packages/wheel-*.dist-info \
+    && pip install --no-cache-dir --no-deps "numpy<2" "setuptools==59.6.0" "wheel<0.44" \
+    && rm -f /usr/local/lib/python3.10/dist-packages/distutils-precedence.pth
+
+# 6. Fail the build loudly if the package isn't importable, the server binary
+#    didn't get bundled, or any of its shared libraries (notably libmujoco.so.3.2.3,
+#    staged in step 4) don't resolve — so a broken MJPC build can't ship silently.
+#    Runs AFTER step 4's `rm -rf` of the source clone: this is the source-
+#    independence gate — import + binary + libs must all resolve from dist-packages
+#    (+ /usr/local/lib) alone, exactly as they will at runtime before any dev rebuild.
+RUN BIN=/usr/local/lib/python3.10/dist-packages/mujoco_mpc/mjpc/agent_server; \
+    if ldd "$BIN" | grep -q 'not found'; then \
+        echo 'ERROR: agent_server has unresolved shared libraries:'; ldd "$BIN" | grep 'not found'; exit 1; \
+    fi; \
+    python -c "import mujoco, mujoco_mpc, pathlib; from mujoco_mpc import agent; \
+b = pathlib.Path(mujoco_mpc.__file__).parent / 'mjpc' / 'agent_server'; \
+assert b.exists(), f'agent_server binary missing at {b}'; \
+print('MJPC OK — mujoco', mujoco.__version__, '| agent_server:', b)"

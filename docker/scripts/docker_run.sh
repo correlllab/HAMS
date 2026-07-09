@@ -24,9 +24,12 @@ if [ -f docker/.env ]; then
 fi
 
 # Pre-create host-side bind sources so dockerd doesn't materialise them
-# root-owned on first run. The cache holds msgs_ws build/install/log between
-# container restarts (see docker-compose.yml).
-mkdir -p container_cache/msgs_ws
+# root-owned on first run. The caches hold msgs_ws build/install/log and the MJPC
+# CMake build tree between container restarts (see docker-compose.yml). mjpc's
+# SOURCE is a git submodule (never mkdir it); we only pre-create the nested build/
+# mountpoint inside it (gitignored by the submodule's own /build/ rule).
+mkdir -p container_cache/msgs_ws container_cache/mjpc_build
+[ -d mujoco_mpc ] && mkdir -p mujoco_mpc/build
 
 # ROS_DOMAIN_ID handling. Domain 0 is the real robot's DDS command bus.
 #   - Sims (isaac/robocasa) must never run on it: reject an explicit 0 loudly.

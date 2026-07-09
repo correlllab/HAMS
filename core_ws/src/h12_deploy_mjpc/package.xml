@@ -1,0 +1,30 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>h12_deploy_mjpc</name>
+  <version>0.0.0</version>
+  <description>MJPC lower-body balance controller for the Unitree H1-2: the
+    fork's own CLI controller (badinkajink/mujoco_mpc@extended_hw
+    mjpc/deploy/h12_lower_body_controller.cc + deploy_common.cc, compiled
+    straight from the submodule) driving the 12 leg joints through the safety
+    layer's split LOWER channel, run behind a rclpy param launcher (rclcpp and
+    unitree_sdk2 CycloneDDS builds must not share a process), plus the fork's
+    RW-EKF proprioceptive base estimator behind a rclpy param shell.</description>
+  <maintainer email="maxlconway@gmail.com">maxconway</maintainer>
+  <license>Apache-2.0</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+  <buildtool_depend>ament_cmake_python</buildtool_depend>
+
+  <!-- Python param shells (controller core's DDS is raw unitree_sdk2 in its own
+       process; estimator's is unitree_sdk2py; both come from the image/mounts,
+       not rosdep) -->
+  <exec_depend>rclpy</exec_depend>
+  <exec_depend>std_srvs</exec_depend>
+  <exec_depend>python3-numpy</exec_depend>
+  <!-- mujoco (python) is pip-installed in the image; no rosdep key -->
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>

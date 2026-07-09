@@ -10,7 +10,7 @@ this repo).
 - `deploy_mujoco.py` — original walking-policy deploy → now `WalkPolicy`.
 - `mujoco_deploy_h12_rma.py` — original FAME/RMA deploy → now `FamePolicy`.
 
-The live integration is in `h12_lowerbody_controller/`:
+The live integration is in `h12_lowerbody_rl/`:
 `policy.py` (WalkPolicy, FamePolicy), `policy_manager.py` (safe-handover
 switching), `scripts/lowerbody_controller_node.py` (the ROS node), and the
-trimmed inference-only encoder under `h12_lowerbody_controller/rma/`.
+trimmed inference-only encoder under `h12_lowerbody_rl/rma/`.

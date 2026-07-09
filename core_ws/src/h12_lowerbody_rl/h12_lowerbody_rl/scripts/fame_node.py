@@ -32,7 +32,7 @@ from std_msgs.msg import Float32
 from std_srvs.srv import Trigger
 from unitree_hg.msg import LowCmd, LowState
 
-from h12_lowerbody_controller.policy import (
+from h12_lowerbody_rl.policy import (
     NUM_LEG_JOINTS,
     NUM_POLICY_JOINTS,
     FamePolicy,
@@ -44,7 +44,7 @@ MOTOR_MODE_PR = 1
 
 def _default_fame_config() -> str:
     return os.path.join(
-        get_package_share_directory("h12_lowerbody_controller"),
+        get_package_share_directory("h12_lowerbody_rl"),
         "policies", "fame", "fame.yaml",
     )
 

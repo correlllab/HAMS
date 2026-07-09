@@ -129,4 +129,31 @@ services:
       - ../CL_Assets/graspgenx/assets/magpie:/opt/graspgenx/assets/x_grippers/magpie:ro
       - ../CL_Assets/graspgenx/assets/meshes/magpie:/opt/graspgenx/assets/x_grippers/meshes/magpie:ro
       - ./scripts:/home/code/h12_sim_scripts
+      # --- MuJoCo MPC (MJPC) dev mounts -------------------------------------
+      # rw SOURCE mount: the ../mujoco_mpc submodule fills the (build-time-removed)
+      # clone path so the C++ agent_server / task XMLs are host-editable. The
+      # importable package lives baked in dist-packages, so `import mujoco_mpc`
+      # works with zero rebuild; keep this checkout pinned at MJPC_REF.
+      - ../mujoco_mpc:/home/code/mujoco_mpc:rw
+      # Persistent CMake build tree, nested INSIDE the source mount at the exact
+      # in-tree path the image seed was built at (/home/code/mujoco_mpc/build), so
+      # CMakeCache absolute paths match and setup.py's build_ext reuses it. Host
+      # bytes live in gitignored container_cache/mjpc_build; launch_ros.sh hydrates
+      # it from /opt/mjpc-build-seed on first launch (see msgs_ws pattern above).
+      - ../container_cache/mjpc_build:/home/code/mujoco_mpc/build:rw
+      # unitree_sdk2 C++ SDK install (headers + PREBUILT libunitree_sdk2.a +
+      # CycloneDDS .so) for the h12_deploy_mjpc controller shim, which compiles
+      # the fork's deploy core (deploy_common.cc, raw unitree_sdk2 DDS) inside
+      # colcon. Hydrated by launch_ros.sh on first launch (clone + cmake
+      # --install, seconds — nothing compiles, the repo ships prebuilt libs);
+      # persisted here so `run --rm` containers keep it.
+      - ../container_cache/unitree_install:/opt/unitree_install:rw
+      # Submodule git metadata (ro): mujoco_mpc/.git is a FILE with
+      # `gitdir: ../.git/modules/mujoco_mpc`, so mounting that dir at the
+      # matching container path makes git work on the mounted source.
+      # launch_ros.sh's hydrate needs `git diff --name-only <seed-ref>` to
+      # un-backdate exactly the files that changed since the image's baked
+      # build seed (otherwise a submodule ahead of MJPC_REF hydrates into a
+      # silently STALE build tree).
+      - ../.git/modules/mujoco_mpc:/home/code/.git/modules/mujoco_mpc:ro
     command: /home/code/h12_sim_scripts/launch_ros.sh
