@@ -25,7 +25,17 @@ mjpc_deploy_lowerbody_controller:
   ros__parameters:
     task: "Stabilize H12 Magpie"
     strategy: 6                 # 6 = stand (the stabilize task's only real slot)
-    plan_threads: 3
+    # ★ RESTORED TO 12 (2026-07-06) = PARITY WITH REAL/TWIN/OWNSIM (all run 12). The
+    # old drop to 3 "faked" the per-sim-second planner rate for RoboCasa's SLOW RTF
+    # (0.25: 12 threads = 4x real iters/sim-s -> over-plan wobble; 3 = ~real). BUT
+    # that band-aid only fixed the PLANNER and REQUIRED staying slow, which LEFT the
+    # latency compensator (deploy_common.cc:903, wall-clock dlt predicted as sim-sec)
+    # over-predicting by 1/RTF -> controller<->plant OVERSHOOT/OSCILLATION. Correct
+    # fix = run like real: 12 threads + RTF as near 1.0 as the box allows (HEADLESS,
+    # --no-sensors, NO slowmo -> ~0.85). At 0.85: 12thr = ~65 iters/sim-s (~real's 55)
+    # AND latency over-lead only 1.18x. Do NOT slow down; slowmo breaks BOTH. If 12
+    # threads oversubscribe the laptop and TANK RTF (check /clock hz), drop to ~10.
+    plan_threads: 12
     # PLANNER-RATE PARITY (2026-07-04, wobble root cause R1): the CEM planner
     # free-runs on wall time (~55 iters/s at 12 threads); at RoboCasa's ~0.25x
     # RTF that is ~4x more iterations per PLANT-second than twin/real -- the
@@ -69,6 +79,13 @@ mjpc_deploy_lowerbody_controller:
     # the TWIN's dt via --sim-dt 0.005 -- the deploy-chain stand is
     # dt-sensitive (twin@0.002 hangs, twin@0.005 stands even at RTF 0.5).
     twin_dt: 0.005
+    # ★ TWIN-PARITY A/B RESULT (2026-07-06): tested rt/sportmodestate (GROUND TRUTH,
+    # plant --truth-sportstate, VERIFIED 191 Hz + controller reading it) -> did NOT
+    # stop the fall. The LATERAL fold became a SAGITTAL forward->backward divergence
+    # (plane-floor had already fixed lateral). So the ESTIMATOR was NOT the killer.
+    # REVERTED to rt/sportmodestate_est = real-parity + the 30 ms LPF that damps the
+    # raw-truth base velocity the planner over-reacts to. Re-flip to rt/sportmodestate
+    # (+ plant --truth-sportstate) only to A/B raw truth again.
     sportstate_topic: rt/sportmodestate_est
     # REAL-PARITY STATE SOURCE (2026-07-05): read the RW-EKF estimate on
     # rt/sportmodestate_est — the SAME signal path the real robot uses (the
