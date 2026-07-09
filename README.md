@@ -260,13 +260,42 @@ HAMS_DISPLAY=vnc HAMS_RVIZ=vnc HAMS_LOWERBODY=fame \
   docker compose -f docker/docker-compose.mac.yml up
 ```
 
-Caveat: `HAMS_LOWERBODY=fame` **stands** (and squats via `/lowerbody/squat_cmd`)
-but does **not** locomote — it holds position. `HAMS_LOWERBODY=walk` runs the
-TorchScript walk policy, which currently does **not** stay upright in the RoboCasa
-sim (falls a few seconds after the tether releases); true forward walking needs a
-locomotion policy tuned for this simulator. (`torch` is already in the ros image;
-building `unitree_hg` needs `rosidl-generator-dds-idl`, which the image now
-includes.)
+`HAMS_LOWERBODY=fame` **stands** (and squats via `/lowerbody/squat_cmd`) but holds
+position — it does not locomote. For **stand *and* walk**, use the switchable
+controller instead:
+
+```bash
+HAMS_DISPLAY=vnc HAMS_RVIZ=vnc HAMS_LOWERBODY=switch \
+  docker compose -f docker/docker-compose.mac.yml up
+```
+
+It starts band-held idle; `rob_stand` engages FAME (stand free), `rob_walk` hands
+over to the TorchScript walk policy, and `rob_go <vx> <vy> <wz>` drives it. The
+walk policy **does stay upright** now, handed over from a settled FAME stance — the
+earlier "falls a few seconds after the tether releases" was a too-tight motor
+watchdog on the slow sim (see gotchas). Launching the raw policy directly
+(`HAMS_LOWERBODY=walk`) still just marches in place; use `switch`. (`torch` is
+already in the ros image; building `unitree_hg` needs `rosidl-generator-dds-idl`,
+which the image now includes.)
+
+### Navigation demo (SLAM + nav2 + frontier exploration)
+
+The robot can map the kitchen and drive itself around autonomously — 2D SLAM from
+the lidar, nav2 planning collision-free paths on a costmap that includes the full
+3D cloud, and a frontier explorer sending goals. Full walkthrough:
+**[docs/NAVIGATION_DEMO.md](docs/NAVIGATION_DEMO.md)**. In short:
+
+```bash
+HAMS_DISPLAY=vnc HAMS_RVIZ=vnc HAMS_CAMERAS=0 \
+HAMS_LOWERBODY=switch HAMS_SLAM=1 HAMS_NAV2=1 HAMS_SPAWN_BACKOFF=1.5 \
+  docker compose -f docker/docker-compose.mac.yml up -d
+# then, inside hams_ros:
+#   source /home/code/h12_sim_scripts/robot_cli.sh
+#   rob_stand    # FAME stand (wait ~15 s sim time for the tether to release)
+#   rob_explore  # walk handover + autonomous frontier exploration
+```
+
+Watch the map, costmap, and green plan build in RViz (<http://localhost:6081/vnc.html>).
 
 ### macOS gotchas
 
@@ -280,3 +309,15 @@ includes.)
 - **Two viewers use two displays.** RoboCasa renders on X display `:99` and RViz
   on `:100`; they must differ because the containers share one network namespace
   (`network_mode: host`). The launchers already handle this.
+- **Restart the two containers coherently.** The RoboCasa container owns `/clock`.
+  Restarting it alone resets sim time to 0 while the ROS side keeps its old clock →
+  TF extrapolation errors and a frozen `0×0` SLAM map. After restarting/recreating
+  `robocasa`, restart `hams_ros` too so it resyncs to the fresh clock.
+- **`HAMS_SPAWN_BACKOFF` is baked at container-create.** `docker restart` reuses the
+  old value; use `docker compose up --force-recreate --no-deps robocasa` (with the
+  env set) to change it. For nav, `1.5`–`2.0` keeps the robot off the counters.
+- **The sim motor watchdog is sim-time based.** The low-level interface zeroes the
+  motors if no `rt/lowcmd` arrives within `HAMS_CMD_TIMEOUT` (default `0.5`) seconds
+  **of sim time** — measured in sim time on purpose, because a wall-clock timeout is
+  far too tight on a sim running ~0.2× real-time (it used to drop the robot ~0.7 s
+  after the tether released). Bump `HAMS_CMD_TIMEOUT` if a heavier scene still trips it.
