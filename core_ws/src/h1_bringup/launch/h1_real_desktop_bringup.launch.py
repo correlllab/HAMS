@@ -134,10 +134,10 @@ def generate_launch_description():
             parameters=[
                 sim_time_param,
                 os.path.join(get_package_share_directory('h1_bringup'),
-                            'config', 'mjpc_sim.yaml'),
+                            'config', 'mjpc_real.yaml'),
             ],
             output='screen',
-            condition=IfCondition(LaunchConfiguration('start_position_verified')),
+            #condition=IfCondition(LaunchConfiguration('start_position_verified')),
 
         ),
 
@@ -149,7 +149,7 @@ def generate_launch_description():
             parameters=[
                 sim_time_param,
                 os.path.join(get_package_share_directory('h1_bringup'),
-                            'config', 'mjpc_sim.yaml'),
+                            'config', 'mjpc_real.yaml'),
             ],
             # mjpc resolves task model XMLs relative to MJPC_TASKS_DIR; without it
             # the model is null -> mj_makeData segfault on startup.
