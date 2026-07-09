@@ -135,6 +135,21 @@ def main() -> None:
             env["LD_LIBRARY_PATH"] = cand + os.pathsep + env.get("LD_LIBRARY_PATH", "")
             break
 
+    # H12_FRC_PARITY (env knob read by the core, h12_lower_body_controller.cc):
+    # clamp the planner-model leg forceranges to 0.9 x TAU_ESTOP so a planned
+    # balance catch == the torque the deploy chain can actually deliver (the
+    # core's own H2 torque-budget clamp caps every command there; without this
+    # the planner over-promises the catch and under-delivers at execution). The
+    # single biggest post-ABI-fix stand win (session-5 T7: rtf 1, 4 s -> 212 s).
+    # Config-driven so sim and real can differ; empty/unset = stock forceranges
+    # (compiled default). "1"/estop = 0.9 x TAU_ESTOP.
+    frc_parity = str(p("frc_parity", "").value)
+    if frc_parity:
+        env["H12_FRC_PARITY"] = frc_parity
+        node.get_logger().info(
+            f"H12_FRC_PARITY={frc_parity} (planner leg forcerange = "
+            "0.9 x TAU_ESTOP)")
+
     node.get_logger().info("launching " + " ".join(args))
     child = subprocess.Popen(args, env=env)  # stdout/stderr inherit -> visible in launch log
 

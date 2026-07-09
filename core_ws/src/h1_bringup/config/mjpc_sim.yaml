@@ -25,6 +25,14 @@ mjpc_deploy_lowerbody_controller:
   ros__parameters:
     task: "Stabilize H12 Magpie"
     strategy: 6                 # 6 = stand (the stabilize task's only real slot)
+    # TORQUE-ENVELOPE PARITY (H12_FRC_PARITY): clamp the planner-model leg
+    # forceranges to 0.9 x TAU_ESTOP so a planned balance catch equals the
+    # torque the deploy chain actually delivers (the core's H2 torque-budget
+    # clamp caps every command there). Without it the planner over-promises the
+    # catch (ankle by ~54%) and under-delivers -> the robot tips where the
+    # in-process probe stood. Session-5 T7: the single biggest post-ABI-fix
+    # stand win (rtf 1: 4 s -> 212 s). "1"/estop = 0.9 x TAU_ESTOP; "" = stock.
+    frc_parity: "1"
     plan_threads: 3
     # PLANNER-RATE PARITY (2026-07-04, wobble root cause R1): the CEM planner
     # free-runs on wall time (~55 iters/s at 12 threads); at RoboCasa's ~0.25x
