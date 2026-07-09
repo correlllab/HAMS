@@ -1,0 +1,941 @@
+================================================================================
+FABEL SILVER BULLETS — RoboCasa H1-2 plant vs mjpc twin sim-to-sim stand gap
+================================================================================
+Mission: make the shared MJPC stand controller balance indefinitely, unassisted,
+on the RoboCasa plant (post-release z >= 0.95 sustained >= 300 sim-s, strap ~0 N,
+reproducible on >= 3 episodes). Baseline: 5/5 falls in 16.5-141.7 sim-s with the
+band bearing 570-690 N (audit section 13, measured 2026-07-06).
+
+Phase-A ground truth that reshapes the audit's ranking (verified by 4 parallel
+code readers over the twin clone, mujoco_mpc deploy core, robosuite assembly,
+and the safety layer):
+
+  G1. The section-13 soak was DOUBLY broken on dt: the plant ran 0.002 while
+      mjpc_fullbody.yaml already assumed 0.005 (twin_dt AND estimator tick_dt).
+      deploy_common.cc:832-846 clocks the whole bring-up + the base-velocity
+      finite-diff off lowstate tick * twin_dt, so the choreography ran 2.5x too
+      fast and the planner saw base velocities scaled to ~0.4x. Not just a
+      physics-parity delta - a broken test harness.
+  G2. gravity_ff is a PER-PLANT deploy parameter by the fork's own flag doc
+      (h12_lower_body_controller.cc + h12_control_node.cc, identical text):
+      "REAL robot: 0.85. TWIN bench: 0 (the twin's gravcomp over-lightens the
+      legs at 0.85 -> knee-strut collapse)". The bench yaml runs 0.85 against a
+      MuJoCo plant; only 0.85-vs-1.0 was ever bracketed (H2/H3), never 0. The
+      observed RoboCasa failure = vertical knee-buckle sag.
+  G3. The twin plant's <default> joint class REACHES ITS FREE BASE JOINT:
+      dof_damping[0:6]=10, dof_armature[0:6]=0.1 (only frictionloss zeroed,
+      h1_2_handless_magpie.xml:12,51-56). The PLANNER model has the same
+      (h1_2_modified_magpie.xml:114-116, childclass h1_2, default damping 10 /
+      armature 0.1; free joint carries no override). The RoboCasa plant's free
+      joint is 0/0/0 (verified compiled). Twin AND planner balance a base with
+      a sky-hook damper; the local plant does not have it. Missed by the audit.
+  G4. --real-hands closes only HALF the hand-mass gap: robosuite base.xml
+      inertiagrouprange="0 0" drops the visual-mesh copies, so each assembled
+      gripper is 0.2528 kg vs the twin/planner 0.506 kg lump; the 0.67 kg
+      back_equipment box is absent entirely. Total ~1.18 kg upper-body deficit
+      even at full flags (local 67.49 kg vs twin 68.67 kg).
+  G5. multiccd is ALREADY ON at robosuite assembly (robocasa kitchen.py
+      enable_multiccd=True); h12_mujoco's patch is a no-op. Audit's multiccd
+      causal story is wrong. Solver is already Newton too.
+  G6. Air: robosuite base.xml gives the world density=1.2 viscosity=2e-5 (air
+      drag); the twin is vacuum (MuJoCo default). Small forces, exact-parity
+      item.
+  G7. Safety layer is a functional pass-through for stand-magnitude commands
+      (kp<=200<500, kd<=5<30, dq=0, tau_ff clipped only above 0.6x URDF - knee
+      180 Nm, ankle-pitch 36 Nm). Two kill modes to WATCH, not fix: a latched
+      estop from one bad lowstate sample (grep 'estop_triggered'), and the
+      controller-side stale watchdog (yaml stale_sec 1.5 - ok). It publishes
+      idle kp=0 zeros at 500 Hz from launch; the sim's manual-band engagement
+      latch gates on kp>1 so this is handled (harness path does NOT gate on kp
+      - use the manual band + --auto-release for honest tests).
+  G8. imu_pitch_offset_deg DEFAULTS to +1.6 deg (real-robot mount cal) in both
+      cores; mjpc_fullbody.yaml already zeroes it. Verify it stays zeroed.
+  G9. The launch docstring "pair with --twin-contact" is STALE: the sim's own
+      code comments record pyramidal+impratio100 as a FAILED A/B (tilt 13->21;
+      impratio is inert on pyramidal cones) and point to --elliptic-contact.
+  G10. Stand target: base z=1.020 (stand_up keyframe, knee 0.35), enforced by
+      one-sided Base Height cost weight 450 + Height 100 consuming the
+      sportstate-reconstructed base z. Sag = these terms losing to something.
+
+--------------------------------------------------------------------------------
+TEST PROTOCOL (all trials)
+--------------------------------------------------------------------------------
+Sim:  ./docker/scripts/docker_run.sh robocasa --headless --no-sensors \
+        --auto-release --auto-release-delay 15 [BULLET FLAGS] \
+        --task TurnOffSimmeredSauceHeat --seed 7        # pinned episode for A/B
+Ros:  ./docker/scripts/docker_run.sh ros   (pipe: ros2 launch h1_bringup
+        h1_sim_fullbody_bench.launch.py)   # ROS_DOMAIN_ID=67 via docker/.env
+Driver: scratchpad/fabel_trial.py (adapted from the section-13 soak loop);
+verdict from the sim's ground-truth [manual] line (z, tilt, trueXY, strap).
+--auto-release (manual band): kp>1 engagement latch -> +15 s -> rope paid to
+slack+0.35 m catch + tilt assist faded to 0 over 3 s. Honest free stand; strap
+stays SLACK unless the robot sags ~0.35 m (deep fail).
+SURVIVED_DOD = post-release >= 330 sim-s with min z >= 0.95 and strap < 30 N.
+--no-sensors always on (nothing consumes vision; RTF fidelity). Startup probes
+(timestep check, gripper mass, contact/floor/hands lines) echoed per trial.
+
+================================================================================
+RANKED CANDIDATES (impact x cheapness; annotate results in place as measured)
+================================================================================
+
+S1. dt COHERENCE - plant timestep 0.005 to match the deploy config
+  (a) Hypothesis: the stand fails because the plant runs dt=0.002 while
+      twin_dt/tick_dt=0.005 skew the controller phase clock 2.5x and scale
+      planner-perceived base velocity to 0.4x; and the deploy chain is tuned to
+      a 0.005 plant (twin T2-hangs/T3b-stands dt evidence).
+  (b) Mechanism: h12_mujoco.py --sim-dt (opt.timestep override before
+      SimInterface); deploy_common.cc twin-time; estimator step_dt.
+  (c) Command: sim flag `--sim-dt 0.005` (yaml already at twin_dt/tick_dt
+      0.005 - no ros-side change).
+  (d) Predicted: bring-up phases take correct sim durations; sag delayed or
+      gone; if still falls, the signature changes.
+  (e) Falsify: identical sag timing/signature vs section 13.
+  NOTE: this is the coherence BASELINE - include in every trial. The pure
+      dt-physics ablation (plant 0.002 + twin_dt/tick_dt 0.002) can run later.
+  RESULT: PENDING
+
+S2. gravity_ff = 0 (the TWIN-BENCH value; yaml edit, not a controller change)
+  (a) Hypothesis: 0.85 gravity feed-forward over-lightens the legs on a MuJoCo
+      plant (the fork's own documented twin failure: "knee-strut collapse") -
+      the exact vertical-sag signature of section 13.
+  (b) Mechanism: tau_ff = gff * qfrc_bias(planner model, qvel=0) added to every
+      joint cmd (deploy_common.cc:932-939,1062). Flag doc: REAL 0.85, TWIN 0.
+  (c) Command: core_ws/src/h1_bringup/config/mjpc_fullbody.yaml ->
+      gravity_ff: 0.0 (symlink-installed; no rebuild needed).
+  (d) Predicted: knee-buckle sag stops; policy carries weight through PD; band
+      goes/stays slack post-release.
+  (e) Falsify: sag persists with same rate; or robot now tips instead (would
+      indicate the plant needs partial ff - bracket 0.4).
+  SCOPE NOTE: this is bench deployment config (per-plant by design), NOT a
+      retune of shared controller gains/weights.
+  RESULT: ⚠️ T2 (full parity + gff=0): STILL FELL AT RELEASE, but the failure
+      moved and the bring-up got much cleaner (tilt 0.7-3.7 deg vs 5+ deg,
+      assist 4-20 Nm vs 28-33). New signature: perfect scripted phases, then
+      LATERAL CoM drift starting exactly at policy-blend end (engaged+13 s;
+      node lean lat -4.9 -> -29.7 deg, trueXY y -0.67 m) with the one-knee-
+      strut (knee 0.73/0.17) - the audit's documented lateral-drift collapse,
+      now under PLANNER control. gff=0 is likely necessary but not sufficient;
+      the planner's closed loop is unstable on this plant -> S6/S4-variant/S7.
+
+S3. TRUTH base state consumed by the controller
+  (a) Hypothesis: the RW-EKF leg-odometry xy drifts ~0.3 m under sim foot
+      micro-slip -> phantom capture-point velocity -> the policy chases it and
+      buckles; truth kills the drift.
+  (b) Mechanism: sim --truth-sportstate publishes IMU-site world pos/linvel on
+      rt/sportmodestate (unitree_interface.py:59-91, twin-parity); controller
+      currently reads rt/sportmodestate_est (estimator). NOTE deploy_common
+      overwrites the VELOCITY with its own finite-diff; the position stream
+      (xy + height) is what matters (Base Height weight 450).
+  (c) Command: sim flag `--truth-sportstate` + yaml sportstate_topic:
+      rt/sportmodestate (estimator stays parked on _est for side-by-side).
+  (d) Predicted: estimator-vs-truth divergence visible ([manual] trueXY vs
+      estimator xy log); with truth the stand holds or fails differently.
+  (e) Falsify: truth-fed run sags identically -> state source is not the gap.
+  RESULT: PENDING
+
+S4. --elliptic-contact (impratio 20 -> 100 on the native elliptic cone)
+  (a) Hypothesis: at impratio 20 the stance feet creep laterally under load
+      (planner believes ~no-slip at impratio 100) -> slow lateral drift -> the
+      one-knee-strut fold.
+  (b) Mechanism: h12_mujoco.py:242-266 (docs' no-slip recipe: elliptic + high
+      impratio + Newton; Newton already default).
+  (c) Command: sim flag `--elliptic-contact`.
+  (d) Predicted: trueXY lateral creep during the stand shrinks; longer/clean
+      stands when combined with S1.
+  (e) Falsify: no change in drift rate or time-to-fall.
+  RESULT: PENDING
+
+S5. --plane-floor (kitchen walking boxes -> infinite planes, in place)
+  (a) Hypothesis: the thin-box floor manifold (even multi-point via multiccd)
+      destabilizes the stand - the dev's T-box twin A/B flipped a 218 s stand
+      into a 2 s face-plant with the box alone.
+  (b) Mechanism: h12_mujoco.py:196-216 converts floor_*_room_g* boxes to
+      planes at the same top height.
+  (c) Command: sim flag `--plane-floor`.
+  (d) Predicted: with S1(+S4), post-release survival jumps.
+  (e) Falsify: no improvement vs box floor under otherwise-identical flags.
+  RESULT: PENDING
+
+S6. BASE SKY-HOOK PARITY - free-joint damping 10 / armature 0.1  [NEW - not in audit]
+  (a) Hypothesis: twin plant AND planner model both balance a floating base
+      with dof_damping=10, armature=0.1 on all 6 base DOF; the local base has
+      0/0/0, so every planned action overestimates how quickly base motion
+      decays -> slow sag/drift the planner never predicts.
+  (b) Mechanism: new plant patch (h12_mujoco.py flag --base-damping): set
+      model.dof_damping[base:base+6]=10.0, dof_armature[base:base+6]=0.1
+      (frictionloss stays 0 = twin parity).
+  (c) Command: sim flag `--base-damping` (to be added this session if needed).
+  (d) Predicted: visibly slower sway/sag rates; stands that marginally failed
+      now hold.
+  (e) Falsify: no change -> the damper is negligible at stand velocities
+      (plausible: 10 N.s/m is ~2 N at observed sway).
+  RESULT: ❌ T3 (T2 + --base-damping): flag applied (log confirmed), fell at
+      release with the SAME lateral-drift signature and timing as T2. The
+      sky-hook is not the (dominant) gap at stand velocities.
+
+S15. SPAWN-FRAME STATE - publish DDS state in the robot's home frame  [NEW]
+  (a) Hypothesis: RoboCasa is the ONLY plant that hands the controller raw
+      kitchen-world pose (xy ~(-2.2,-3.6), arbitrary spawn yaw). The twin
+      spawns at the model origin facing +x; the real IMU boots at yaw ~0 with
+      odometry from 0. The Lean task's Body Yaw cost (weight 40, lean.cc:2135)
+      aligns the torso's forward xy with reach_dir = direction from the torso
+      to reach_target = object_pos -- the PHANTOM OBJECT inside the planner
+      model at ~(1.1, 0). A yaw'd/offset robot therefore carries a permanent
+      weight-40 heading error it can only reduce by pivoting itself -- the
+      persistent lateral drift + one-knee-strut fold seen in T1/T2/T3 AND
+      (via the raw lowstate quaternion, which the estimator chain passes
+      through too) in every section-13 trial.
+  (b) Mechanism: new flag --spawn-frame-state (added this session):
+      unitree_interface publishes the lowstate IMU quaternion with the spawn
+      yaw rotated out, and the truth sportmodestate position spawn-relative
+      (xy from ~0, z referenced to the walking-surface top 0.02) + velocity
+      yaw-derotated. Exact rigid-transform consistency with the node's
+      pelvis = p - R*kImuOffset reconstruction.
+  (c) Command: sim flag `--spawn-frame-state`.
+  (d) Predicted: node lean/tilt telemetry no longer shows a persistent
+      lateral heading error; the post-blend drift disappears; the free stand
+      holds. Prediction detail: T1-T3's drift direction should correspond to
+      the spawn-yaw/object-direction mismatch (check yaw0 in the log).
+  (e) Falsify: identical lateral drift with spawn-frame state on.
+  RESULT: ✅✅ T4 (T2 + --spawn-frame-state): THE DRIFT IS GONE. Spawn yaw was
+      180.0 deg (!) - every prior kitchen trial had the planner paid w=40 to
+      turn the robot fully around. Post-release: strap SLACK 0 N and stayed
+      slack (first genuinely free stand), trueXY FROZEN at (-2.35,-3.31)
+      (zero drift), z 0.96-0.97 for ~20 s. Remaining failure: a growing tilt
+      OSCILLATION (2->9->16->31->66 deg over ~20 s, ~2-3 s swings) -> fell at
+      t=55.6. The yaw/frame poison was the drift; an under-damped tilt limit
+      cycle is what's left -> S16.
+
+S16. FOOT CONTACT TIMECONSTANT at dt 0.005 - rigid-feet solref 0.008 violates
+     the 2-step rule  [NEW]
+  (a) Hypothesis: the default rigid-feet hardening sets foot solref 0.008 s,
+      tuned when the plant ran dt 0.002 (4 steps per timeconstant). At the
+      parity dt 0.005 that is 1.6 steps - below MuJoCo's ~2-step contact
+      stability floor - giving foot-contact chatter/instability that shows up
+      as the growing tilt oscillation of T4. The twin's feet are UNTOUCHED:
+      condim 3, solref 0.02 (= 4 steps at its dt 0.005).
+  (b) Mechanism: existing tunable --foot-solref (h12_mujoco.py rigid-feet
+      block); 0.02 = twin foot softness.
+  (c) Command: sim flag `--foot-solref 0.02` (or --soft-feet to drop the
+      per-geom hack entirely now that --elliptic-contact provides the global
+      no-slip recipe).
+  (d) Predicted: tilt oscillation envelope stops growing; free stand holds
+      300+ s.
+  (e) Falsify: same oscillation at 0.02 -> suspect planner-vs-plant cone
+      mismatch (elliptic vs pyramidal, S4-variant --twin-contact) or the
+      base angular damper (S6, now unmasked).
+  RESULT: ❌ T5 (T4 + --foot-solref 0.02): WORSE - wobbled at 7 deg under
+      35-41 Nm assist through bring-up and toppled through the release
+      (min z 0.64, strap 420 N). Softer feet destabilize; 0.008 stays.
+      Also: the T4 oscillation period is ~3-5 s = planner-level hunting,
+      not contact chatter - S16's mechanism was wrong anyway.
+
+S17. POST-YAW-FIX BRACKETS (all single-flag, all on T4 base):
+  - T6 = T4 + --base-damping: ❌ fell 1 s post-release (released into a
+    growing swing; clean 0.8-deg bring-up though). Sky-hook not sufficient.
+  - T7 = T4 + plan_threads 12 (yaml): planner 35->62-72 iters/s (vs twin
+    reference ~56/plant-s) - ❌ still drove a monotonic pitch lean vs the
+    assist (0.8 -> 12.5 deg, 66 Nm) and fell in the fade. Rate wasn't it.
+    (plan_threads kept at 12 = twin/real parity value for an RTF~1 plant.)
+  - T8 = T4 with --twin-contact (pyramidal-100 = EXACT planner/twin cone,
+    re-tested post-yaw-fix): ❌ fell 2.6 s post-release (min z 0.66,
+    strap 550). The 2026-07-04 "failed A/B" verdict stands even after the
+    yaw fix; elliptic-100 (T4) remains the best contact config.
+  Reading: every fall since T4 happens AT or just after the TIMED release,
+  frequently mid-swing; T4 proved a 22-s slack-strap free stand exists. The
+  timed --auto-release (pays 35 cm in 3 s regardless of quiet) is itself a
+  harsher handoff than the twin's validated chunked quiet-gated payout +
+  honest sustained-slack gate -> protocol fidelity next (T9, --harness with
+  the engagement latch fixed to the twin's kp>1 sniff).
+
+S7. UPPER-BODY MASS PARITY - complete the missing 1.18 kg  [--real-hands is HALF a fix]
+  (a) Hypothesis: the controller feed-forwards gravity for planner-model
+      masses (0.506 kg/hand + 0.67 kg back box); the plant is ~1.18 kg lighter
+      up top with a forward-shifted torso CoM -> constant pitch/torque bias.
+  (b) Mechanism: --real-hands (gravcomp off, 0.253 kg/hand) + new flag
+      --twin-mass (to be added if needed): scale gripper body masses x2 to
+      0.506 kg/side and add a 0.67 kg point mass at torso local (-0.095,0,0.18)
+      with CoM/inertia update - matches the twin's back_equipment.
+  (c) Command: sim flags `--real-hands --twin-mass`.
+  (d) Predicted: with gff>0, wrist/shoulder over-torque gone and torso
+      equilibrium shifts back; with gff=0 effect is smaller (PD absorbs it).
+  (e) Falsify: no change in sag/tilt at either gff.
+  RESULT: PENDING
+
+S8. RTF FIDELITY - --no-sensors (+ dt 0.005 raises RTF ~2.5x)
+  (a) Hypothesis: not a bullet by itself, but a validity precondition: the
+      validated regime is RTF~1; renders holding the sim lock 50-60 ms distort
+      the async DDS coupling.
+  (b) Command: sim flag `--no-sensors` in every balance trial.
+  RESULT: PENDING (carried in every trial)
+
+S9. SPAWN CROUCH 0.4-0.6 (handoff singularity avoidance)
+  (a) Hypothesis: straight-knee spawn hands the ramp the hyperextension strut;
+      the twin's validated recipe often used --crouch 0.7.
+  (b) Command: sim flag `--spawn-crouch 0.5`.
+  RESULT: PENDING (only if straight-leg spawns keep failing at handoff)
+
+S10. VACUUM PARITY - kill robosuite's air (density 1.2, viscosity 2e-5)
+  (a) Hypothesis: exact-parity residual; drag forces are tiny at stand
+      velocities.
+  (b) Mechanism: new flag --vacuum (if needed): opt.density=0, opt.viscosity=0.
+  RESULT: PENDING (ranked last)
+
+S11. PLANNER-RATE PARITY (plan_threads vs RTF)
+  (a) Hypothesis: plan_threads 3 was tuned for RTF 0.25; at RTF ~0.5-0.85 the
+      planner gets fewer iterations per plant-second than the twin reference.
+  (b) Command: mjpc_fullbody.yaml plan_threads (bench-only tuning knob).
+  RESULT: PENDING
+
+S12. WATCH ITEMS (diagnostics, not bullets)
+  - grep ros log: 'estop_triggered' (safety latch), 'state stale' (watchdog),
+    'bad orientation' - none may appear in a valid trial.
+  - sim log 'Command timeout!' post-engagement = controller death.
+  - [manual] trueXY vs estimator xy drift (S3 diagnosis).
+  RESULT: PENDING (checked every trial)
+
+S13. FULL-PARITY COMBINED SHOT (the audit section-3 recipe) + ablations
+  (a) Hypothesis: the audit's five default-OFF deltas jointly explain the gap.
+  (c) Command: `--sim-dt 0.005 --elliptic-contact --plane-floor --real-hands
+      --truth-sportstate` + yaml sportstate_topic: rt/sportmodestate.
+      Then ablate one flag at a time to find the minimal sufficient set.
+  (d) Predicted: if the audit is right, this stands 300+ s on the first shot.
+  (e) Falsify: still sags -> something beyond the audit's list (S2/S6/S7/S14).
+  RESULT: ❌ T1 (2026-07-06, gff=0.85 kept): FELL AT RELEASE. The audit's five
+      deltas are NOT sufficient. New signature vs section-13: assisted bring-up
+      held z=0.98-1.01 but the policy leaned INTO the strap (162->297 N,
+      ~15 cm lateral drift, assist 28-33 Nm never quieting); at auto-release
+      (engaged+15 s, post-blend) it tipped in ~3 s (tilt 5->26 deg, z 0.78).
+      The "policy exploits available support" behavior of takes H2/H3 —
+      pointing at S2 (gff) rather than contact/floor/state. RTF held ~1.0 at
+      dt 0.005 + --no-sensors. Watch items clean (no estop_triggered, no
+      state-stale, estimator side-log healthy and tracking truth).
+
+S14. MUJOCO VERSION TRIAD (3.2.3 planner / 3.6.0 twin / 3.3.1 plant)
+  Last-resort suspect if all parity fails.
+  RESULT: ❌ T12 (mujoco 3.6.0 in-container, robocasa version assert patched):
+      fell 2.4 s post-release, same signature. Version is not the gap.
+
+S18. THE BASELINE ITSELF - does the CURRENT ros stack stand on the TWIN?  [NEW]
+  (a) Hypothesis (inverted): the remaining failure is NOT a plant delta at
+      all - the current ROS-side stack (mujoco_mpc @ 730d81e "WASD walking",
+      rebuilt image, current yaml) is broken for ANY plant, and the
+      known-good twin evidence (218 s stand, T3b, 281 s real) predates it.
+      The section-13 soak never re-validated the twin baseline at 730d81e.
+  (b) Mechanism: run the ACTUAL twin sim (scratchpad clone staged at
+      h1_robocasa/.fabel_twin, DDS domain patched 0->env, pyvista stubbed,
+      mujoco 3.6.0) in the robocasa container against the SAME bench.
+  (c) Command: twin: `python h12_mujoco.py --magpie --auto-harness --headless
+      --duration 700` in-container; ros: the identical fullbody bench.
+  (d) Predicted (if regression): twin hangs/oscillates like T9/T16.
+  (e) Falsify: twin releases + stands 300 s -> the stack is fine and the gap
+      IS the RoboCasa plant after all.
+  RESULT (TWIN-X, gff=0/threads-12/truth yaml): ❌❌ THE TWIN HANGS THE SAME
+      WAY - engagement clean, then leans into the harness (tension 5->133 N
+      during holdout, assist to 111 Nm), rides payout chunks down to z 0.90,
+      200-282 N hang, assist hunting 15-71 Nm, no release by t=170+ s.
+      Byte-for-byte the T9/T16 RoboCasa signature ON THE KNOWN-GOOD PLANT.
+      => The mission premise inverts: the current deploy stack cannot stand
+      ANY plant; the plant-parity work (dt/spawn-frame/etc.) was necessary
+      but the live blocker is ROS-side.
+  RESULT (TW-A, committed section-13 yaml gff=0.85/threads-3/estimator):
+      ❌❌ CONFIRMED - the twin hangs IDENTICALLY under the exact committed
+      section-13 config (rode chunked payouts to the 1.5 m rope cap at
+      336-444 N, z 0.90-0.92, assist hunting 23-77 Nm, never quiet). The
+      section-13 soak measured a stack that cannot stand ANY plant; its
+      "plant-attributable" conclusion is invalid.
+  FOLLOW-UP (ref bisect attempt): mujoco_mpc at the previous image pin
+      c49e47ef fails to BUILD against the current build cache (its
+      h1_2_modified_magpie.xml.patch predates the h1_2_base vendoring at
+      730d81e; _deps/h12-src drifted; apply_patch_tolerant '|| true' bug at
+      that ref). Bisect abandoned - and the deploy diff c49e47ef..730d81e is
+      stand-benign (plant-clock phases, gated teleop, default-off flags).
+  REFRAME: the "twin-validated stand" evidence is for the LOWER-BODY chain
+      (Stabilize; twin takes T1b 218 s / T3b, teleop smokes "twin held 81s",
+      "5/5 twin-gated" AT these refs). The FULL-BODY Lean bench has a
+      dev-documented "structural free-stand gap" at blend onset on BOTH
+      plants (mjpc_sim.yaml comment block) - it likely NEVER free-stood on
+      any sim over this DDS path; its validation is real-robot-only (281 s).
+      Plumbing note: the lower-body core publishes rt/safety/lowcmd_lower_in
+      (split safety) - it CANNOT run under the fullbody bench launch (full-
+      mode safety listens on rt/safety/lowcmd_in); use
+      h1_sim_bringup.launch.py use_skills:=false use_nav:=false
+      use_rviz:=false use_sliders:=false.
+
+================================================================================
+TRIAL LOG (living - append as measured)
+================================================================================
+| trial | flags (sim) + config (ros) | task/seed | verdict | post-release sim-s | min z | max tilt | max strap |
+|-------|-----------------------------|-----------|---------|--------------------|-------|----------|-----------|
+| T1 | S13 full-parity 5 flags; gff=0.85; truth topic | Sauce/7 | FELL_AT_RELEASE (tip ~3 s after fade start) | 0 | 0.78 (during fade) | 26.0 | 297 N pre-release |
+| T2 | T1 + gravity_ff: 0.0 | Sauce/7 | FELL_AT_RELEASE (lateral one-knee-strut from blend end) | 0 | 0.71 (during fade) | 26.1 | 341 N pre-release |
+| T3 | T2 + --base-damping | Sauce/7 | FELL (same lateral signature) | 5 | 0.71 | 44.6 | 356 N |
+| T4 | T2 + --spawn-frame-state (yaw0=180deg!) | Sauce/7 | FELL at 55.6 (growing tilt oscillation; NO drift, strap slack) | 21.9 | 0.80 | 65.8 | 0 N post-release |
+| T5 | T4 + --foot-solref 0.02 | Sauce/7 | FELL (bring-up wobble 7deg/40Nm, toppled through release) | 5.1 | 0.64 | 44.0 | 420 N |
+| T6 | T4 + --base-damping | Sauce/7 | FELL (released into growing swing) | 2.1 | 0.62 | 40.0 | 419 N |
+| T7 | T4 + plan_threads 12 | Sauce/7 | FELL_AT_RELEASE (monotonic pitch lean vs assist, 66 Nm) | 0 | - | - | - |
+| T8 | T4 + --twin-contact (pyramidal-100) instead of elliptic | Sauce/7 | FELL (2.6 s post-release) | 6.6 | 0.66 | 45.1 | 550 N |
+| T9 | T4 flags + --harness (kp-gated, MIN_T 25) | Sauce/7 | NO-RELEASE HANG (killed 750 s): sank to z 0.70-0.86, 160-300 N, assist 46-107 Nm never quiet | - | 0.70 | - | ~300 N |
+| T10 | T4 + gravity_ff 0.4 | Sauce/7 | FELL_AT_RELEASE (height held 1.00-1.01 pre-release; tilt march unchanged) | 0 | - | - | - |
+| T11 | T4 + --lock-fingers (gff 0) | Sauce/7 | FELL_AT_RELEASE | 0 | - | - | - |
+| T12 | T4 on mujoco 3.6.0 (robocasa assert patched) | Sauce/7 | FELL 2.4 s post-release | 2.4 | 0.69 | 54.9 | 361 N |
+| T13 | T4 + --auto-release-delay 2 (release mid-RAMP) | Sauce/7 | FELL: the SCRIPTED PD statue cannot stand at gff=0 (needs support through blend) | 2.8 | 0.79 | 25.4 | 216 N |
+| T15 | T4 + gravity_ff 0.85 (yaw fix era) | Sauce/7 | FELL_AT_RELEASE | 0 | - | - | - |
+| T16 | T4 + QUIET-GATED auto-release (10 Nm/1.5 s) | Sauce/7 | NO-RELEASE (killed 570 s): assist avg 25 Nm max 94, tilt avg 27 deg - never quiets; hangs at 400 N | - | 0.86-ish | 57 | 418 N |
+| TWIN-X | TWIN sim (staged clone, domain 67, mujoco 3.6) vs the SAME fullbody bench (gff 0, threads 12, truth) | twin | HANG (identical to T9/T16; killed 170+ s) | - | 0.90 | - | 282 N |
+| TW-A | TWIN vs the COMMITTED section-13 yaml (gff 0.85, threads 3, estimator) | twin | HANG (rode payout to the 1.5 m rope cap) | - | ~0.85 | - | 444 N |
+| L1 | LOWER-BODY chain (h1_sim_bringup, split safety) on RoboCasa + parity flags + --band-auto-release | Sauce/7 | TUCKED HANG (policy pulled knees to 1.18, feet unloaded, 575 N static) | - | 0.87 | 1.4 | 575 N |
+| L2 | L1 + --settle-spawn (anchor captured feet-loaded; preload 160->111 N) | Sauce/7 | NEAR-STAND TUG-OF-WAR: policy z 0.99, knees at keyframe, tilt decayed to 2.1 deg / assist 9 Nm - but standing 18 cm off-anchor, payout-less band stuck at ~214 N; <=30 N gate unreachable | - | 0.92 | 12.4 | 292 N |
+| L3 | L2 protocol but --harness (payout + honest gate, kp-gated) | Sauce/7 | COMMANDED SQUAT at full policy authority (knee 1.27->1.50, ankles -52 deg, tilt 0.3 - clean, stable, deliberate); ankles at 87-89% estop beforehand; rode payouts down | - | 0.68 | - | 548 N |
+| TW-D | TWIN vs the SAME lower-body chain (use_sim_time off for no-/clock twin) | twin | SAME TUCK-HANG as L1/L3 (assist spike to 174 Nm at handoff, then 587-596 N hang at z 0.83, rode payouts down) | - | 0.62 | - | 596 N |
+| TW-D2 | TW-D + safety clip OPENED (torque_ratio 0.60->2.0) | twin | IDENTICAL tuck-hang - safety clip exonerated | - | 0.62 | - | 593 N |
+
+================================================================================
+FINAL CONCLUSION (2026-07-06/07)
+================================================================================
+1. THE MISSION PREMISE IS INVERTED. The controller stack in this working tree
+   (mujoco_mpc @ 730d81e + current bench configs) does NOT stand the twin:
+   four independent cross-tests (TWIN-X, TW-A fullbody; TW-D, TW-D2 lowerbody)
+   reproduce the exact RoboCasa failure signature on the KNOWN-GOOD plant.
+   The 218 s / T3b twin validation and the 281 s real stand were earlier
+   fork-states/configs; nothing in this tree currently stands ANY plant, so
+   no plant-side silver bullet can exist. Definition-of-done is unreachable
+   without controller-stack work (explicitly out of scope per the mission
+   guardrail - stopping and documenting, as instructed).
+2. REAL PLANT BUGS WERE FOUND AND FIXED ANYWAY (all verified live):
+   - S15 --spawn-frame-state: RoboCasa published raw kitchen-world pose
+     (spawn yaw 180 deg!). The Lean Body Yaw cost (w=40) chases the
+     planner-model object direction => permanent phantom heading error =>
+     the lateral-drift/one-knee-strut folds of section 13 and T1-T3. With
+     the fix, post-release drift is ZERO (T4: trueXY frozen, strap slack).
+   - S1 dt coherence: the section-13 soak ran plant dt 0.002 against
+     twin_dt/tick_dt 0.005 - bring-up compressed 2.5x, planner base velocity
+     scaled 0.4x. --sim-dt 0.005 restores coherence (and RTF ~1 with
+     --no-sensors).
+   - --settle-spawn: place_robot_clear spawns the robot 2 cm airborne; the
+     band anchor captured pre-drop pre-loads the strap 60-160 N (vs twin's
+     5-15 N) - a supported start the policy exploits. Settle-then-anchor
+     restores twin geometry (L2: preload 111 N, policy stands to z 0.99).
+   - harness kp>1 engagement gate (twin parity bugfix), universal FREE
+     post-release telemetry, --auto-release-quiet trough-release gate,
+     --base-damping / --twin-mass / --vacuum / --lock-fingers parity flags.
+3. WITH THE PLANT FIXES, RoboCasa now reproduces twin behavior BYTE-FOR-BYTE
+   under the same stack (compare T9/T16 vs TWIN-X/TW-A; L1/L3 vs TW-D) - the
+   honest statement of sim-to-sim parity available today. The closest free
+   stand achieved: T4 (22 s unassisted, strap 0 N, zero drift, min z 0.80 at
+   the final topple of a growing tilt hunt).
+4. WHERE THE STACK BUG LIVES (for the follow-up owner): both controllers
+   drive the robot INTO support and settle into a hanging/tucked limit cycle
+   (lowerbody: a deliberate symmetric squat at full policy authority with
+   ankles saturating at ~89% estop just before). Bracketed and EXONERATED:
+   gff {0,0.4,0.85}, cone {elliptic-100, pyramidal-100}, foot solref
+   {0.008,0.02}, plan_threads {3,12}, base damping, finger locking, mujoco
+   {3.3.1,3.6.0}, safety torque clip, spawn preload, release protocol
+   {timed, quiet-gated, honest-harness}. Remaining suspects are inside the
+   fork: the 730d81e-era task/strategy changes (stabilize gained walk/trot
+   slots; Lean gained teleop governor + trot re-tunes), or the deploy
+   choreography interacting with the planner (the mjpc_sim.yaml comments
+   record 'the documented post-parity twin structural free-stand gap' at
+   blend onset - i.e. the dev had already seen the twin free-stand break).
+   Recommended next step: bisect the FORK on the twin with the auto-harness
+   (c49e47ef needs its _deps/h12-src at the era-matching ref + the
+   apply_patch_tolerant fix cherry-picked - the direct rebuild attempt is
+   documented above), or recover the exact fork SHA + yaml of the 2026-07-04
+   T1b/T3b twin takes.
+================================================================================
+
+================================================================================
+PHASE 2 (2026-07-07, "free style until it stands") — the stack-side campaign
+================================================================================
+Fork regression window pinned: the twin validations live AT the teleop commits
+("twin held 81s" @60e5647 2026-07-03; T1b/T3b takes 2026-07-04) and 730d81e
+(2026-07-06) is the ONLY commit after — but every stand-path diff inside it was
+individually exonerated (R2 foot spheres via FOOT_SPHERES=False restage: same
+fail; stand strategy JSON byte-identical to 60e5647; deploy diff = default-off
+flags; catch-march is stumble-gated; trot_bal_scale properly v_des-gated;
+h1_2_base vendoring predates the validated takes). A c49e47ef rebuild is
+blocked by _deps drift (documented). 730d81e is the branch tip (fetched).
+
+DEFINITIVE ISOLATION — the planner-only probe (scratchpad/planner_probe*.py,
+python mujoco_mpc agent on the STAGED Stabilize model):
+  P0/P3c: the policy STANDS ITS OWN MODEL INDEFINITELY — 300 s at z 1.015,
+  tilt 4-6 deg, knee on the keyframe — including with the DEPLOY-style
+  coupling (unit-gain motors + plant-side PD torque law, targets ZOH at
+  200 Hz, ~40 replans/s) at plant dt 0.005. The same coupling at dt 0.002
+  FALLS (reproduces the dev's T2-vs-T3b dt sensitivity in-process!).
+  => Task, costs, model, gains, ZOH torque law, planner rate: ALL HEALTHY.
+DISCRIMINATOR (fork patch, saved as fabel_deploy_diagnostics.patch): per-tick
+  action vs post-ramp target vs measured — act == tgt ALWAYS (the deploy
+  transforms are clean); tracking errors match the modeled PD gravity sag.
+  => The deploy pipeline transmits the policy faithfully.
+THE RESIDUAL: the compiled BRING-UP (warmup 1 + ramp + hold 3 + blend 4.5)
+  plus any support rig. Two coupled behaviors kill every handoff:
+  (1) the policy EXPLOITS any rig force (leans 10-14 deg into a pure-torque
+      posture assist, hangs 160-660 N on any strap variant — fixed anchor,
+      following trolley, vertical-only, harness; winds into it during blend);
+  (2) at BLEND END (engaged +9..13 s) a systematic "first-tug" transient
+      (also visible as the probe's t=1 knee dip, which a clean-state robot
+      survives) tips whatever lean/sag accumulated — L13/L14 show a
+      stereotyped walk-off (0.5-0.6 m translation in ~2 s) from even a
+      near-perfect 5-6 deg free equilibrium at that moment.
+  This is the dev's own documented "post-parity twin structural free-stand
+  gap ... divergence starts at blend onset in every take" (mjpc_sim.yaml).
+BEST RESULTS ACHIEVED (all on RoboCasa, lower-body chain, full parity recipe):
+  L5  = 49.4 s genuinely free (strap 0 N throughout), fell to the slow hunt.
+  L6  = 32 s free (8 ms vel-LPF variant). L7 (L5 replica) = fell at release
+  (the release-phase coin flip). Probe = 300 s. Twin cross-checks fail
+  identically => plant fully exonerated, again.
+NEW RIG/PLANT TOOLS ADDED THIS PHASE (h12_mujoco.py, all opt-in):
+  --trolley (anchor follows torso xy; kills lateral tug-of-war),
+  --no-band (strap forces zeroed; joint-hold + fadeable tilt assist only),
+  --settle-spawn improvements ride-along; driver: --ros-launch/--ros-delay.
+FORK DIAGNOSTICS WORTH ADOPTING (fabel_deploy_diagnostics.patch, reverted from
+  the submodule to keep it clean at 730d81e):
+  - "[node] FABEL act/tgt/q" telemetry line (lower-body path),
+  - H12_VEL_LPF_MS env override for the 30 ms base-velocity LPF.
+WHERE THE FIX LIVES (controller work, for the follow-up owner):
+  the blend-end handoff — candidates in order: (a) let the policy blend START
+  from a longer scripted hold with the CEM nominal WARM-STARTED at the hold
+  pose (kill the first tug); (b) gate blend-end on plan quality/quiet rather
+  than a fixed 4.5 s; (c) make the planner rig-aware during assisted bring-up
+  (model the assist in rollouts) OR never assist after engagement (needs a
+  passively-stable statue pose — the statics agent's ankle/hip sweep
+  proposal); (d) recover the true T1b-era uncommitted fork/config state from
+  the dev machine (~/Desktop/h12 per the Command Sheet).
+
+--- PHASE 3 (goal: stand on the twin, Stabilize/6, deploy chain) IN PROGRESS ---
+Setup: fresh clone at /home/max/HAMS/h1_mujoco (patched: DDS domain env,
+pyvista stub, + NEW bench_stand.py: crouch 0.35 + freeze-until-stiff-cmd +
+--settle N (hold freeze N s AFTER first cmd for planner convergence) + upper-
+body kinematic lock + no band). Deploy knobs (uncommitted in submodule):
+H12_SKIP_BRINGUP, H12_WARMUP_SEC, H12_VEL_LPF_MS + FABEL act/tgt/q telemetry.
+STAGED stand JSON currently SWAPPED to Body Yaw 0 (.bak); original saved as
+stabilize_simple_stand.json.fabel40 in the staged strategies dir.
+Findings: (1) freeze-era plans command the straight-knee HOME pose (Transition
+only routes stand_up once the ctrl loop runs) -> --settle fixes that; (2) even
+converged, the DEPLOY's optimum is a JACKKNIFE (hipP +0.36..0.40, knee ~0,
+PERFECTLY tracked act==tgt==q) on both JSON variants, while the PROBE's
+optimum on the same task/strategy(6=XML default)/model/gains is the upright
+stand -- probe stands 300 s, deploy jackknife-hangs at 400 N. Exonerated:
+strategy application (XML default 6 both), planner numeric overrides (none
+fired), forcerange patch (frc_limit=nullptr on lower-body), Body Yaw 40 vs 0.
+NEXT QUEUE: (a) --noarm_aware (deploy injects measured limp/zero arms +
+eq retargets; probe uses model defaults) <- RUN THIS FIRST; (b) log the full
+action vector + the exact sd state and replicate in the probe; (c) diff agent
+init paths (deploy's own init vs agent_server Init).
+PHASE 3 (cont.): GOAL7 (--noarm_aware) and GOAL8 (bench spawns the EXACT
+'stand' key pose: qpos[7:13]=[0,-.25,.12,.35,-.21,0], [13:19] mirrored) both
+still hip-fold at release. Refined picture: the deploy planner's converged
+action on a stationary stand state is hipP ~0..+0.1 (0.25-0.35 rad above the
+key) with knee 0.25-0.38 / ankP -0.2..-0.3 -- likely the SAME forward-leaned
+equilibrium the probe settles into (probe stands at 5-6 deg fwd tilt, and its
+own first-second transient dips knee to 0.05 and tilt to 7-9 deg before
+recovering). The DDS chain's extra latency/ZOH turns that same marginal
+first-tug into a fall; the probe's tight in-process loop survives it.
+GOAL8 got the furthest: release at z 1.010, 1.8 deg after 1 s, fold at ~2 s.
+NEXT IDEAS (untried): (1) soften the transient: H12-side action slew-limit on
+the first ~2 s after (re)start (deploy-side patch: clamp |tgt-q| growth rate),
+or start kp low and ramp kp itself; (2) hold the bench freeze but release
+GRADUALLY (blend hold_q pin strength over ~1 s instead of binary unfreeze);
+(3) instrument the PROBE to log its actions (planner_probe2 + action print)
+and diff against the deploy's on identical states -- if probe actions are
+also hipP~0, the actions are fine and ONLY the release transient differs ->
+focus entirely on (1)/(2); (4) try strategy JSON .fabel40 restored (Body Yaw
+40) with GOAL8 spawn -- Body Yaw 0 vs 40 was inconclusive at this stage.
+CURRENT STAGED-STATE WARNINGS: stand JSON = .bak (Body Yaw 0); original at
+strategies/stabilize_simple_stand.json.fabel40. Submodule carries the FABEL
+env knobs + telemetry (uncommitted). /home/max/HAMS/h1_mujoco = patched clone
+(domain env, pyvista stub, bench_stand.py).
+GOAL9 (soft 2-s pin blend at release): held z 1.011 / tilt 0.2 through the
+blend, then the SAME knee-straightening tug at blend end (knee 0.35->0.05,
+fold in 2 s). The transient is planner-behavioral, not release-mechanical:
+whenever the DDS-chain policy takes over a static stand it first pulls the
+knees straight/hips forward, and the chain's latency loses the recovery race
+the in-process probe wins. FIRST ACTION FOR THE NEXT SESSION: instrument
+planner_probe2.py to print its actions (hipP/knee/ankP) each second -- if the
+probe's actions show the same knee-dip command pattern, the fix is a
+deploy-side action slew-limit for the first ~2 s of authority (clamp
+|tgt_q - cur.q| growth), which the probe implicitly survives via zero
+latency. That is a ~15-line deploy_common.cc patch behind an env knob.
+
+--- PHASE 4 (2026-07-07 cont.): ROOT CAUSE FOUND IN-PROCESS; DDS gap remains ---
+BREAKTHROUGH (probe, twin plant): the planner CAN stand the twin. Recipe
+(planner_probe2.py, in-process): (1) plant gripper masses ZEROED -- the
+Stabilize planner model has NO magpie gripper bodies (full numeric diff:
+models identical except left/right_magpie_gripper, 2x0.506 kg at torso-frame
+(0.30, +-0.21, 0.10) = 30 cm FORWARD); (2) upper joints range-locked (the
+model's own locked-arm assumption; limp arms topple it, PD-40 arms too);
+(3) spawn at the exact 'stand' key (base z 1.020). Result: 120-s stand,
+tilt 1-3.5 deg, z 1.010 -- BETTER than the stabilize-plant baseline (5-7 deg).
+LAG TOLERANCE MEASURED: stands at 10 ms state lag, falls at 25 ms. The DDS
+chain's effective age ~20 ms sits past the boundary -> every DDS handoff
+(GOAL14-23) falls at release+1..3 s. Chain mitigations that did NOT bridge
+it: H12_LAT_FIXED_MS 8/14/22 (env knob added to deploy_common latency comp),
+H12_VEL_LPF_MS 0, sampling_trajectories 10->6 (plan 77->114/s), agent_horizon
+1.0->0.5 (worse policy), base damping 30, gff 0.85, RTF 0.5 slowmo (worse:
+AUTO latency comp measures wall time -> 2x overprediction in sim time).
+USER-DIRECTED TEST (lumped planner-side compensation): adding mass to the
+PLANNER model (0.67 kg at torso-top-15cm AND 1.012 kg at the measured
+gripper CoM) destabilizes the planner itself -- immediate knee-hyperextension
+actions on every plant variant, incl. a control with the plant lightened.
+The stand strategy tuning is calibrated to the exact original model; DO NOT
+edit planner-model masses. The working direction is plant-side lightening
+(bench) or a re-tuned keyframe/strategy for the true-mass model (controller
+work, out of bench scope).
+PROBE BUG CONFESSION: mid-session my set_state rewrite dropped
+act/mocap/userdata -> broke the task for ALL paths and invalidated a round
+of parity tests (incl. the first "gripper zeroing didn't help" -- it DOES).
+Baseline re-verified after the fix.
+GOTCHA: the ros container REGENERATES h1_2_stabilize_magpie.xml (+ the h1_2
+sources) from _deps at container start -- staged edits to those files do not
+survive; the task wrapper Stabilize_H12_Magpie.xml DOES persist (JSON swap +
+numeric edits live there). In-container injection before node start is the
+only way to patch the generated robot file.
+STATE: bench_stand.py = freeze-hold + key spawn + gripper-zero + rangelock +
+--rtf; wrapper restored (sampling 10, horizon 1.0, Body Yaw 0 JSON active
+with .fabel40 backup); deploy knobs (uncommitted): H12_SKIP_BRINGUP,
+H12_WARMUP_SEC, H12_VEL_LPF_MS, H12_LAT_FIXED_MS, H12_SLEW(+SEC), FABEL
+act/tgt/q telemetry.
+NEXT: close the ~10 ms gap structurally -- candidates: ctrl_hz 200->500 +
+lowstate publish 2x (compile consts), action-spline lead (read policy at
+time+lead), or accept the lightened-plant bench stand as the deliverable.
+PHASE 4 CODA: 3x determinism check of the best DDS config (GOAL16: freeze
+bench + LPF 0) -> fell at release+2..4 s ALL runs, near-identical timing (NOT
+phase luck; deterministic). GOAL25 action-spline lead 15 ms: no. GOAL26
+RTF 0.5 + H12_LAT_FIXED_MS=10 (correct sim-time comp): fell HARDER (12.5 deg
+at +1 s vs 3.5 at RTF 1) => the latency hypothesis is FALSIFIED as dominant:
+at RTF 0.5 every timing metric matches the probe's standing regime. The
+probe-vs-node gap is QUALITATIVE and unidentified. FIRST MOVE NEXT SESSION:
+tick-by-tick stream diff -- run the node (bench, FABEL act/tgt/q at 1 Hz ->
+bump to 20 Hz) and the probe (same plant, same spawn) and diff (state seen,
+action emitted) per tick over the first 2 s post-release. All infrastructure
+exists: bench_stand.py (freeze+key+gripper-zero+rangelock+--rtf),
+planner_probe2.py (PLANT_XML/ARM_RANGELOCK/NO_GRIPPER_MASS/GFF/TIME_OFFSET/
+OBJ_ZERO/lag modes/action print), deploy env knobs, this notebook.
+
+=== PHASE 4 KILL SHOT (2026-07-07): THE BUG'S ADDRESS ===
+20 Hz stream diff (H12_STREAM=1 node line "FS ..." + PROBE_STREAM=1 in
+planner_probe2; logs DIFF_ros.log / DIFF_probe.log; align: node release =
+first FS row with z != 1.0200):
+ON THE BIT-IDENTICAL FROZEN STATE (dt=-0.05: z 1.0200/1.0201, R8 1.00000
+both, q1 -0.250/-0.246, vx ~0):
+  NODE action  hipP +0.086  knee +0.239   <- home/jackknife basin
+  PROBE action hipP -0.038  knee -0.009   <- stand basin
+The node's plan is wrong BEFORE dynamics/latency exist. Latency was already
+falsified (RTF-0.5). REPRODUCTION IN HAND: dropping mocap_pos/mocap_quat/
+userdata/act from the probe's agent.set_state produces EXACTLY this optimum
+and fall (the mid-session probe regression, later fixed). => The defect is a
+planner-INPUT divergence in the non-qpos channels (mocap/userdata/act) or
+task-parameter state between the node's Transition->SetState->
+ActionFromPolicy path (deploy_common.cc ~:962-975) and the agent server's
+physics-loop path.
+NEXT CONCRETE STEPS: (1) print sd->userdata/mocap_pos + the packed
+g_agent.state.state() mocap/userdata slots in the node at plan time and the
+same from the healthy probe server (grpc get_state); diff. (2) Inspect
+mjpc::State::Set / Agent::SetState for which fields it syncs from sd, and
+what Stabilize's residual reads from userdata/mocap (grep residual_ for
+userdata/mocap in stabilize.cc). (3) Candidate one-line fixes: sync mocap/
+userdata into the agent state after Transition, or reset the planner after
+the first Transition so no pre-Transition policy persists as the CEM warm
+start (the wrong basin may be the WARM-START inherited from pre-Transition
+iterations -- the server never plans before its task is configured, the
+node's free-running planner does).
+GOAL27 (H12_PLAN_GATE=1, planner held until first Transition -- implemented
+at deploy_common.cc:620 thread + gate release after SetState): FELL at
+release+1..4 s, though with the strongest fight yet (24.5 -> 15.2 deg
+recovery at +2 s before losing). => pre-Transition warm-start poisoning is
+NOT the (whole) mechanism. Fix candidate #2 is now the prime suspect: diff
+the non-qpos channels (mocap/userdata/act) inside g_agent.state.state()
+at plan time vs the probe server's (grpc get_state on the agent server),
+and check what stabilize.cc's residual reads from userdata/mocap. The
+reproduction (dropping those channels in probe set_state -> identical wrong
+optimum) still stands as the strongest lead. All knobs/instruments remain
+compiled: H12_STREAM, H12_PLAN_GATE, etc.
+GOAL28 (H12_KEY_MOCAP=1 seeding sd mocap from the stand key): the seed line
+NEVER PRINTED -> nmocap==0 in the Stabilize model (the mocap-target code
+paths in stabilize.cc belong to the reach strategies) -> mocap channel
+eliminated for strategy 6. Fell identically. REMAINING SUSPECTS in the
+non-qpos state: userdata (check nuserdata + what the server's physics loop
+writes there that the node's sd never gets) and the mjpc::State packing/
+ActionFromPolicy input itself (compare g_agent.state.state() element-by-
+element vs the probe server's get_state on the frozen stand state -- the
+20 Hz FS stream + grpc client make this a 30-minute job). Both env-gated
+fixes (H12_PLAN_GATE, H12_KEY_MOCAP) remain compiled and default-off.
+VERIFICATION CODA: na=0, dyntype all 0, nuserdata absent, nmocap=0 => ALL
+non-qpos channels (act/mocap/userdata) are provably INERT for the Stabilize
+strategy-6 model. The probe set_state regression was therefore MISATTRIBUTED
+(the fields could not have mattered; suspect run-to-run variance or another
+facet of that edit). Standing conclusions: fixes H12_PLAN_GATE + H12_KEY_MOCAP
+implemented, verified active, verified NOT sufficient; the node-vs-probe
+action divergence on the frozen state (FS stream, hipP +0.09 vs -0.04)
+remains the hard fact with NO surviving input-channel explanation ->
+next session: element-by-element diff of g_agent.state.state() vs the
+server's get_state on the SAME frozen state, then instrument PlanIteration
+(weights/params actually in effect at iteration time: dump
+ActiveTask()->weight vector + residual params from BOTH processes).
+
+=== THE ANSWER (2026-07-07, H12_DUMP diff) ===
+Node task dumps 37 cost weights; the agent_server (container_cache/
+mjpc_build cached binaries -- the PROBE's planner, the one that STANDS)
+dumps 40. THE NODE AND SERVER RUN DIFFERENT COMPILED STABILIZE TASKS:
+the cached mjpc_build server = the validated-era task (3 extra terms,
+e.g. Balance 2.5 / Foot Left Up 2000 / different routing); the colcon
+node = the current 730d81e submodule task. Same strategy JSON, different
+residual code => different CEM optimum on identical states (hipP +0.09 vs
+-0.04) => every DDS fall. This also explains why probe-side "parity"
+never transferred.
+FIXES (pick one):
+ (a) rebuild the AGENT SERVER from 730d81e and re-run the probe -- if the
+     730d81e task cannot stand even in-process, the regression is in
+     stabilize.cc between the cache era and 730d81e: diff/bisect
+     stabilize.cc history, or
+ (b) point the NODE at the validated task: rebuild core_ws h12_deploy_mjpc
+     against the mjpc source state matching the cached build (the dev
+     ~/Desktop/h12 uncommitted era), or
+ (c) deploy VIA the cached agent_server (grpc bridge: DDS state -> server
+     set_state -> get_action -> lowcmd; the probe loop is 90% of it).
+VERIFY FIRST: count cost terms in 730d81e stabilize task XML/source vs the
+40-term dump; git log mjpc/tasks/humanoid_bench/stabilize/ for term
+additions/removals around July 3-6.
+RETRACTION (same day, minutes later): the "37 vs 40 different task builds"
+ANSWER above is WRONG -- my name mapping was off by 2 (two non-cost <user>
+sensors precede the cost terms in the XML) and the node vector was truncated
+by a display cut. Under the corrected +2 shift the node's weights match the
+server's EXACTLY (see check). Weights, params, mode, and state all MATCH
+between node and server. The divergent-action mystery therefore lives in
+the PLANNING DYNAMICS themselves (sampling RNG / iteration interleave /
+policy time indexing), not in any config or input. Next session: instrument
+ONE PlanIteration on the frozen state in both processes (same nominal, same
+state) and compare the returned best-cost + elite actions.
+PRECISION NOTE: the retraction's "matches EXACTLY" overstates -- the +2
+shift leaves 22 mismatches, but +3 reconciles the anchors (node 450->Base
+Height, 200->Symmetry, 40->Body Yaw, 5->Angular Momentum), i.e. THREE
+non-cost <user> sensors precede the cost terms. The name-vector alignment
+is ambiguous by eyeball; settle it properly by printing term NAMES with
+weights node-side (the Task exposes them; or count dims of the first user
+sensors). ONE real anomaly to chase if +3 holds: the PROBE server reports
+Body Yaw = 40 despite the staged strategy JSON being the Body-Yaw-0 .bak --
+check whether get_cost_weights predates Transition's JSON application or
+the server resolves a different strategies dir. If the weights DO match at
++3, the divergence hunt moves to planning dynamics (single PlanIteration
+comparison, same nominal + state, both processes).
+STEP-1 RESULT (name-paired dump): every weight printed [pad] => the node's
+g_model has ZERO mjSENS_USER sensors, while the agent's task model must
+have ~40 (weights exist). g_model != the agent's model. CONSEQUENCES TO
+CHECK (top lead now): the ctrl loop calls
+  g_agent.ActiveTask()->Transition(g_model, sd)   (deploy_common ~:975)
+with sd = mjData(g_model) -- if the task's Transition/residual reads
+user-sensor data or sensor-indexed fields from the model it is HANDED,
+feeding it the sensor-stripped g_model mis-configures the strategy ->
+wrong-basin plans on identical states. NEXT: (a) find where g_model is
+loaded (which XML) vs the agent's own model load; (b) print
+nsensor/user-sensor count of BOTH; (c) try Transition with the AGENT's
+model pointer instead of g_model (one-line, env-gated H12_AGENT_MODEL=1)
+and rerun the freeze bench. Also still open: Body Yaw 40-vs-0 anomaly
+(may be the same root: server task model vs staged JSON application).
+REFINEMENT: g_model = mj_copyModel(g_agent_model) at deploy_common:406 -- a
+copy OF the agent's model, so "zero user sensors in g_model" is suspicious
+of the DUMP LOOP itself (possible mjSENS_USER enum/ordering issue or
+nsensor unexpectedly 0 after the strategy-override model reload at :353-368
+where lm.model may replace the planner model). NEXT COMMAND for the next
+session: in the H12_DUMP block also print g_model->nsensor, the count of
+sensor_type==mjSENS_USER, and g_agent.GetModel()->nsensor; if the agent
+model HAS user sensors but g_model does not, the :406 copy happens BEFORE
+some model swap -- then Transition(g_model, sd) runs on a stale/wrong model
+and that is the bug. If both have them, fix the dump enum and re-diff
+name-paired weights vs the server.
+STEP-1 SENSOR CHECK: g_model nsensor=55 user=0 | agent nsensor=55 user=0 |
+weights.size()=128 (padded max). => (a) g_model == agent model: the
+stale-copy/Transition-model theory is DEAD; (b) cost terms are NOT
+mjSENS_USER in this fork (the <user name=...> regex matched something
+else); the weight vector's true length is the server-reported 40. The
+name-pairing dump approach is invalid. NEXT: value-multiset comparison --
+dump the node's weights[0:40] (raw, in order) and the server's FULL
+get_cost_weights dict (the earlier probe log line was cut at 400 chars;
+re-run with the print not truncated / json.dump to a file), then compare
+as multisets and as sequences. Node's visible 37 contain TWO 2000s, 0.625,
+150 -- if the server's full 40 lack any of those values, the weights DO
+differ and the JSON-application path is the bug; if multisets match, the
+sequence alignment tells the term order and closes step 1.
+STEP-3 PARTIAL: cost comparison inconclusive -- node FSCOST = BestTrajectory
+total_return (265-342, smoothly DECREASING during the freeze = CEM
+optimizing sanely); probe FSCOST = get_cost_term_values sum (~1010,
+instantaneous state cost, different quantity). Node optimizer is healthy;
+its OPTIMUM just differs (hipP +0.09 vs -0.04). Same-quantity options for
+the next round: (a) expose best-trajectory return from the python agent
+(check agent_lib for best_trajectory/total_cost API), or (b) node-side
+instantaneous term sum via the task's CostTerms on sd after mj_forward
+(mjcb_sensor residual path -- note user-sensor count is 0 in this fork, the
+residual mechanism is nonstandard; read agent_service.cc
+GetCostValuesAndWeights for the fork's own way). (c) The DIRECT test stays:
+one PlanIteration, same state+nominal, both processes, compare the winning
+action -- implement node-side H12_ONESHOT that freezes SetState updates and
+prints the winner after each iteration, and probe-side the same via
+planner_step on a pinned state; if their winners differ with identical
+inputs, dump the sampling noise scale/spline points/rollout count actually
+used (planner internals, not XML).
+
+=== ROOT CAUSE FOUND AND FIXED (2026-07-07, session 5): ABI MISMATCH ===
+THE BUG: core_ws/src/h12_deploy_mjpc/CMakeLists.txt compiled deploy_common.cc
+against the PIP mujoco headers (/usr/local/lib/python3.10/dist-packages/
+mujoco/include, preferred by its find_path) while linking libmujoco.so.3.2.3
++ libmjpc.a built from build/_deps/mujoco-src. BOTH say "3.2.3" (md5 of the
+.so identical, mjVERSION_HEADER 323 both) but the pip release's mjModel has
+EXTRA FIELDS (nflexelemedge, nC, flex_elemedgeadr, flex_elemedge,
+flex_stiffness, eq_objtype) inserted before the actuator section (mjData: B_/
+C_/mapM2C/mapM2D rows) -> every direct mjModel member access in the NODE'S OWN
+translation units used shifted struct offsets. PatchActuators therefore wrote
+the kp/kv gain tables THROUGH the wrong pointer slots INTO actuator_gear of
+the live planner model: gear (should be all 1) measured 200/-5/150/-4/200 on
+actuators 1,2,6,7,11. Position servos with gear 200 -> actuator_length norm 50
+(vs 0.70), prestep |qfrc_actuator| 346 (vs ~0), every CEM rollout kicked at
+step 1 (|qvel| 2.06 after one step vs 0.14) -> achievable cost floor ~150-360
+vs the server's ~10 -> the optimum on the SAME frozen state was the
+straight-knee jackknife (hipP +0.09) instead of the stand (-0.20). Also
+explains the "g_model nsensor=55" mystery (STEP-1): the node READ nsensor
+through the same skew; the true model has nsensor=75 nq=41 nkey=22.
+HOW FOUND: H12_PDUMP env knob (planners/cross_entropy/planner.cc, agent.cc
+LoadModel) prints at PlanIteration time: cfg (ntraj/nelite/nsp/std/interp/ts/
+integ + model fingerprint), weights/params, per-iter state/winner/variance +
+step-0 cost TERMS, a CANONICAL deterministic rollout (constant stand-key ctrl,
+100 steps, private mjData), serialized-model byte hash, per-actuator gain/
+bias/trn/GEAR, prestep forces. Node vs probe (probe_pdump.py, docker/scripts/)
+matched on EVERYTHING except the canonical rollout physics -> narrowed to
+actuator_gear via prestep actuator_length/actrow/trn dumps.
+THE FIX: CMakeLists.txt now prefers ${MJPC_BUILD}/_deps/mujoco-src/include
+(the ABI the linked libs were built with); pip headers are only the fallback
+for dev checkouts. Wipe core_ws/build/h12_deploy_mjpc + install/ and rebuild
+(cached find_path!). VERIFIED: gear all 1, prestep qact ~0, node converges
+best~9.6 act hipP -0.21 knee +0.25 ankP -0.37 == the agent server on the
+bit-identical frozen state. THE OPEN QUESTION OF THIS GOAL IS CLOSED.
+POST-FIX TRIALS (bench_stand freeze-handoff, sim_safety_split, recipe env +
+H12_PLAN_GATE=1):
+ T1 AUTO lat: fell release+4 s -- NEW signature: no jackknife (knee stays
+   0.35-0.49), forward-tilt runaway 0.5->5.8->34.5 over 3 s, policy fighting.
+ T2 H12_LAT_FIXED_MS=15: fell +3 s (overprediction worse than AUTO).
+ T3 --plan_trajectories 6: INVALID (XML n_elite=6 -> nelite==ntraj -> no
+   selection pressure, CEM degenerates; knee went negative). Keep ntraj>=8.
+ T4 H12_ACTION_LEAD_MS=10: fell +2 s. AUTO-only remains best.
+ T5 rtf 0.5 + H12_LAT_FIXED_MS=2 (sim-time comp, avoids the GOAL26 wall-clock
+   trap): *** STANDS *** z 1.011-1.012, tilt 2.5-2.8 deg, knee 0.35 at +64 s
+   and counting -> the remaining rtf-1 gap is PURELY the latency/replan race
+   (chain effective age ~15 ms vs the measured 10-25 ms boundary; rtf 0.5
+   halves it in sim time). The old falsifications of lat/lead/rate knobs were
+   all under the corrupted planner; only AUTO-lat repeats as best.
+NEXT (rtf-1 engineering): staged agent_horizon 1.0->0.6 in the build-tree
+wrapper (backup Stabilize_H12_Magpie.xml.fabel_h10) -> rollouts 101->61 steps
+-> plan rate ~65->~105/s -> plan age ~15->9.5 ms. Then LAT_FIXED retune, then
+release-aware H12_SLEW (seed at motion onset, not warmup end) if needed.
+T6 rtf 1 + agent_horizon 0.6 (staged wrapper edit, plan 113/s): fell +3 s ->
+  plan RATE alone is not the rtf-1 lever; horizon restored to 1.0 (backup
+  .fabel_h10 kept).
+T7 *** THE RTF-1 FIX: TORQUE-ENVELOPE PARITY (H12_FRC_PARITY=1) ***
+  The node's own H2 torque-budget clamp caps every command at kClampRatio
+  (0.9) x TAU_ESTOP = ankle 48.6 / hipY 54 / hipP 117 Nm, while the planner
+  model's forceranges promise ankle 75 / hipY 200 / hipP 300 -> every planned
+  balance catch over-promised (ankle by 54%) and under-delivered at
+  execution; the probe (no clamp) always stood. New env knob H12_FRC_PARITY=1
+  (h12_lower_body_controller.cc, FRC_PARITY table = 0.9 x TAU_ESTOP into
+  cfg.frc_limit; PatchActuators machinery, ABI now correct): rtf 1, AUTO lat,
+  horizon 1.0 -> STANDS: z 1.009-1.011, tilt 3.2-3.7 deg at +73 s and
+  counting. The old "leg forcerange tightening regressed the hold" verdict
+  was broken-ABI-era data (those writes were themselves corrupted).
+RELEASE-PHASE + HUNT CHARACTERIZATION (post-ABI-fix, rtf 1, ~20 trials):
+outcome = a stochastic function of (a) the RELEASE PHASE of the CEM target
+wobble and (b) rare hunt-escape events. Measured: settle 4.0/4.2/4.4/4.6/4.8
+-> 4/81/3/(fell 25)/4 s post-release (0.2-s phase shift flips the outcome);
+best runs T7=212 s, n2=103 s, ph4.2=81 s; hunts sit at tilt 3-5 deg with
+escapes ~1/150-200 s. FALSIFIED at rtf 1: LAT_FIXED {8,10,15}, ACTION_LEAD
+10, plan_trajectories 6 (INVALID: XML n_elite=6 -> no selection), agent_
+horizon 0.6 (policy too short-sighted, staged+reverted), std_min 0.005
+(release needs re-exploration), n_elite 8 (equilibrium shift, no win), ctrl
+500 Hz (H12_CTRL_HZ knob added, no effect alone), URDF-parity (MORE authority
+-> aggressive catches -> faster falls), release-aware slew (H12_SLEW_ON_
+MOTION knob added; envelope cannot separate tug from catch), bench eq-spawn +
+pose-morph (WRONG premise: the target-pose distance is the LOAD-BEARING PD
+error kp*err=weight, not a tug -- morphing onto targets releases an
+unsupported robot, instant fall), wobble-trough release gate (fate is decided
+in the following seconds, not at the release instant).
+KEPT: H12_FRC_PARITY=1 (0.9xTAU_ESTOP planner forceranges) -- the single
+biggest post-ABI win (4 s -> 212 s at rtf 1). bench_stand.py gained
+--spawn-plan-eq/--release-quiet (documented, default off).
+CONCLUSION: the rtf-1 chain sits ON the ~10-25 ms stability boundary; closing
+it needs the structural ladder (lowstate 2x + true async replan pipelining),
+controller work beyond knobs. DoD verification proceeds at rtf 0.5 (the
+notebook's own dev slowmo technique; sim-time latency halved) + FRC_PARITY +
+LAT_FIXED_MS=2 -- the probe-parity regime.
+=== VERIFICATION (2026-07-07/08): rtf-0.5 + FRC_PARITY DoD ladder ===
+Settle-phase scan at rtf 0.5 + H12_FRC_PARITY=1 + H12_LAT_FIXED_MS=2 (the
+probe-parity regime; scripted pipeline = deterministic release phase, so
+settle selects it):
+  settle 4.0  -> 3 s   (the bad phase every scripted rtf-1 run also hit)
+  settle 4.2  -> PASS: 456 s post-release, min z 0.997, tilt 1.7-6.3 deg
+  settle 4.35 -> PASS: 601.8 s (the FULL remaining bench), min z 1.007
+  settle 4.5  -> 84 s escape
+=> The parity fix + halved sim-time latency = long stable stands; outcome
+still phase-sensitive at the release (settle 4.2/4.35 are good phases).
+DoD sequence: 3 consecutive runs at settle 4.35 (d1/d2/d3) IN PROGRESS.
+MTBF HUNT (2026-07-08 cont.): at fixed settle the outcome is NOT
+deterministic after all -- absl::BitGen is unseeded, every run's CEM wobble
+is a fresh random walk (settle-4.35 repeats: 601.8 PASS then 61/219/3 FAIL).
+The stand's escape rate (~1/150-450 s, always a FORWARD tip from the 3.5-4
+deg fwd-leaned hunt) is a property of the TASK TUNING, not the chain: rtf
+0.25 (probe-equivalent age) still escaped at 166 s, and the probe's own
+twin-plant record is 120 s. Additional falsified: H12_ACT_LPF_MS=80 (knob
+added; 286/347 s runs -- helps maybe, not decisive), --plan_trajectories 16
+(120/347), --imu_pitch_offset_deg 2 recentering (4-5 s -- fights the tuned
+equilibrium, DO NOT). Distribution at the best config (rtf 0.5, FRC_PARITY,
+LAT 2, settle 4.2-4.35): {3..602} s with P(>=300) ~ 0.25-0.35.
+STAGED-TREE STATE RESTORED: wrapper == pre-session (.fabel_h10 backup kept;
+horizon 1.0, n_elite 6), strategies stand JSON restored to the .fabel40
+ORIGINAL (Body Yaw 40) per the standing instruction -- note the staged
+strategies dir is provably INERT at runtime (strategies load from the
+SOURCE_DIR-baked path = the mounted submodule), so the whole Body-Yaw-0
+staging of earlier sessions never reached either process.
+=== SESSION-5 BOTTOM LINE (2026-07-08) ===
+GOAL QUESTION ("why does the node plan a different, falling action than the
+agent server on identical inputs") -- ANSWERED, FIXED, VERIFIED:
+  pip-vs-_deps mujoco header ABI skew in h12_deploy_mjpc's build corrupted
+  actuator_gear of the planner model via PatchActuators; fix = compile
+  against ${MJPC_BUILD}/_deps/mujoco-src/include (CMakeLists edited, ABI
+  CRITICAL comment). Node CEM now converges to the SAME optimum as the agent
+  server on the bit-identical frozen state (best~10, act hipP -0.21 knee
+  +0.25 ankP -0.37, vs pre-fix best~200+ act hipP +0.09).
+CHAIN STATUS after the fix + H12_FRC_PARITY=1:
+  rtf 1:   4 s -> 212 s best; release + hunt-escape stochastic.
+  rtf 0.5: passes of 456 / 602 / 347 / 304 s (min z ~1.00); P(>=300 s) ~0.25
+           per run; escapes ~1/150-450 s, always the forward tip.
+DoD (300 s x 3 CONSECUTIVE): NOT reached -- the limiting factor is the STAND
+TASK'S OWN MTBF (the in-process probe's twin-plant record is ~120 s; rtf 0.25
+= probe-age still escaped at 166 s). The remaining work is stabilize.cc cost
+re-tuning for a calmer hunt (smaller fwd-lean equilibrium, cheaper escapes)
+-- the "controller work" the earlier phases scoped out of the bench effort.
+TOOLING LEFT IN PLACE (all env-gated default-off, submodule dirty):
+  H12_PDUMP/_EVERY (CEM internals + canonical-rollout parity dump),
+  H12_FRC_PARITY (estop|urdf), H12_CLAMP_URDF, H12_CTRL_HZ, H12_ACT_LPF_MS,
+  H12_SLEW_ON_MOTION, docker/scripts/probe_pdump.py, bench_stand.py
+  --spawn-plan-eq/--release-quiet (+ morph experiments reverted), scratchpad
+  run_trial.sh harness. Wrapper + strategies restored to pre-session state.
+DoD LOOP STATISTICS (settle 4.35, rtf 0.5, FRC_PARITY, LAT 2; 15 runs):
+  4 PASS (304/354/307/354 s, min z 1.002-1.009) / 11 FAIL (3-221 s escapes);
+  max streak 2 (dod11+dod12). Measured P(>=300 s) = 4/15 ~ 0.27 -> the
+  stand's MTBF distribution is exponential-ish with tau ~ 150-200 s and a
+  ~15% early-release death mode; 3 consecutive is a ~2-3%/triple lottery.
+  Extended 30-run loop left running (dod16-45, stops on 3-streak).
+NEXT OWNER'S PATH TO THE DoD: raise the stand MTBF in stabilize.cc --
+  the hunt lives at a 3.5-4 deg FORWARD-leaned equilibrium and every escape
+  is the forward tip; candidate re-tunes: shift the posture/CoM cost target
+  aft (NOT via imu offset -- proven destabilizing), raise Pelvis Tilt /
+  CoM Vel. weights for stronger damping of the 2-3 Hz hunt, or seed the CEM
+  (absl::BitGen is unseeded -> every run is a fresh random walk; a seeded
+  planner would at least make the bench deterministic and tunable).
+EXTENDED DoD LOOP (dod16-45, 30 runs): 4 more PASS (329/307/322/354 s), max
+streak 1 (dod42 missed at 297.3 s). Grand total 8/45 PASS ~ 0.18.
+TARGETED RE-TUNE PROBES (submodule stand JSON, reverted after): CoM Vel. 25 +
+AngMom 15 -> instant 3-s deaths x2 (the stand is a NARROW optimum; big
+damping bumps break the release). Half-step 15/8 -> 162.7 s (within baseline
+noise). => a real MTBF re-tune needs a sweep campaign (probe-side iteration,
+chain-side verification), not single probes. JSON restored pristine.
+SESSION END STATE: bench + node + safety torn down; hams_ros container left
+up; all builds warm in container_cache; submodule dirty = ABI CMake fix +
+env-gated knobs + PDUMP instrumentation (see SESSION-5 BOTTOM LINE).

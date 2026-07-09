@@ -176,16 +176,24 @@ def generate_launch_description():
             output='screen',
             condition=IfCondition(LaunchConfiguration('use_mjpc_lowerbody')),
         ),
+        # This executable IS controller_launcher.py (h12_deploy_mjpc's CMake
+        # installs it under this name): an rclpy wrapper that maps the
+        # mjpc_config params to CLI flags and runs the compiled core
+        # (mjpc_lowerbody_core) as a SEPARATE process -- rclcpp's and
+        # unitree_sdk2's CycloneDDS builds corrupt the heap if they share a
+        # loader namespace. It also auto-releases the sim elastic band and
+        # forwards SIGINT/SIGTERM so the core's damping safe-hold runs.
         Node(
             package='h12_deploy_mjpc',
             executable='mjpc_deploy_lowerbody_controller',
             name='mjpc_deploy_lowerbody_controller',
             parameters=[sim_time_param, LaunchConfiguration('mjpc_config')],
-            # mjpc resolves task model XMLs relative to MJPC_TASKS_DIR (else
-            # <exe>/../mjpc/tasks, which doesn't exist for this ROS binary -> a
-            # null model -> mj_makeData segfault). Point it at the runtime-hydrated
-            # build tree that matches the linked mjpc libs. The estimator's default
-            # scene resolves through the same env (see estimator_node.py).
+            # Inherited by the spawned core: mjpc resolves task model XMLs
+            # relative to MJPC_TASKS_DIR (else <exe>/../mjpc/tasks, which
+            # doesn't exist here -> null model -> mj_makeData segfault). Point
+            # it at the runtime-hydrated build tree that matches the linked
+            # mjpc libs. The estimator's default scene resolves through the
+            # same env (see estimator_node.py).
             additional_env={'MJPC_TASKS_DIR': '/home/code/mujoco_mpc/build/mjpc/tasks'},
             output='screen',
             condition=IfCondition(LaunchConfiguration('use_mjpc_lowerbody')),
@@ -208,14 +216,14 @@ def generate_launch_description():
         # grasp, pick_place, ...). On startup it waits ~10s each on the vision
         # pipeline + graspgen services, the grippers, and the frame_task / nav
         # action servers (all started above), then idles ready for goals.
-        Node(
-            package='h12_skills',
-            executable='skills',
-            name='h12_skills',
-            parameters=[sim_time_param, model_log_params],
-            output='screen',
-            condition=IfCondition(LaunchConfiguration('use_skills')),
-        ),
+        # Node(
+        #     package='h12_skills',
+        #     executable='skills',
+        #     name='h12_skills',
+        #     parameters=[sim_time_param, model_log_params],
+        #     output='screen',
+        #     condition=IfCondition(LaunchConfiguration('use_skills')),
+        # ),
 
         Node(
             package='rviz2',

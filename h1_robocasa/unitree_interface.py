@@ -1,3 +1,5 @@
+import math
+
 import mujoco
 import numpy as np
 import threading
@@ -24,9 +26,21 @@ MOTOR_SENSOR_NUM = 3
 
 DOMAIN_ID = int(os.getenv("ROS_DOMAIN_ID"))
 assert DOMAIN_ID > 0 and isinstance(DOMAIN_ID, int), "Please set ROS_DOMAIN_ID environment variable to a positive value, e.g. export ROS_DOMAIN_ID=1, domain 0 is reserved for the real robot."
+def _quat_mul(a, b):
+    """Hamilton product of two wxyz quaternions."""
+    aw, ax, ay, az = a
+    bw, bx, by, bz = b
+    return (
+        aw * bw - ax * bx - ay * by - az * bz,
+        aw * bx + ax * bw + ay * bz - az * by,
+        aw * by - ax * bz + ay * bw + az * bx,
+        aw * bz + ax * by - ay * bx + az * bw,
+    )
+
+
 class SimInterface:
     def __init__(self, model, data, lock=None, resolver=None,
-                 truth_sportstate=False):
+                 truth_sportstate=False, spawn_frame=None):
         # record mujoco model & data
         self.model = model
         self.data = data
@@ -46,6 +60,35 @@ class SimInterface:
         self.num_motor = MOTOR_NUM
         self.dt = self.model.opt.timestep
         self.have_imu = "imu_quat" in resolver.sensor_adr
+
+        # SPAWN-FRAME STATE NORMALIZATION (FABEL 2026-07-06). The twin and the
+        # REAL robot both hand the controller state in the ROBOT'S HOME frame:
+        # the twin spawns at the model origin facing +x, and the real IMU boots
+        # with yaw ~= 0 / odometry from 0. RoboCasa instead publishes raw
+        # KITCHEN-world pose (spawn xy ~(-2.2,-3.6), arbitrary yaw) -- which
+        # poisons every model-frame-referenced cost in the planner (e.g. the
+        # Lean task's Body Yaw term aligns the torso with the direction to the
+        # planner-model object at ~(1.1,0): a phantom heading the policy then
+        # chases, yawing/pivoting the robot off its feet). spawn_frame =
+        # {'yaw0': spawn yaw, 'p0': [x0, y0, z_floor]} re-expresses ALL
+        # published state in the spawn frame: lowstate IMU quaternion gets the
+        # spawn yaw rotated out; truth sportmodestate position/velocity are
+        # translated to the spawn origin, yaw-rotated, and z-referenced to the
+        # walking-surface top -- byte-identical semantics to the twin bench.
+        self.spawn_frame = spawn_frame
+        if spawn_frame is not None:
+            y0 = float(spawn_frame["yaw0"])
+            self._sf_qz = (math.cos(-y0 / 2.0), 0.0, 0.0, math.sin(-y0 / 2.0))
+            c, s = math.cos(y0), math.sin(y0)
+            # world->spawn-frame rotation Rz(-yaw0)
+            self._sf_R = np.array([[c, s, 0.0], [-s, c, 0.0], [0.0, 0.0, 1.0]])
+            self._sf_p0 = np.array([float(spawn_frame["p0"][0]),
+                                    float(spawn_frame["p0"][1]),
+                                    float(spawn_frame["p0"][2])])
+            print(f"[unitree_interface] SPAWN-FRAME state: yaw0="
+                  f"{math.degrees(y0):.1f}deg p0={self._sf_p0.round(3)} -- "
+                  "published lowstate quat / sportstate pos are spawn-relative "
+                  "(twin/real convention)")
 
         # initialize channel
         ChannelFactoryInitialize(id=DOMAIN_ID)
@@ -141,8 +184,17 @@ class SimInterface:
                 qa = r.sensor_adr["imu_quat"][0]
                 ga = r.sensor_adr["imu_gyro"][0]
                 aa = r.sensor_adr["imu_acc"][0]
-                for k in range(4):
-                    self.low_state.imu_state.quaternion[k] = float(sd[qa + k])
+                if self.spawn_frame is not None:
+                    # rotate the spawn yaw out of the world-frame framequat --
+                    # the real robot's IMU boots at yaw ~0, the twin spawns at
+                    # yaw 0; gyro/accel are body-frame and stay untouched.
+                    q = _quat_mul(self._sf_qz, (float(sd[qa]), float(sd[qa + 1]),
+                                                float(sd[qa + 2]), float(sd[qa + 3])))
+                    for k in range(4):
+                        self.low_state.imu_state.quaternion[k] = q[k]
+                else:
+                    for k in range(4):
+                        self.low_state.imu_state.quaternion[k] = float(sd[qa + k])
                 for k in range(3):
                     self.low_state.imu_state.gyroscope[k] = float(sd[ga + k])
                 for k in range(3):
@@ -159,9 +211,17 @@ class SimInterface:
                                      mujoco.mjtObj.mjOBJ_SITE,
                                      self.imu_site, v6, 0)
             p = self.data.site_xpos[self.imu_site].copy()
+        v = v6[3:6]
+        if self.spawn_frame is not None:
+            # spawn-relative xy, floor-referenced z, yaw-derotated -- the
+            # twin's world (robot home frame). Consistent with the normalized
+            # lowstate quaternion: the node's pelvis reconstruction
+            # p - R*kImuOffset stays exact under the shared rigid transform.
+            p = self._sf_R @ (p - self._sf_p0)
+            v = self._sf_R @ v
         for k in range(3):
             self.high_state.position[k] = float(p[k])
-            self.high_state.velocity[k] = float(v6[3 + k])
+            self.high_state.velocity[k] = float(v[k])
         self.high_state_publisher.Write(self.high_state)
 
     def low_cmd_handler(self, msg: LowCmd_):

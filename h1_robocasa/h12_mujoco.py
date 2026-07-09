@@ -87,7 +87,11 @@ def sim_loop(task, viewer=True, layout=None, style=None, seed=None, no_sensors=F
              elliptic_contact=False,
              multiccd=True, truth_sportstate=False, plane_floor=False,
              spawn_crouch=0.0, auto_release=False, auto_release_delay=2.0,
-             auto_release_fade=3.0, real_hands=False, slowmo=1.0):
+             auto_release_fade=3.0, auto_release_quiet=10.0,
+             real_hands=False, slowmo=1.0,
+             base_damping=False, twin_mass=False, vacuum=False,
+             spawn_frame_state=False, lock_fingers=False, settle_spawn=False,
+             trolley=False, no_band=False):
     """Launch a RoboCasa task env around the H1-2 and run the shared-MjData loop.
 
     Builds the env with robots='H1_2' and steps the env's *own* MjData with our
@@ -359,6 +363,128 @@ def sim_loop(task, viewer=True, layout=None, style=None, seed=None, no_sensors=F
               "bodies (twin parity -- hands now carry real weight; controller "
               "feed-forwards for weighted, not weightless, hands)")
 
+    # BASE SKY-HOOK PARITY (FABEL 2026-07-06, audit-missing delta): the twin
+    # plant's <default> joint class reaches its FREE BASE JOINT -- compiled
+    # dof_damping[0:6]=10, dof_armature[0:6]=0.1 (only frictionloss is zeroed,
+    # h1_2_handless_magpie.xml:12,51-56) -- and the PLANNER model carries the
+    # SAME (h1_2_modified_magpie.xml childclass h1_2, free joint un-overridden).
+    # The robosuite-assembled base is 0/0/0, so both the twin bench and the
+    # planner's rollouts balance a base with a viscous sky-hook the local plant
+    # lacks. Opt-in exact-parity patch; nonphysical (real robots have no base
+    # damper), so default OFF.
+    if base_damping:
+        try:
+            _fjb = mujoco.mj_name2id(
+                model, mujoco.mjtObj.mjOBJ_JOINT,
+                f"{env.robots[0].robot_model.naming_prefix}{h1_2_robosuite.FREE_JOINT_NAME}")
+            _bd0 = int(model.jnt_dofadr[_fjb])
+            model.dof_damping[_bd0:_bd0 + 6] = 10.0
+            model.dof_armature[_bd0:_bd0 + 6] = 0.1
+            print("[h12_mujoco] base-damping: free-joint dofs damping=10, "
+                  "armature=0.1 (twin+planner sky-hook parity; frictionloss 0)")
+        except Exception as e:
+            print(f"[h12_mujoco] base-damping skipped: {e}")
+
+    # UPPER-BODY MASS PARITY (FABEL 2026-07-06): --real-hands closes only HALF
+    # the hand-mass gap -- robosuite's base.xml inertiagrouprange="0 0" drops
+    # the density-1000 visual mesh copies, so each assembled gripper is
+    # ~0.2528 kg vs the twin/planner 0.506 kg lump; and the twin's 0.67 kg
+    # back_equipment torso box is absent entirely (~1.18 kg total deficit,
+    # local 67.49 kg vs twin 68.67 kg). Doubling the gripper body masses
+    # restores ~0.506 kg/side at the same CoM distribution; the torso gets the
+    # back box as a lumped point mass with CoM shift + parallel-axis inertia
+    # (approximate: treats the principal frame as the body frame). Pair with
+    # --real-hands or the extra gripper mass stays gravity-cancelled.
+    if twin_mass:
+        _nm = 0
+        for _b in range(model.nbody):
+            _bn = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_BODY, _b) or ""
+            if "gripper0" in _bn and model.body_mass[_b] > 0:
+                model.body_mass[_b] *= 2.0
+                model.body_inertia[_b] *= 2.0
+                _nm += 1
+        try:
+            _tb = resolver.body_id("torso_link")
+            _m0 = float(model.body_mass[_tb])
+            _c0 = model.body_ipos[_tb].copy()
+            _m1, _c1 = 0.67, np.array([-0.095, 0.0, 0.18])
+            _M = _m0 + _m1
+            _c = (_m0 * _c0 + _m1 * _c1) / _M
+            _box = np.array([0.025, 0.13, 0.14])   # twin back_equipment half-sizes
+            _ibox = _m1 / 3.0 * np.array([_box[1]**2 + _box[2]**2,
+                                          _box[0]**2 + _box[2]**2,
+                                          _box[0]**2 + _box[1]**2])
+            _pa = lambda m, d: m * np.array([d[1]**2 + d[2]**2,
+                                             d[0]**2 + d[2]**2,
+                                             d[0]**2 + d[1]**2])
+            model.body_inertia[_tb] = (model.body_inertia[_tb]
+                                       + _pa(_m0, _c0 - _c) + _ibox
+                                       + _pa(_m1, _c1 - _c))
+            model.body_mass[_tb] = _M
+            model.body_ipos[_tb] = _c
+            print(f"[h12_mujoco] twin-mass: {_nm} gripper bodies x2 "
+                  f"(~0.506 kg/side), torso +0.67 kg back-box: mass "
+                  f"{_m0:.3f}->{_M:.3f}, com {_c0.round(3)}->{_c.round(3)}; "
+                  f"total model mass now {float(np.sum(model.body_mass)):.3f} kg")
+        except Exception as e:
+            print(f"[h12_mujoco] twin-mass torso box skipped: {e}")
+
+    # LOCK FINGERS (FABEL 2026-07-06): the twin/planner grippers are RIGID
+    # WELDS (0 extra DOF); the local plant merges the full articulated Magpie
+    # (12 finger DOF + 8 <connect> 4-bar equality constraints) that the
+    # planner cannot model and the full-body policy's arm motion excites.
+    # Freeze the finger joints ~rigid (huge damping/armature/frictionloss --
+    # mass distribution unchanged) to emulate the twin's weld for balance
+    # benches. Opt-in; grasp runs need live fingers.
+    if lock_fingers:
+        _nl = 0
+        for _j in range(model.njnt):
+            _jn = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_JOINT, _j) or ""
+            if "gripper0" in _jn:
+                _d = int(model.jnt_dofadr[_j])
+                model.dof_damping[_d] = 200.0
+                model.dof_armature[_d] = 1.0
+                model.dof_frictionloss[_d] = 5.0
+                _nl += 1
+        print(f"[h12_mujoco] lock-fingers: froze {_nl} gripper joints "
+              "(damping 200/armature 1/frictionloss 5 -- twin weld parity; "
+              "mass unchanged)")
+
+    # VACUUM PARITY (FABEL 2026-07-06): robosuite's base.xml gives the world
+    # air (density=1.2, viscosity=2e-5) -- the twin runs the MuJoCo default
+    # vacuum. Drag is tiny at stand velocities; exact-parity knob.
+    if vacuum:
+        model.opt.density = 0.0
+        model.opt.viscosity = 0.0
+        print("[h12_mujoco] vacuum: opt.density/viscosity -> 0 (twin parity; "
+              "robosuite ships air 1.2 / 2e-5)")
+
+    # SETTLE THE SPAWN DROP (FABEL 2026-07-06): place_robot_clear lifts the
+    # lowest robot point 2 cm clear of the floor, so the robot spawns AIRBORNE
+    # and drops onto its feet AFTER the band anchor is captured -- pre-loading
+    # the taut-at-spawn strap by ~60-160 N (3000 N/m x the drop+settle). The
+    # twin spawns with its feet exactly at contact (~0.2 mm) and its strap
+    # reads ~5-15 N at engagement; a 160 N pre-load hands the policy a
+    # supported start it then exploits (L1: tucked hang at 575 N, knees 1.18).
+    # Settle with the POSE FROZEN (the twin's crouch-freeze semantics: joints
+    # pinned, base free) so the feet load without the limp joints buckling,
+    # THEN capture anchors/spawn-frame on the settled state.
+    if settle_spawn:
+        try:
+            _q0s = data.qpos[resolver.motor_qpos].copy()
+            for _ in range(int(0.3 / model.opt.timestep)):
+                data.qpos[resolver.motor_qpos] = _q0s
+                data.qvel[resolver.motor_qvel] = 0.0
+                mujoco.mj_step(model, data)
+            data.qvel[:] = 0.0
+            data.time = 0.0
+            mujoco.mj_forward(model, data)
+            print(f"[h12_mujoco] settle-spawn: pose-frozen 0.3 s settle done; "
+                  f"feet loaded before anchor capture "
+                  f"(torso z={float(data.xpos[resolver.body_id('torso_link')][2]):.3f})")
+        except Exception as e:
+            print(f"[h12_mujoco] settle-spawn skipped: {e}")
+
     # Elastic-band balance tether on the torso: holds the free-floating biped
     # upright until the ROS walking policy takes over. Anchor a fixed point above
     # the torso's spawn; apply the spring force each step (SPACE / the
@@ -451,6 +577,18 @@ def sim_loop(task, viewer=True, layout=None, style=None, seed=None, no_sensors=F
             band = ElasticBand(anchor, length=0.8, stiffness=3000, damping=300,
                                tension_only=True, posture_kp=300.0, posture_kd=60.0,
                                release_fade=3.0)
+            # FABEL --no-band (2026-07-07): zero the STRAP forces entirely --
+            # every tether variant (fixed anchor, trolley, harness) preloads
+            # or tugs the robot into a non-equilibrium state that the release
+            # then dumps (measured: 100-660 N wind-ups; free stands only ever
+            # started clean). Keeps the pre-engagement JOINT HOLD + the tilt
+            # ASSIST (a pure torso torque: no anchor, no preload) which
+            # --auto-release then fades. The [manual] telemetry stays.
+            if no_band:
+                band.stiffness = 0.0
+                band.damping = 0.0
+                print("[h12_mujoco] NO-BAND: strap forces zeroed (tilt assist "
+                      "+ joint hold only; assist fades at auto-release)")
             print(f"[h12_mujoco] MANUAL harness on torso: anchor {anchor.round(3)} "
                   "(held upright: joint-hold + tilt assist ON until controller; T toggles assist)")
             band.print_instructions()
@@ -466,11 +604,59 @@ def sim_loop(task, viewer=True, layout=None, style=None, seed=None, no_sensors=F
     sim_lock = threading.Lock()
     pfx = env.robots[0].robot_model.naming_prefix   # "robot0_"
 
+    # SPAWN-FRAME STATE (FABEL 2026-07-06): capture the robot's spawn pose so
+    # the DDS interface can publish state in the ROBOT'S HOME frame -- the
+    # convention both validated plants use (twin spawns at the model origin
+    # facing +x; the real IMU boots at yaw ~0 with odometry from 0). RoboCasa's
+    # raw kitchen-world pose (xy ~(-2.2,-3.6), arbitrary spawn yaw) poisons the
+    # planner's model-frame-referenced terms -- the Lean Body Yaw cost (w=40)
+    # aligns the torso with the direction to the planner-model OBJECT at
+    # ~(1.1,0), so a yaw'd/offset robot gets a permanent phantom heading error
+    # it can only fix by pivoting itself off its feet (the lateral-drift ->
+    # one-knee-strut fold seen in every kitchen trial). z is re-referenced to
+    # the walking-surface top (0.02 box top vs the twin's z=0 plane).
+    spawn_frame = None
+    if spawn_frame_state:
+        try:
+            mujoco.mj_forward(model, data)
+            _qa = resolver.sensor_adr["imu_quat"][0]
+            _sdv = data.sensordata
+            _qw, _qx, _qy, _qz_ = (float(_sdv[_qa + k]) for k in range(4))
+            _yaw0 = math.atan2(2.0 * (_qw * _qz_ + _qx * _qy),
+                               1.0 - 2.0 * (_qy * _qy + _qz_ * _qz_))
+            _site = -1
+            for _s in range(model.nsensor):
+                if int(model.sensor_adr[_s]) == int(_qa):
+                    _site = int(model.sensor_objid[_s])
+                    break
+            if _site < 0:
+                raise RuntimeError("imu site not found for spawn-frame capture")
+            _sp = data.site_xpos[_site].copy()
+            import re as _re2
+            _zf = 0.0
+            for _g in range(model.ngeom):
+                _gn = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_GEOM, _g) or ""
+                if _re2.match(r"floor_\d+_room_g\d+$", _gn):
+                    if model.geom_type[_g] == mujoco.mjtGeom.mjGEOM_BOX:
+                        _zf = max(_zf, float(model.geom_pos[_g][2]
+                                             + model.geom_size[_g][2]))
+                    elif model.geom_type[_g] == mujoco.mjtGeom.mjGEOM_PLANE:
+                        _zf = max(_zf, float(model.geom_pos[_g][2]))
+            spawn_frame = {"yaw0": _yaw0, "p0": [float(_sp[0]), float(_sp[1]), _zf]}
+            print(f"[h12_mujoco] spawn-frame-state: yaw0={math.degrees(_yaw0):.1f}deg "
+                  f"xy0=[{_sp[0]:+.2f},{_sp[1]:+.2f}] z_floor={_zf:.3f} -- DDS "
+                  "state will be published in the robot's spawn frame "
+                  "(twin/real convention)")
+        except Exception as e:
+            print(f"[h12_mujoco] spawn-frame capture FAILED ({e}) -- publishing "
+                  "raw world-frame state")
+
     # DDS control bridge: publishes rt/lowstate, subscribes rt/lowcmd, drives the
     # 27 body motors by name via the resolver (grippers handled by the hand
     # bridges below; gripper ctrl indices are disjoint from the body motors).
     sim_interface = SimInterface(model, data, lock=sim_lock, resolver=resolver,
-                                 truth_sportstate=truth_sportstate)  # noqa: F841
+                                 truth_sportstate=truth_sportstate,
+                                 spawn_frame=spawn_frame)  # noqa: F841
 
     init_ros()
 
@@ -567,6 +753,7 @@ def sim_loop(task, viewer=True, layout=None, style=None, seed=None, no_sensors=F
     _payout_last_t = None   # sim time of the last payout CHUNK (settle pacing)
     _payout_quiet_t0 = None  # quiet-sustain anchor before a chunk may fire
     _auto_rel_t0 = None      # manual --auto-release: sim time pay-out started
+    _ar_quiet_t0 = None      # quiet-sustain anchor for the auto-release gate
     _auto_rel_kp0 = None     # posture (kp, kd) captured at auto-release start
     _auto_rel_len0 = None    # rope rest length at auto-release start
     _auto_rel_lent = None    # rope target rest length (slack + catch margin)
@@ -592,6 +779,20 @@ def sim_loop(task, viewer=True, layout=None, style=None, seed=None, no_sensors=F
                     # Re-write every step; MuJoCo persists xfrc_applied, so we must
                     # zero it when the band is disabled or the last force lingers.
                     if band.enabled:
+                        # FABEL --trolley (2026-07-07): the anchor FOLLOWS the
+                        # torso xy (overhead gantry trolley, tau 0.5 s) so the
+                        # strap can never exert a sustained LATERAL pull. A
+                        # fixed anchor turns any policy-equilibrium offset into
+                        # a tug-of-war the robot winds into (measured: 160->660
+                        # N hangs); a trolley strap stays a pure vertical
+                        # catch -- falls still load it (the torso outruns the
+                        # 0.5 s follow), quiet stands leave it slack.
+                        if trolley:
+                            _fw = min(1.0, model.opt.timestep / 0.5)
+                            band.point[0] += _fw * (data.xpos[band_body_id][0]
+                                                    - band.point[0])
+                            band.point[1] += _fw * (data.xpos[band_body_id][1]
+                                                    - band.point[1])
                         _scale = band.fade_scale(data.time)   # 1.0 unless a fade is running
                         _f = band.evaluate_force(
                             data.xpos[band_body_id], data.qvel[base_dof:base_dof + 3])
@@ -657,8 +858,27 @@ def sim_loop(task, viewer=True, layout=None, style=None, seed=None, no_sensors=F
                             # margin remains (target length = disp-at-start + 0.35):
                             # a genuine free-stand goes green and holds; one that
                             # can't sags onto the catch. Hands-free, repeatable.
+                            # QUIET GATE (FABEL 2026-07-06): only begin the payout
+                            # when the tilt-assist torque is small and sustained --
+                            # releasing INTO a hunting swing dumps the robot at the
+                            # worst phase (T4-vs-T6 A/B: same config, trough-release
+                            # stood 22 s, swing-release fell in 2 s). The operator/
+                            # twin gate release on quiet for the same reason.
+                            _tqm_now = float(np.linalg.norm(
+                                data.xfrc_applied[band_body_id, 3:6]))
                             if (auto_release and _t_cmd0 is not None
+                                    and _auto_rel_t0 is None
                                     and data.time - _t_cmd0 >= auto_release_delay):
+                                if _tqm_now <= auto_release_quiet:
+                                    if _ar_quiet_t0 is None:
+                                        _ar_quiet_t0 = data.time
+                                else:
+                                    _ar_quiet_t0 = None
+                            if (auto_release and _t_cmd0 is not None
+                                    and data.time - _t_cmd0 >= auto_release_delay
+                                    and (_auto_rel_t0 is not None
+                                         or (_ar_quiet_t0 is not None
+                                             and data.time - _ar_quiet_t0 >= 1.5))):
                                 if _auto_rel_t0 is None:
                                     _auto_rel_t0 = data.time
                                     _auto_rel_kp0 = (band.posture_kp, band.posture_kd)
@@ -721,8 +941,15 @@ def sim_loop(task, viewer=True, layout=None, style=None, seed=None, no_sensors=F
                             # gate could open during the scripted HOLD phase
                             # (quiet + slack but pre-policy, exactly the dishonest
                             # early release the doctrine forbids).
+                            # kp>1 gate (FABEL 2026-07-06, twin parity): the twin's
+                            # auto-harness sniffs stiff kp>1.0 before latching
+                            # engagement; the safety layer idles kp=0 zeros on
+                            # rt/lowcmd from launch, which used to latch this
+                            # path at t~1s and run the whole holdout/fade before
+                            # the controller was driving.
                             if (_t_cmd0 is None and data.time > 1.0
-                                    and time.time() - sim_interface.last_cmd_time < 0.5):
+                                    and time.time() - sim_interface.last_cmd_time < 0.5
+                                    and getattr(sim_interface, "last_cmd_kp", 0.0) > 1.0):
                                 _t_cmd0 = data.time
                                 print(f"[h12_mujoco] harness: controller engaged at "
                                       f"sim t={_t_cmd0:.1f}s — stiff hands HELD "
@@ -978,15 +1205,20 @@ def sim_loop(task, viewer=True, layout=None, style=None, seed=None, no_sensors=F
                                 _band_slack_t0 = None
                     else:
                         data.xfrc_applied[band_body_id, :] = 0.0
-                        if harness and data.time - _band_log_t >= 1.0:
-                            # Post-release verdict feed: the free-stand either
-                            # holds (z ~1.0, small tilt) or the fall shows here.
+                        if data.time - _band_log_t >= 1.0:
+                            # Post-release verdict feed (ALL modes, FABEL
+                            # 2026-07-06 -- was harness-only, leaving the
+                            # band-auto-release bench blind after release):
+                            # the free-stand either holds (z ~1.0, small
+                            # tilt) or the fall shows here.
                             _band_log_t = data.time
                             _R22 = float(data.xmat[band_body_id].reshape(3, 3)[2, 2])
                             _tilt = math.degrees(math.acos(max(-1.0, min(1.0, _R22))))
+                            _txy = data.xpos[band_body_id][:2]
                             print(f"[h12_mujoco] FREE: t={data.time:.1f}s "
                                   f"z={data.xpos[band_body_id][2]:.2f} "
-                                  f"tilt={_tilt:.1f}deg", flush=True)
+                                  f"tilt={_tilt:.1f}deg "
+                                  f"trueXY=[{_txy[0]:+.2f},{_txy[1]:+.2f}]", flush=True)
                 mujoco.mj_step(model, data)
                 env.update_state()                  # REQUIRED before _check_success
                 ros_bridge.tick()                   # /clock + camera + lidar + imu
@@ -1313,6 +1545,12 @@ if __name__ == "__main__":
         help="Sim seconds over which the rope pays out to slack + tilt assist "
              "fades to zero (default 3.0).")
     parser.add_argument(
+        "--auto-release-quiet", type=float, default=10.0,
+        help="QUIET GATE (FABEL): after --auto-release-delay, wait until the "
+             "tilt-assist torque stays under this (Nm) for 1.5 sim-s before "
+             "paying out -- release at an oscillation trough, never into a "
+             "swing (the operator's/twin's quiet doctrine).")
+    parser.add_argument(
         "--real-hands", dest="real_hands", action="store_true",
         help="Remove gravcomp from the hand/gripper bodies so they carry real "
              "weight (twin parity). RoboCasa gravcomps the hands weightless, but "
@@ -1327,6 +1565,63 @@ if __name__ == "__main__":
              "benches. The RW-EKF estimator belongs to the REAL chain; when "
              "this is on, point the estimator's out_topic elsewhere "
              "(e.g. rt/sportmodestate_est) so the two don't fight.")
+    parser.add_argument(
+        "--base-damping", dest="base_damping", action="store_true",
+        help="Twin+planner SKY-HOOK parity (FABEL): give the free base joint "
+             "dof damping=10 / armature=0.1 on all 6 DOF, matching the twin "
+             "plant's <default> joint class (which reaches its free joint; "
+             "only frictionloss is zeroed there) AND the planner model. The "
+             "robosuite-assembled base is 0/0/0. Nonphysical; bench-only.")
+    parser.add_argument(
+        "--twin-mass", dest="twin_mass", action="store_true",
+        help="Upper-body MASS parity (FABEL): double the assembled gripper "
+             "body masses (robosuite inertiagrouprange='0 0' halves them to "
+             "~0.253 kg/side vs the twin/planner 0.506 kg) and add the twin's "
+             "0.67 kg back_equipment box to the torso as a lumped point mass "
+             "(CoM + approx parallel-axis inertia). Pair with --real-hands.")
+    parser.add_argument(
+        "--vacuum", dest="vacuum", action="store_true",
+        help="Vacuum parity (FABEL): zero opt.density/viscosity (robosuite "
+             "ships air 1.2 / 2e-5; the twin runs the MuJoCo-default vacuum).")
+    parser.add_argument(
+        "--no-band", dest="no_band", action="store_true",
+        help="FABEL: zero the strap forces (keep the pre-engagement joint "
+             "hold + tilt assist, which --auto-release fades). The honest "
+             "free-stand bench: no tether preload/tug ever touches the "
+             "robot; the fall metric is the ground-truth z/tilt alone.")
+    parser.add_argument(
+        "--trolley", dest="trolley", action="store_true",
+        help="FABEL: the band/harness anchor FOLLOWS the torso xy (overhead "
+             "gantry trolley, tau 0.5 s) so the strap never exerts a "
+             "sustained lateral pull. Kills the fixed-anchor tug-of-war the "
+             "policy otherwise winds into (160-660 N hangs); the strap stays "
+             "a pure vertical catch. Bench rig realism: an overhead trolley "
+             "rail.")
+    parser.add_argument(
+        "--settle-spawn", dest="settle_spawn", action="store_true",
+        help="Pose-frozen 0.3 s settle BEFORE the band anchor / spawn-frame "
+             "capture (FABEL): place_robot_clear spawns the robot 2 cm "
+             "airborne, so the taut-at-spawn strap otherwise pre-loads "
+             "~60-160 N after the drop -- a supported start the policy then "
+             "exploits (tucked hang). The twin spawns feet-at-contact with a "
+             "~5-15 N strap; this restores that geometry.")
+    parser.add_argument(
+        "--lock-fingers", dest="lock_fingers", action="store_true",
+        help="Freeze the 12 articulated Magpie finger joints ~rigid (huge "
+             "damping/armature/frictionloss; mass unchanged) -- twin/planner "
+             "weld parity (they model the gripper as a rigid 0.506 kg lump; "
+             "the 4-bar equality-constraint linkages are unmodeled dynamics "
+             "the full-body policy's arm motion excites). Balance-only.")
+    parser.add_argument(
+        "--spawn-frame-state", dest="spawn_frame_state", action="store_true",
+        help="Publish DDS state in the ROBOT'S SPAWN frame (FABEL): rotate the "
+             "spawn yaw out of the lowstate IMU quaternion and express the "
+             "truth sportmodestate position spawn-relative (z referenced to "
+             "the walking-surface top). This is the convention of BOTH "
+             "validated plants (twin spawns at the model origin facing +x; "
+             "the real IMU boots at yaw ~0, odometry from 0). Raw kitchen-"
+             "world pose poisons the planner's model-frame terms (Lean Body "
+             "Yaw w=40 chases the phantom planner-model object direction).")
     parser.add_argument(
         "--no-sensors",
         action="store_true",
@@ -1388,4 +1683,9 @@ if __name__ == "__main__":
              auto_release=args.auto_release,
              auto_release_delay=args.auto_release_delay,
              auto_release_fade=args.auto_release_fade,
-             real_hands=args.real_hands)
+             auto_release_quiet=args.auto_release_quiet,
+             real_hands=args.real_hands, slowmo=args.slowmo,
+             base_damping=args.base_damping, twin_mass=args.twin_mass,
+             vacuum=args.vacuum, spawn_frame_state=args.spawn_frame_state,
+             lock_fingers=args.lock_fingers, settle_spawn=args.settle_spawn,
+             trolley=args.trolley, no_band=args.no_band)

@@ -65,15 +65,27 @@ find_package(unitree_sdk2 QUIET)
 if(H12_BUILD_CONTROLLER AND EXISTS "${MJPC_BUILD}" AND unitree_sdk2_FOUND)
   find_package(Threads REQUIRED)
 
-  # Includes: mjpc source headers, plus the fetched mujoco + absl headers. mujoco
-  # C++ headers reliably ship in the pip package (version-matched); fall back to the
-  # build's _deps. absl headers come from the build's _deps (source + generated).
+  # Includes: mjpc source headers, plus the fetched mujoco + absl headers.
+  # ABI CRITICAL (found 2026-07-07): the controller MUST compile against the
+  # SAME mujoco headers the build tree's libmujoco.so + libmjpc.a were built
+  # with -- the _deps/mujoco-src pinned commit. The pip package reports the
+  # same release (3.2.3) but its mjModel/mjData struct layout differs from
+  # the pinned commit (extra flex_*/eq_objtype/nC fields before the actuator
+  # section), so compiling THIS package's translation units against the pip
+  # headers while linking the build-tree libs skews every direct
+  # mjModel/mjData member access: PatchActuators wrote kp/kv into
+  # actuator_gear of the PLANNER model (gear 1 -> 200), the planner's CEM
+  # optimum on a frozen stand state became the straight-knee jackknife basin
+  # (hipP +0.09 vs the agent server's -0.20 on a bit-identical state), and
+  # every DDS handoff fell 1-4 s after release. The pip headers are only a
+  # FALLBACK for dev checkouts without a hydrated build tree.
   set(MJPC_INCLUDE_DIRS "${MJPC_ROOT}")
-  find_path(MUJOCO_INCLUDE_DIR mujoco/mujoco.h
-    PATHS /usr/local/lib/python3.10/dist-packages/mujoco/include NO_DEFAULT_PATH)
-  if(NOT MUJOCO_INCLUDE_DIR)
-    file(GLOB _mj_dep "${MJPC_BUILD}/_deps/mujoco-src/include")
+  file(GLOB _mj_dep "${MJPC_BUILD}/_deps/mujoco-src/include")
+  if(_mj_dep)
     set(MUJOCO_INCLUDE_DIR ${_mj_dep})
+  else()
+    find_path(MUJOCO_INCLUDE_DIR mujoco/mujoco.h
+      PATHS /usr/local/lib/python3.10/dist-packages/mujoco/include NO_DEFAULT_PATH)
   endif()
   file(GLOB _absl_src "${MJPC_BUILD}/_deps/abseil-cpp-src")
   file(GLOB _absl_bld "${MJPC_BUILD}/_deps/abseil-cpp-build")
