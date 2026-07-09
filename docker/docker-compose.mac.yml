@@ -96,6 +96,12 @@ services:
       # collision-free path on the SLAM map and drives /cmd_vel (the walk policy
       # follows it). Send goals via RViz "2D Nav Goal" or /navigate_to_pose.
       - HAMS_NAV2=${HAMS_NAV2:-0}
+      # HAMS_ROS_MCP=1 starts an in-container ROS debugging MCP server (warm rclpy
+      # node + robot_status/wait_for/costmap/drive tools) on localhost:6082. Reach
+      # it from the Mac via mac_vnc_tunnel.sh and register with:
+      #   claude mcp add --transport http ros_debug http://localhost:6082/mcp
+      - HAMS_ROS_MCP=${HAMS_ROS_MCP:-0}
+      - HAMS_ROS_MCP_PORT=${HAMS_ROS_MCP_PORT:-6082}
     volumes:
       - ../core_ws:/home/code/core_ws
       - ../CL_Assets:/home/code/CL_Assets:ro

@@ -15,6 +15,11 @@
 set -e
 
 HAMS_RVIZ="${HAMS_RVIZ:-0}"
+# HAMS_ROS_MCP=1 starts the ROS debugging MCP server (docker/scripts/ros_mcp_server.py)
+# on localhost:6082 inside the VM — reach it from the Mac via the SSH tunnel and
+# register with `claude mcp add --transport http ros_debug http://localhost:6082/mcp`.
+HAMS_ROS_MCP="${HAMS_ROS_MCP:-0}"
+HAMS_ROS_MCP_PORT="${HAMS_ROS_MCP_PORT:-6082}"
 
 # VNC/noVNC for RViz (only used when HAMS_RVIZ=vnc). Localhost-bound in the VM;
 # reachable from the Mac only via the SSH tunnel (mac_vnc_tunnel.sh). Ports are
@@ -67,6 +72,22 @@ start_rviz_stack() {
     echo "[launch_ros_mac]   http://localhost:${RVIZ_NOVNC_PORT}/vnc.html?autoconnect=1&resize=scale"
 }
 
+# Background ROS debugging MCP server (warm rclpy node + HTTP MCP tools). Needs ROS
+# sourced (done before this is called). Installs the `mcp` pip package on first run.
+start_ros_mcp() {
+    echo "[launch_ros_mac] starting ROS debug MCP server on 127.0.0.1:${HAMS_ROS_MCP_PORT}"
+    python3 -c "import mcp" 2>/dev/null || {
+        echo "[launch_ros_mac] installing the 'mcp' pip package (first run)..."
+        pip install --quiet --disable-pip-version-check mcp >/tmp/pip_mcp.log 2>&1 \
+            || { echo "[launch_ros_mac] pip install mcp FAILED:"; tail -5 /tmp/pip_mcp.log; return 1; }
+    }
+    HAMS_ROS_MCP_PORT="$HAMS_ROS_MCP_PORT" \
+        python3 /home/code/h12_sim_scripts/ros_mcp_server.py >/tmp/ros_mcp.log 2>&1 &
+    sleep 1
+    echo "[launch_ros_mac] MCP server -> /tmp/ros_mcp.log. Register on the Mac (after mac_vnc_tunnel.sh):"
+    echo "[launch_ros_mac]   claude mcp add --transport http ros_debug http://localhost:${HAMS_ROS_MCP_PORT}/mcp"
+}
+
 source /opt/ros/humble/setup.bash
 
 WS=/home/code/core_ws
@@ -116,6 +137,12 @@ export ROS_DOMAIN_ID="${ROS_DOMAIN_ID:-1}"
 # tolerates topics/TF arriving after it starts.
 if [ "$HAMS_RVIZ" = "vnc" ] || [ "$HAMS_RVIZ" = "1" ]; then
     start_rviz_stack || echo "[launch_ros_mac] RViz stack failed to start (continuing without it)"
+fi
+
+# Optional ROS debugging MCP server (started before bringup so it's up whether we
+# launch or drop to a shell; the warm subscribers just fill in as topics appear).
+if [ "$HAMS_ROS_MCP" = "1" ] || [ "$HAMS_ROS_MCP" = "vnc" ]; then
+    start_ros_mcp || echo "[launch_ros_mac] MCP server failed to start (continuing without it)"
 fi
 
 if [ "${1:-}" = "bash" ]; then

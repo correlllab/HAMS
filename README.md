@@ -297,6 +297,13 @@ HAMS_LOWERBODY=switch HAMS_SLAM=1 HAMS_NAV2=1 HAMS_SPAWN_BACKOFF=1.5 \
 
 Watch the map, costmap, and green plan build in RViz (<http://localhost:6081/vnc.html>).
 
+### ROS debugging MCP server (optional)
+
+`HAMS_ROS_MCP=1` starts an in-container MCP server that exposes ROS-inspection and
+robot-driving tools (`robot_status`, `wait_for`, `costmap_summary`, `drive`, …) to
+Claude Code over the same SSH tunnel as the viewers. Setup and tool list:
+**[docs/ROS_MCP_DEBUG.md](docs/ROS_MCP_DEBUG.md)**.
+
 ### macOS gotchas
 
 - **The host `docker` CLI socket is intermittent** under Colima — `docker …` may

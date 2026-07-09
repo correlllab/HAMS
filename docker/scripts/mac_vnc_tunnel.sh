@@ -7,6 +7,7 @@
 # Forwards both viewers' ports (harmless if only one is running):
 #   MuJoCo viewer : http://localhost:6080/vnc.html   (VNC localhost:5900)
 #   RViz          : http://localhost:6081/vnc.html   (VNC localhost:5901)
+#   ROS MCP server: http://localhost:6082/mcp        (HAMS_ROS_MCP=1)
 #
 # Usage:
 #   ./mac_vnc_tunnel.sh          open the tunnel, print the URLs
@@ -17,8 +18,9 @@
 set -euo pipefail
 
 PROFILE="${COLIMA_PROFILE:-default}"
-# Ports to forward: noVNC (browser) + raw VNC, for the MuJoCo viewer and RViz.
-PORTS=(6080 5900 6081 5901)
+# Ports to forward: noVNC (browser) + raw VNC for the MuJoCo viewer and RViz, plus
+# 6082 for the ROS debugging MCP server (HAMS_ROS_MCP=1).
+PORTS=(6080 5900 6081 5901 6082)
 MUJOCO_URL="http://localhost:6080/vnc.html?autoconnect=1&resize=scale"
 RVIZ_URL="http://localhost:6081/vnc.html?autoconnect=1&resize=scale"
 
