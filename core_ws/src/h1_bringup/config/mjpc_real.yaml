@@ -12,12 +12,12 @@ h12_deploy_mjpc_estimator:
     out_topic: rt/sportmodestate
     rate: 200.0
     filter: rw-ekf
-    # Pin the robot-subnet NIC explicitly. The estimator's Python auto-pin
-    # (`ip -o -4 addr show`, matching 192.168.123.x) fell back to "twin only"
-    # in the container even though the C++ core's getifaddrs found this NIC --
-    # so on real HW it must be forced or the estimator never binds rt/lowstate.
-    # Change to your adapter if different (`ip -o -4 addr show` on the robot subnet).
-    iface: enx00e04c681314
+    # iface: left empty on purpose -- the estimator auto-pins whichever NIC
+    # holds a 192.168.123.x address, the same way the C++ core does. A NIC name
+    # is host-specific (eno1 on the robot PC, a USB adapter on a laptop), so
+    # never bake one into this shared config. Only set it to disambiguate two
+    # robot-subnet NICs; an unknown name warns and falls back to auto-detect.
+    iface: ""
 
 mjpc_deploy_lowerbody_controller:
   ros__parameters:
