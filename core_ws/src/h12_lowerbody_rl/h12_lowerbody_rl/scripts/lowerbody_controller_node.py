@@ -1,24 +1,27 @@
-"""Lower-body controller node: band-held idle -> service-activated policy -> switch.
+"""Lower-body controller node: band-held idle -> FAME stand -> auto stand/walk.
 
 Flow
 ----
 1. The robot starts held by the elastic band, **idle** (no policy drives the legs).
-2. A policy is *started* by calling its service (one Trigger service per policy,
-   auto-created from the registry):
-       ros2 service call /lowerbody/start_fame std_srvs/srv/Trigger
-       ros2 service call /lowerbody/start_walk std_srvs/srv/Trigger
-   The first activation releases the elastic band (gated on frame_task being
-   ready, /left_ee_pose) and then engages the policy.
-3. Switching between policies is **seamless**: the request only commits once the
-   handover gate passes (robot standing still, arms home), with the incoming
-   policy reset for a clean warm-up (see policy_manager.py).
+2. At startup the ``active_policy`` (default ``fame``) is auto-activated: the node
+   pre-poses the legs, releases the elastic band (gated on frame_task being ready,
+   /left_ee_pose), and engages FAME (standing).
+3. From then on the policy is chosen **automatically from /cmd_vel** (auto_switch,
+   on by default): ||[vx, vy, wz]|| above ``auto_switch_rise_norm`` -> walk
+   (locomote); below ``auto_switch_fall_norm`` -> FAME (stand still). The two
+   thresholds give hysteresis so it doesn't chatter at the boundary. Each switch
+   commits through the gated handover (policy_manager.py): walk->FAME waits for a
+   real stop + settle; FAME->walk engages as soon as the base is upright and still,
+   so it can start under a held velocity command.
+
+There are no per-policy start services — drive /cmd_vel (e.g. from nav2) and the
+controller stands or walks to match. Set ``auto_switch:=false`` to pin the robot to
+``active_policy`` (pure stand or pure walk).
 
 Interfaces
 ----------
-srv  /lowerbody/start_<name>   (std_srvs/Trigger)      start/switch to a policy
-sub  /lowerbody/set_policy     (std_msgs/String)       same, as a topic (convenience)
 sub  /lowstate                 (unitree_hg/LowState)   robot state
-sub  /cmd_vel                  (geometry_msgs/Twist)   velocity command (walk)
+sub  /cmd_vel                  (geometry_msgs/Twist)   velocity command -> policy + walk
 sub  /lowerbody/squat_cmd      (std_msgs/Float32)      base-height / squat (FAME)
 sub  /left_ee_pose             (geometry_msgs/PoseStamped)  frame_task-ready signal
 pub  /safety/lowcmd_lower_in   (unitree_hg/LowCmd)     12-joint leg setpoints
@@ -50,6 +53,10 @@ from h12_lowerbody_rl.policy_manager import GateConfig, PolicyManager
 
 MOTOR_MODE_PR = 1
 
+# Policy registry keys (see LowerBodyControllerNode.__init__).
+FAME = "fame"   # RMA balance/stand policy (does not locomote)
+WALK = "walk"   # TorchScript walk policy (follows /cmd_vel)
+
 # Pre-pose: before engaging the policy, PD-drive the legs to the incoming policy's
 # nominal crouch (band-held) and wait until they settle there. The RMA policy warms
 # up from its trained default pose; released from the straight-leg spawn it can't
@@ -69,12 +76,21 @@ class LowerBodyControllerNode(Node):
         super().__init__("lowerbody_controller_node")
 
         self.declare_parameter("control_hz", 50.0)
-        # "none" -> start idle (band-held), wait for a start service. Otherwise
-        # auto-activate that policy at startup (releases the band when ready).
-        self.declare_parameter("active_policy", "none")
+        # Policy to auto-activate at startup (releases the band when ready).
+        # Default "fame" (stand). "none" stays band-held idle -- but with the start
+        # services removed, "none" now leaves the robot idle forever (auto_switch
+        # only switches BETWEEN active policies), so set a real policy here.
+        self.declare_parameter("active_policy", "fame")
         self.declare_parameter("walk_config", _share("policies", "walk", "walk.yaml"))
         self.declare_parameter("fame_config", _share("policies", "fame", "fame.yaml"))
         self.declare_parameter("default_height_cmd", 1.0)
+        # Auto-switch stand<->walk from ||[vx, vy, wz]|| with hysteresis (rise > fall):
+        # engage walk above rise, fall back to FAME below fall. auto_switch:=false
+        # pins the robot to active_policy. rise sits at the handover gate's cmd_eps
+        # (0.10); fall below it so walk->FAME's stop gate can also pass.
+        self.declare_parameter("auto_switch", True)
+        self.declare_parameter("auto_switch_rise_norm", 0.10)
+        self.declare_parameter("auto_switch_fall_norm", 0.05)
         self.declare_parameter("disable_elastic_band", True)
         # Release the band only after frame_task_server has finished its open-loop
         # startup (it publishes /left_ee_pose only then); earlier release crashes
@@ -88,6 +104,9 @@ class LowerBodyControllerNode(Node):
         walk_cfg = self.get_parameter("walk_config").value
         fame_cfg = self.get_parameter("fame_config").value
         self._height_cmd = float(self.get_parameter("default_height_cmd").value)
+        self._auto_switch = bool(self.get_parameter("auto_switch").value)
+        self._auto_rise = float(self.get_parameter("auto_switch_rise_norm").value)
+        self._auto_fall = float(self.get_parameter("auto_switch_fall_norm").value)
 
         self.get_logger().info("loading lower-body policies...")
         policies = {
@@ -122,7 +141,6 @@ class LowerBodyControllerNode(Node):
                              history=HistoryPolicy.KEEP_LAST, depth=1)
         self.create_subscription(LowState, "/lowstate", self._on_lowstate, lowstate_qos)
         self.create_subscription(Twist, "/cmd_vel", self._on_cmd_vel, 10)
-        self.create_subscription(String, "/lowerbody/set_policy", self._on_set_policy, 10)
         self.create_subscription(Float32, "/lowerbody/squat_cmd", self._on_squat_cmd, 10)
         self.create_subscription(
             PoseStamped, self.get_parameter("band_release_topic").value,
@@ -131,40 +149,28 @@ class LowerBodyControllerNode(Node):
         self._active_pub = self.create_publisher(String, "/lowerbody/active_policy", latched)
         self._publish_active()
 
-        # one Trigger service per policy: /lowerbody/start_<name>
-        self._start_srvs = [
-            self.create_service(Trigger, f"/lowerbody/start_{name}", self._make_start_handler(name))
-            for name in self._manager.names()
-        ]
-
         self.create_timer(1.0 / control_hz, self._tick)
         self.get_logger().info(
             f"lowerbody_controller ready: policies={self._manager.names()}, "
-            f"start services=/lowerbody/start_<{{{'|'.join(self._manager.names())}}}>, "
-            f"control_hz={control_hz}. Robot is band-held idle until a policy is started."
+            f"auto_switch={self._auto_switch} (rise={self._auto_rise}, fall={self._auto_fall}), "
+            f"control_hz={control_hz}. Policy follows /cmd_vel; no start services."
         )
 
         if startup_policy and startup_policy != "none":
             self.get_logger().info(f"active_policy={startup_policy!r}: auto-activating at startup")
             self._request_policy(startup_policy)
+        else:
+            self.get_logger().warn(
+                "active_policy='none' with start services removed -> robot stays "
+                "band-held idle forever. Set active_policy to 'fame' or 'walk'."
+            )
 
     # -- request entry points ------------------------------------------------
-    def _request_policy(self, name: str) -> tuple[bool, str]:
-        ok, msg = self._manager.request(name)
+    def _request_policy(self, name: str, require_stop: bool = True) -> tuple[bool, str]:
+        ok, msg = self._manager.request(name, require_stop=require_stop)
         if ok and self._manager.is_pending() and self._manager.is_idle():
             self._request_time = time.monotonic()  # start band-release timeout
         return ok, msg
-
-    def _make_start_handler(self, name: str):
-        def handler(_req, resp):
-            ok, msg = self._request_policy(name)
-            resp.success = ok
-            resp.message = msg
-            return resp
-        return handler
-
-    def _on_set_policy(self, msg: String) -> None:
-        self._request_policy(msg.data.strip().lower())
 
     # -- callbacks -----------------------------------------------------------
     def _on_lowstate(self, msg: LowState) -> None:
@@ -227,6 +233,20 @@ class LowerBodyControllerNode(Node):
         if self._lowstate is None:
             return
         state = self._state_from_lowstate(self._lowstate)
+
+        # Auto-switch stand<->walk from the velocity command. Decide only when
+        # settled on a policy (not idle, not mid-handover); the request then commits
+        # through the gated handover below. fame->walk uses a relaxed gate
+        # (require_stop=False) so it engages under a held cmd; walk->FAME uses the
+        # full stop-and-settle gate. request() is idempotent while pending, so
+        # re-deciding each tick doesn't reset the gate.
+        if self._auto_switch and not self._manager.is_idle() and not self._manager.is_pending():
+            cmd_norm = float(np.linalg.norm(self._cmd))
+            active = self._manager.active_name
+            if active == FAME and cmd_norm > self._auto_rise:
+                self._request_policy(WALK, require_stop=False)
+            elif active == WALK and cmd_norm < self._auto_fall:
+                self._request_policy(FAME, require_stop=True)
 
         if self._manager.is_pending():
             if self._manager.is_idle():

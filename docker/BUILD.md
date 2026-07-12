@@ -240,6 +240,11 @@ args). Builds `hams_base` first whenever `ros` or `robocasa` is selected, then
 - Normalizes `ROS_DOMAIN_ID` (empty→1; `0` rejected for sims, confirmed for `ros`).
 - `xhost +local:docker`, stable container names (`hams_ros`, `hams_sim_*`), `--rm`.
 
+The Apple-Silicon port mirrors these as `docker/mac/scripts/docker_build_mac.sh` and
+`docker/mac/scripts/docker_run_mac.sh` (against `docker/mac/docker-compose.yml`):
+services `robocasa`/`ros` only (no `isaac`), base built from
+`mac/BaseDockerfile.arm64`, no `MJPC_REF`, no `xhost`. See the README macOS section.
+
 **`docker-compose.yml`** defines three profiles (`isaac`, `robocasa`, `ros`), each
 with `runtime: nvidia`, `network_mode: host`, X11 passthrough, and the bind mounts.
 Each profile's `command:` is its `launch_*.sh`.

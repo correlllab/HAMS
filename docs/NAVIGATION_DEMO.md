@@ -44,8 +44,9 @@ Then drive it:
 docker exec -it hams_ros bash        # host docker CLI flaky? use: colima ssh -- docker exec -it hams_ros bash
 source /home/code/h12_sim_scripts/robot_cli.sh
 
-rob_stand      # engage FAME; wait ~15 s of sim time for the tether to release and the stance to settle
-rob_explore    # hand over to walk + send /skill/frontier_explore (Ctrl-C cancels the goal)
+# The robot comes up already standing in FAME (auto-activated) — wait ~15 s of sim
+# time for the tether to release and the stance to settle, then:
+rob_explore    # send /skill/frontier_explore; walk auto-engages on nav2's /cmd_vel (Ctrl-C cancels)
 ```
 
 Watch it live:
@@ -62,7 +63,7 @@ blacklisted after a timeout and the explorer moves on; the action succeeds with
 
 | Variable | For the nav demo | Notes |
 |---|---|---|
-| `HAMS_LOWERBODY` | `switch` | Switchable controller (`rob_stand`→`rob_walk`). `fame` stands only; `walk` launches the raw policy (use `switch`). |
+| `HAMS_LOWERBODY` | `switch` | Switchable controller: starts in FAME and auto-switches stand↔walk from `‖/cmd_vel‖`. `fame` stands only; `walk` launches the raw policy (use `switch`). |
 | `HAMS_SIM_ODOM` | `1` | Publishes the sim's ground-truth base odom (`/odom` + `odom→pelvis` TF) that SLAM needs. Off by default; **required** for this demo. |
 | `HAMS_SLAM` | `1` | Adds `pointcloud_to_laserscan` + `slam_toolbox` → `/map`. |
 | `HAMS_NAV2` | `1` | Adds the nav2 stack (implies SLAM). Send goals via RViz "2D Nav Goal", `/navigate_to_pose`, or `rob_explore`. |
@@ -73,10 +74,9 @@ blacklisted after a timeout and the explorer moves on; the action succeeds with
 ## Manual driving (without exploration)
 
 ```bash
-rob_stand                 # FAME stand
-rob_walk                  # hand over to the walk policy
-rob_go 0.3 0 0.2 6        # vx vy wz secs — forward + gentle left turn for 6 s
-rob_stop                  # zero velocity, back to FAME
+# The controller auto-switches: any /cmd_vel makes it walk, zero makes it stand (FAME).
+rob_go 0.3 0 0.2 6        # vx vy wz secs — forward + gentle left turn for 6 s (auto-walks)
+rob_stop                  # zero velocity → auto-switches back to FAME
 ```
 
 Or set a single goal in RViz with the **2D Nav Goal** tool and let nav2 drive.
@@ -108,9 +108,9 @@ MuJoCo (robocasa)                         ROS (hams_ros)
   it, its sim time resets to 0 and the still-running ROS side sees the clock jump
   backward (TF extrapolation errors, a frozen `0x0` SLAM map). After recreating or
   restarting `robocasa`, restart `hams_ros` too so it resyncs.
-- **`rob_stand` before `rob_walk`/`rob_explore`.** The walk policy is stable when
-  handed over from a settled FAME stance; give it ~15 s of sim time after
-  `rob_stand` before commanding motion.
+- **Let FAME settle before commanding motion.** The controller boots into FAME and
+  the walk policy is stable only when handed over from a settled stance — give it
+  ~15 s of sim time after launch (tether release + settle) before `rob_go`/`rob_explore`.
 - **Some exploration goals time out on the slow sim.** At ~0.2× real-time, nav2
   planning + walking to a 2 m frontier can exceed the 120 s goal timeout; the
   explorer blacklists it and picks another. That's expected, not a failure.

@@ -97,19 +97,24 @@ def generate_launch_description():
     #                         standing UNSUPPORTED (verified). Does not locomote.
     #   HAMS_LOWERBODY=walk   TorchScript walk policy on its own (marches in place;
     #                         topples in the cluttered kitchen).
-    #   HAMS_LOWERBODY=switch switchable controller: band-held idle until you call
-    #                         /lowerbody/start_{fame,walk}; gated handover between
-    #                         stand (FAME) and locomotion (walk). This is the one to
-    #                         use for stand<->walk. Starts idle by default.
+    #   HAMS_LOWERBODY=switch switchable controller: starts in FAME (stand) and
+    #                         auto-switches stand<->walk from ||/cmd_vel|| (no start
+    #                         services). This is the one to use for stand<->walk and
+    #                         the nav demo — nav2's /cmd_vel makes it walk; it stands
+    #                         again when the command drops to ~0.
     lowerbody = os.environ.get('HAMS_LOWERBODY', '').strip().lower()
     _lowerbody_exec = {'fame': 'fame_node', 'walk': 'walking_node',
                        'switch': 'lowerbody_controller_node'}.get(lowerbody)
     if _lowerbody_exec:
+        _lb_params = [sim_time_param]
+        if _lowerbody_exec == 'lowerbody_controller_node':
+            # Start in FAME; the node then auto-switches to walk on /cmd_vel.
+            _lb_params.append({'active_policy': 'fame'})
         nodes.append(Node(
             package='h12_lowerbody_rl',
             executable=_lowerbody_exec,
             name=_lowerbody_exec,
-            parameters=[sim_time_param],
+            parameters=_lb_params,
             output='screen',
         ))
 
@@ -162,9 +167,10 @@ def generate_launch_description():
     # nav2 stack plans a collision-free path on the SLAM map + lidar costmap and
     # drives it via /cmd_vel, which the walk policy consumes (nav2's
     # velocity_smoother publishes /cmd_vel). Send goals with the RViz "2D Nav Goal"
-    # tool or the /navigate_to_pose action. The robot must be in walk mode
-    # (/lowerbody/start_walk) and standing in open floor — nav2 rejects a goal if
-    # the robot's start cell is occupied (e.g. pressed against a counter).
+    # tool or the /navigate_to_pose action. With HAMS_LOWERBODY=switch the controller
+    # auto-switches to walk as soon as nav2 publishes /cmd_vel (no manual step). The
+    # robot must be standing in open floor — nav2 rejects a goal if the robot's start
+    # cell is occupied (e.g. pressed against a counter).
     # nav2_config_mac.yaml is nav2_config.yaml with the odom frame swapped from
     # FAST-LIO's camera_init to the sim's odom.
     if os.environ.get('HAMS_NAV2', '').strip().lower() in ('1', 'true', 'on'):

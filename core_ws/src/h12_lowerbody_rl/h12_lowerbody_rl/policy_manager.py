@@ -51,6 +51,12 @@ class PolicyManager:
         self._log = log
         self._pass_count = 0
         self._settle_ticks = 0
+        # Whether the pending switch's gate requires a stop (||cmd|| <= cmd_eps).
+        # True for stop-and-settle handovers (e.g. walk->FAME); False when handing
+        # INTO a locomotion policy that must engage while a velocity is commanded
+        # (fame->walk) — there the stop check would deadlock (the trigger IS a high
+        # cmd), so we gate on upright+still only and let the incoming policy step.
+        self._require_stop = True
 
     # -- introspection -------------------------------------------------------
     @property
@@ -78,26 +84,36 @@ class PolicyManager:
         return self._policies.get(self._desired) if self._desired is not None else None
 
     # -- control -------------------------------------------------------------
-    def request(self, name: str) -> tuple[bool, str]:
+    def request(self, name: str, require_stop: bool = True) -> tuple[bool, str]:
         """Request a policy. Returns (accepted, message). Commit happens later
         (after band release for the first activation, or after the gate for a
-        switch)."""
+        switch). ``require_stop`` controls the switch gate: True = full
+        stop-and-settle handover; False = gate on upright+still only (for
+        engaging a locomotion policy while a velocity is commanded)."""
         if name not in self._policies:
             return False, f"unknown policy {name!r}; have {self.names()}"
         if name == self._active and not self.is_pending():
             return True, f"{name!r} already active"
+        # Idempotent while the same switch is already pending: don't reset the
+        # gate's pass_count (an auto-switch caller may re-request every tick).
+        if self.is_pending() and name == self._desired:
+            self._require_stop = require_stop
+            return True, f"{name!r} already requested"
         self._desired = name
+        self._require_stop = require_stop
         self._pass_count = 0
         self._settle_ticks = 0
         kind = "activate (idle->%s)" % name if self.is_idle() else f"switch {self._active!r}->{name!r}"
         self._log(f"[policy] requested {kind}")
         return True, f"requested {name!r}"
 
-    def _gate_ok(self, state: RobotState) -> bool:
-        """Stable standing moment: not commanded to move, base + joints still,
-        and upright. Pose-agnostic on purpose (see GateConfig)."""
+    def _gate_ok(self, state: RobotState, require_stop: bool = True) -> bool:
+        """Stable standing moment: base + joints still and upright, and (when
+        ``require_stop``) not commanded to move. Pose-agnostic on purpose (see
+        GateConfig). ``require_stop=False`` drops only the velocity-command veto
+        so a locomotion policy can engage while a cmd is held (fame->walk)."""
         g = self._gate
-        if np.linalg.norm(state.cmd) > g.cmd_eps:
+        if require_stop and np.linalg.norm(state.cmd) > g.cmd_eps:
             return False
         if np.linalg.norm(state.gyro) > g.gyro_eps:
             return False
@@ -127,7 +143,7 @@ class PolicyManager:
         if self.is_idle() or not self.is_pending():
             return None
         self._settle_ticks += 1
-        if self._gate_ok(state):
+        if self._gate_ok(state, self._require_stop):
             self._pass_count += 1
         else:
             self._pass_count = 0

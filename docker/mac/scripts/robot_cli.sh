@@ -76,11 +76,14 @@ rob_reach() {
 }
 
 # --- Lower-body locomotion (needs HAMS_LOWERBODY=switch) ------------------------
-# The switchable controller starts band-held idle; rob_stand engages FAME (stand
-# free), rob_walk hands over to the walk policy, rob_go drives /cmd_vel.
+# The switchable controller starts in FAME (stand) and auto-switches stand<->walk
+# from ||/cmd_vel||: any velocity command makes it walk; zero makes it stand. There
+# are no start services — rob_go drives /cmd_vel, rob_stop zeroes it (back to FAME).
 
-rob_stand() { ros2 service call /lowerbody/start_fame std_srvs/srv/Trigger; }  # stand (FAME)
-rob_walk()  { ros2 service call /lowerbody/start_walk std_srvs/srv/Trigger; }  # locomotion mode
+# rob_stand — command zero velocity; the controller auto-switches back to FAME.
+rob_stand() { ros2 topic pub --once /cmd_vel geometry_msgs/msg/Twist "{}" >/dev/null 2>&1; }
+# rob_walk — no-op: walk mode is entered automatically by commanding a velocity.
+rob_walk()  { echo "[rob_walk] send a velocity (rob_go ...) — walk engages automatically"; }
 
 # rob_go <vx> [vy] [wz] [secs]  — drive the walk policy (m/s, m/s, rad/s).
 # Publishes /cmd_vel at 20 Hz for `secs` (default 6). vx>0 forward, wz>0 turn left.
@@ -91,22 +94,20 @@ rob_go() {
         "{linear: {x: $vx, y: $vy}, angular: {z: $wz}}"
 }
 
-# rob_stop — zero velocity and switch back to FAME (stand still).
+# rob_stop — zero velocity; the controller auto-switches back to FAME (stand still).
 rob_stop() {
     ros2 topic pub --once /cmd_vel geometry_msgs/msg/Twist "{}" >/dev/null 2>&1
-    rob_stand
 }
 
 # rob_odom — current base position in the odom (world) frame.
 rob_odom() { timeout 5 ros2 topic echo /odom --field pose.pose.position --once; }
 
 # rob_explore — autonomous frontier-based exploration (needs HAMS_SLAM=1 HAMS_NAV2=1).
-# Engages walk mode, then sends the /skill/frontier_explore action, which repeatedly
-# navigates to the nearest unexplored frontier on the SLAM map until it's fully
-# mapped. Best after rob_stand (stable stance). Ctrl-C to stop (cancels the goal).
-# Watch the map grow in RViz (6081). A generous timeout bounds the whole run.
+# Sends the /skill/frontier_explore action, which repeatedly navigates to the nearest
+# unexplored frontier on the SLAM map until it's fully mapped. The controller
+# auto-switches to walk as soon as nav2 publishes /cmd_vel (no manual walk step) and
+# stands (FAME) between goals. Ctrl-C to stop (cancels the goal). Watch RViz (6081).
 rob_explore() {
-    ros2 service call /lowerbody/start_walk std_srvs/srv/Trigger >/dev/null 2>&1
     ros2 action send_goal /skill/frontier_explore \
         custom_ros_messages/action/SkillFrontierExplore \
         "{min_frontier_cells: 0, blacklist_radius: 0.0, min_goal_distance: 0.0, goal_timeout: 0.0, timeout: {sec: 1800, nanosec: 0}}" \
@@ -115,5 +116,5 @@ rob_explore() {
 
 echo "robot_cli loaded."
 echo "  postures : rob_pose t_pose | rob_grip right close"
-echo "  locomote : rob_stand -> rob_walk -> rob_go 0.4 0 0.3 (fwd+turn) -> rob_stop   (needs HAMS_LOWERBODY=switch)"
-echo "  explore  : rob_stand -> rob_explore   (autonomous frontier mapping; needs HAMS_SLAM=1 HAMS_NAV2=1)"
+echo "  locomote : rob_go 0.4 0 0.3 (fwd+turn) -> rob_stop   (auto stand<->walk; needs HAMS_LOWERBODY=switch)"
+echo "  explore  : rob_explore   (autonomous frontier mapping; needs HAMS_SLAM=1 HAMS_NAV2=1)"
