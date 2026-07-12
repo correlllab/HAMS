@@ -106,7 +106,7 @@ def generate_launch_description():
                        'switch': 'lowerbody_controller_node'}.get(lowerbody)
     if _lowerbody_exec:
         nodes.append(Node(
-            package='h12_lowerbody_controller',
+            package='h12_lowerbody_rl',
             executable=_lowerbody_exec,
             name=_lowerbody_exec,
             parameters=[sim_time_param],
