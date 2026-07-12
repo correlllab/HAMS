@@ -1,0 +1,157 @@
+# ==============================
+# Apple-Silicon (arm64) / CPU-only SLIM ROS 2 workspace image on hams_base.
+#
+# Deliberately NOT a port of the full RosDockerfile: it omits the x86-tuned,
+# exact-pinned vision / grasp ML stack (transformers, SAM3, CLIP, GraspGenX,
+# diffusers, ultralytics, open3d, viser) and the Nav2 / SLAM / FAST-LIO / rqt
+# layers. It carries only what the CORE robot bringup needs — robot_state_
+# publisher, joint_state_publisher, the Pink IK frame_task_server, and the
+# safety_node — plus the message packages and IK/QP backends they depend on.
+#
+# Build:  docker build -t hams_ros:latest -f docker/mac/RosDockerfile.slim.arm64 .
+# ==============================
+FROM hams_base:latest
+
+ARG http_proxy
+ARG https_proxy
+ENV http_proxy=${http_proxy}
+ENV https_proxy=${https_proxy}
+
+# -----------------------------------------------------------------------------
+# apt: colcon + ament/rosidl build system, message packages, TF, description +
+# launch tooling, and the C libs the ament_cmake message packages link against.
+# -----------------------------------------------------------------------------
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        pkg-config \
+        python3-colcon-common-extensions \
+        python3-rosdep \
+        python3-serial \
+        python3-numpy python3-scipy python3-yaml python3-transforms3d \
+        libeigen3-dev libyaml-cpp-dev \
+        ros-humble-ament-cmake \
+        ros-humble-ament-cmake-auto \
+        ros-humble-ament-cmake-python \
+        ros-humble-rosidl-default-generators \
+        ros-humble-action-msgs \
+        ros-humble-builtin-interfaces \
+        ros-humble-geometry-msgs \
+        ros-humble-sensor-msgs \
+        ros-humble-std-msgs \
+        ros-humble-std-srvs \
+        ros-humble-xacro \
+        ros-humble-robot-state-publisher \
+        ros-humble-joint-state-publisher \
+        ros-humble-launch-ros \
+        ros-humble-launch-xml \
+        ros-humble-tf2-ros \
+        ros-humble-tf2-eigen \
+        ros-humble-tf2-tools \
+    && rm -rf /var/lib/apt/lists/*
+
+# -----------------------------------------------------------------------------
+# Python: the Pink differential-IK stack + QP backends used by
+# h12_ros2_controller's frame_task_server. numpy<2 first so transitive
+# C-extension installs bind to the numpy 1.x ABI (matches apt scipy).
+# -----------------------------------------------------------------------------
+RUN pip install --no-cache-dir --ignore-installed blinker \
+        "numpy<2" \
+        "scikit-learn>=1.4" \
+        pin-pink \
+        qpsolvers \
+        quadprog \
+        proxsuite \
+        pyquaternion \
+        tqdm \
+        meshcat \
+        meshcat-shapes
+
+# -----------------------------------------------------------------------------
+# setuptools / wheel / numpy clamp — REQUIRED for colcon ament_python builds.
+# colcon's python_setup_py literal_eval chokes on setuptools>=70; wheel>=0.44
+# references a stub bdist_wheel module; numpy>=2 breaks the scipy/pinocchio ABI.
+# Mirrors RosDockerfile's step-7 clamp. The rm -rf clears stale .dist-info
+# ghosts left by layered uv/pip upgrades so importlib.metadata resolves the
+# pinned versions cleanly.
+# -----------------------------------------------------------------------------
+RUN rm -rf /usr/local/lib/python3.10/dist-packages/setuptools \
+           /usr/local/lib/python3.10/dist-packages/setuptools-*.dist-info \
+           /usr/local/lib/python3.10/dist-packages/pkg_resources \
+           /usr/local/lib/python3.10/dist-packages/pkg_resources-*.dist-info \
+           /usr/local/lib/python3.10/dist-packages/_distutils_hack \
+           /usr/local/lib/python3.10/dist-packages/wheel \
+           /usr/local/lib/python3.10/dist-packages/wheel-*.dist-info \
+    && pip install --no-cache-dir --no-deps "numpy<2" "setuptools==59.6.0" "wheel<0.44" \
+    && rm -f /usr/local/lib/python3.10/dist-packages/distutils-precedence.pth
+
+# FastDDS RMW for the ROS (rclpy) layer — arm64 coexistence fix (see the
+# matching block in RobocasaDockerfile.arm64). Nodes that also touch unitree
+# DDS (e.g. the safety_node's ChannelSubscriber) would otherwise load a second
+# CycloneDDS libddsc alongside rmw_cyclonedds_cpp and crash on arm64. rclpy runs
+# on FastDDS via RMW_IMPLEMENTATION=rmw_fastrtps_cpp (docker/mac/docker-compose.yml).
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ros-humble-rmw-fastrtps-cpp \
+    && rm -rf /var/lib/apt/lists/*
+
+# -----------------------------------------------------------------------------
+# Optional RViz + VNC/noVNC display stack (Apple-Silicon only).
+#
+# RViz2 is a Qt/OGRE OpenGL app; like the MuJoCo viewer it cannot forward its GL
+# window to macOS XQuartz (broken indirect GLX on Apple Silicon — see
+# RobocasaDockerfile.arm64). So we render RViz in-container with software GL
+# (llvmpipe, from libgl1-mesa-dri) into a virtual X display (Xvfb) and stream the
+# pixels out over VNC/noVNC on its OWN port (5901 / 6081), separate from the
+# robocasa MuJoCo viewer (5900 / 6080), so both can run at once.
+#
+# Enabled at runtime via HAMS_RVIZ=vnc (see launch_ros_mac.sh); with the default
+# HAMS_RVIZ=0 none of this runs and the image behaves exactly as before.
+# Appended late so it does not bust the colcon/message layers above.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ros-humble-rviz2 \
+        xvfb x11vnc novnc websockify fluxbox \
+        libgl1-mesa-dri x11-utils \
+    && rm -rf /var/lib/apt/lists/*
+
+# fluxbox's default style calls fbsetbg to set a wallpaper; with no wallpaper
+# setter installed it pops an xmessage "wallpaper cannot be set" error on the VNC
+# display. Replace fbsetbg with a shim that sets a solid root color via fbsetroot
+# (bundled with fluxbox) — clean background, no error dialog.
+RUN printf '#!/bin/sh\nexec fbsetroot -solid "#2b2b2b"\n' > /usr/bin/fbsetbg \
+    && chmod +x /usr/bin/fbsetbg
+
+# -----------------------------------------------------------------------------
+# rosidl DDS-IDL generator — needed to build unitree_hg (the Unitree message
+# package the lower-body walk/FAME controllers depend on). unitree_hg ships from
+# unitree_ros2/cyclonedds_ws and its CMake generates DDS IDL, which this
+# FastDDS-only slim image otherwise lacks. Only pulled in for the optional
+# lower-body stack (HAMS_LOWERBODY); torch is already present in the base image.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ros-humble-rosidl-generator-dds-idl \
+    && rm -rf /var/lib/apt/lists/*
+
+# 2D SLAM (optional, HAMS_SLAM=1): slam_toolbox builds an occupancy map from a
+# laserscan; pointcloud_to_laserscan flattens the Livox cloud into that scan.
+# Sim ground-truth /odom (from the mujoco bridge) is the odometry source, so no
+# FAST-LIO is needed.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ros-humble-slam-toolbox \
+        ros-humble-pointcloud-to-laserscan \
+    && rm -rf /var/lib/apt/lists/*
+
+# Optional autonomous navigation (HAMS_NAV2=1): the nav2 stack plans a
+# collision-free path on the SLAM map + lidar costmap and drives /cmd_vel (which
+# the walk policy follows). See nav2_config_mac.yaml.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ros-humble-nav2-bringup \
+    && rm -rf /var/lib/apt/lists/*
+
+# Overlay the colcon install in interactive shells so `docker exec … bash` sees
+# the same packages as the running bringup (incl. h1_bringup, so
+# `ros2 launch h1_bringup <TAB>` works). launch_ros_mac.sh builds to
+# /opt/core_ws/install (INSTALL_BASE, a named volume on the VM's native ext4 —
+# NOT the virtiofs-mounted /home/code/core_ws/install, which may hold a stale
+# host-side build). Source that same path here.
+RUN echo '[ -f /opt/core_ws/install/setup.bash ] && source /opt/core_ws/install/setup.bash' >> /root/.bashrc
+
+WORKDIR /home/code/core_ws
+
+CMD ["/home/code/h12_sim_scripts/launch_ros_mac.sh"]
