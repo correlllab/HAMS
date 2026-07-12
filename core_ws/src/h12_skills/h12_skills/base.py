@@ -43,7 +43,7 @@ from custom_ros_messages.action import FrameTask
 from custom_ros_messages.action import (
     SkillCloseDoor, SkillOpenDoor, SkillCloseLid, SkillOpenLid,
     SkillNavigate, SkillGrasp, SkillPickPlace, SkillPress, SkillSlideRack,
-    SkillTurnLever, SkillTwistKnob,
+    SkillTurnLever, SkillTwistKnob, SkillFrontierExplore,
 )
 from magpie_msgs.srv import SetGripperPosition, SetGripperForce
 from std_srvs.srv import Trigger
@@ -149,6 +149,7 @@ SKILL_ACTIONS = {
     'slide_rack':  (SkillSlideRack,  '/skill/slide_rack'),
     'turn_lever':  (SkillTurnLever,  '/skill/turn_lever'),
     'twist_knob':  (SkillTwistKnob,  '/skill/twist_knob'),
+    'frontier_explore': (SkillFrontierExplore, '/skill/frontier_explore'),
 }
 
 

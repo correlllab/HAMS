@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """h12 skills node: action servers for the RoboCasa-style atomic skills.
 
-Serves the 11 Skill* actions from custom_ros_messages on /skill/<name>. The
+Serves the 12 Skill* actions from custom_ros_messages on /skill/<name>. The
 shared machinery — the frame_task arm IK action, the per-arm gripper services,
 the gemini_query and sam_segment perception services, and the head-camera image
 cache — lives in SkillsBase (base.py); each skill's execute callback is a mixin
@@ -24,6 +24,7 @@ from .model_logging import ModelLogger, declare_logging_params
 from .skills import (
     OpenDoorSkill, CloseDoorSkill, OpenLidSkill, CloseLidSkill, NavigateSkill,
     GraspSkill, PickPlaceSkill, PressSkill, SlideRackSkill, TurnSkill,
+    FrontierExploreSkill,
 )
 
 
@@ -47,7 +48,7 @@ def _describe_msg(msg):
 
 class SkillsNode(SkillsBase, OpenDoorSkill, CloseDoorSkill, OpenLidSkill,
                  CloseLidSkill, NavigateSkill, GraspSkill, PickPlaceSkill,
-                 PressSkill, SlideRackSkill, TurnSkill):
+                 PressSkill, SlideRackSkill, TurnSkill, FrontierExploreSkill):
     def __init__(self):
         super().__init__()   # SkillsBase: clients, perception, motion primitives
 
@@ -72,6 +73,7 @@ class SkillsNode(SkillsBase, OpenDoorSkill, CloseDoorSkill, OpenLidSkill,
                                   'turn_lever', 'turn'),
             'twist_knob': partial(self._exec_turn, SKILL_ACTIONS['twist_knob'][0],
                                   'twist_knob', 'twist'),
+            'frontier_explore': self._exec_frontier_explore,
         }
         self.skill_servers = {
             name: ActionServer(

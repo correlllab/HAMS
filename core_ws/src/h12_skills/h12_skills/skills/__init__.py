@@ -14,9 +14,10 @@ from .pick_place import PickPlaceSkill
 from .press import PressSkill
 from .slide_rack import SlideRackSkill
 from .turn import TurnSkill
+from .frontier_explore import FrontierExploreSkill
 
 __all__ = [
     'OpenDoorSkill', 'CloseDoorSkill', 'OpenLidSkill', 'CloseLidSkill',
     'NavigateSkill', 'GraspSkill', 'PickPlaceSkill', 'PressSkill',
-    'SlideRackSkill', 'TurnSkill',
+    'SlideRackSkill', 'TurnSkill', 'FrontierExploreSkill',
 ]
