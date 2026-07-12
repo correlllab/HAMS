@@ -265,11 +265,19 @@ instructions above apply — use this section instead.
 
 ```bash
 # build both arm64 images (robocasa + ros); the base image builds automatically
-docker compose -f docker/mac/docker-compose.yml build
+docker/mac/scripts/docker_build_mac.sh      # or: docker_build_mac.sh robocasa | ros
 
-# headless (no viewer) — the default
+# headless (no viewer) — the default; brings BOTH services up together
 docker compose -f docker/mac/docker-compose.yml up
 ```
+
+`docker/mac/scripts/docker_run_mac.sh [robocasa|ros]` is the Mac counterpart of the
+x86 `docker/scripts/docker_run.sh` — it starts one service with a stable name
+(`hams_sim_robocasa` / `hams_ros`), a `bash`/`<cmd>` override, and the same
+`HAMS_DISPLAY`/`HAMS_RVIZ` env passthrough. Because it runs a single service, use
+it in two terminals (start `ros` promptly) or for one-off shells; prefer
+`docker compose … up` for the everyday paired sim so RoboCasa never runs alone
+(see the collapse warning below).
 
 The first run is slow (colcon builds the message + controller workspaces into
 named volumes); later runs are cached and fast. Both containers use
@@ -369,6 +377,23 @@ HAMS_LOWERBODY=switch HAMS_SLAM=1 HAMS_NAV2=1 HAMS_SPAWN_BACKOFF=1.5 \
 #   source /home/code/h12_sim_scripts/robot_cli.sh
 #   rob_stand    # FAME stand (wait ~15 s sim time for the tether to release)
 #   rob_explore  # walk handover + the /skill/frontier_explore action (autonomous mapping)
+```
+
+`rob_explore` is a shorthand; send the action directly if you want to tune the
+frontier params or watch feedback. Any field left at `0` falls back to the node
+default (shown in the comments):
+
+```bash
+ros2 action send_goal /skill/frontier_explore custom_ros_messages/action/SkillFrontierExplore \
+  "{min_frontier_cells: 6, blacklist_radius: 0.6, min_goal_distance: 0.7, goal_timeout: 120.0, timeout: {sec: 1800, nanosec: 0}}" \
+  --feedback
+# min_frontier_cells : ignore frontier clusters smaller than this   (0 -> 6)
+# blacklist_radius   : m; blacklist a failed goal within this radius (0 -> 0.6)
+# min_goal_distance  : m; skip frontiers closer than this            (0 -> 0.7)
+# goal_timeout       : s; cancel a single nav goal after this        (0 -> 120)
+# timeout            : overall exploration budget (Duration)         (0 -> node default)
+# Feedback streams phase / progress / frontiers_remaining; result is
+# success / message / goals_reached. Ctrl-C cancels the goal.
 ```
 
 `HAMS_SIM_ODOM=1` publishes the sim's ground-truth base odometry (`/odom` +
