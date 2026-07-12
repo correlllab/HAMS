@@ -31,3 +31,8 @@ mjpc_deploy_lowerbody_controller:
     imu_pitch_offset_deg: 1.6
     arm_aware: true
     drop_band: false            # no elastic band outside sim
+    # Planner rollout threadpool size. Matches the 12 P-cores (0-11) the desktop
+    # bringup pins this controller to via taskset; default 0 would spawn one
+    # thread per hardware CPU (28) and oversubscribe the reserved 12. Drop to
+    # ~10 if the RW-EKF estimator (also pinned to 0-11) starves under load.
+    plan_threads: 12

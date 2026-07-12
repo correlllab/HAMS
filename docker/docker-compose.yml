@@ -90,7 +90,7 @@ services:
     image: hams_ros:latest
     runtime: nvidia
     privileged: true
-    shm_size: 4g
+    shm_size: 16g
     network_mode: host
     stdin_open: true
     tty: true

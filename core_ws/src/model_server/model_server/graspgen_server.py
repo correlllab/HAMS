@@ -81,7 +81,14 @@ GRASPGEN_MARKER_LENGTH_M = 0.1146
 # when the gripper sweep volume comes within this distance of an obstacle, so a big
 # value (e.g. 5 cm) rejects grasps that merely pass NEAR the scene and can filter
 # everything; keep it small (near-contact only). Tune up only if grasps clip obstacles.
-COLLISION_THRESHOLD_M = 0.005
+# Loosened 5mm -> 2mm to ADMIT ROLLED grasps: the scene cloud is sparse (downsampled
+# to MAX_SCENE_POINTS), so 5mm is really a clearance band, not penetration — a rolled
+# gripper (fingers closing vertically) merely passes ~2-5mm from the support surface
+# and was being rejected, collapsing the output to upright (near-yaw-only) grasps.
+# Empirically 5mm returned 0 collision-free grasps on 3 of 4 recent calls; 2mm
+# restores a full roll spread AND un-breaks those calls. Raise back toward 5mm only
+# if grasps start clipping obstacles.
+COLLISION_THRESHOLD_M = 0.002
 # Scene points within this radius of the object cloud are treated as the object
 # (not obstacles) and dropped before the collision check. MUST be >=
 # COLLISION_THRESHOLD_M: a grasp brings the gripper within COLLISION_THRESHOLD_M
@@ -98,14 +105,25 @@ NUM_COLLISION_SAMPLES = 2000
 # more (parallel-jaw / magpie fingers reach ~0.11-0.19 m from the base).
 DUMMY_MESH_MIN_EXTENT_M = 0.05
 
-# Approach-direction filter: keep grasps whose +Z approach axis stays in the
-# executing arm's forward quadrant. Grasps are in the cloud frame (pelvis): +X
-# robot-forward, +Y robot-left, +Z up. The approach's forward cosine is the
-# x-component of the grasp's +Z column; keep a grasp iff it is >= this threshold
-# (0.0 = "not pointing back toward the robot"; larger = STRICTER / more head-on).
-# The lateral (+Y) side is gated per-arm (see _plan_cb); the vertical (+Z)
-# component is never constrained, so top-down / bottom-up approaches are kept.
-APPROACH_MIN_FORWARD_COS = 0.0
+# Approach-direction filter: the magpie gripper/arm can only orient the +Z approach
+# axis (col 2 of the grasp rotation, in the cloud/pelvis frame: +X robot-forward,
+# +Y robot-left, +Z up) inside a limited envelope, so grasps outside it are
+# unreachable and dropped. The approach direction is split into two independent
+# angles, each gated on its own (see _plan_cb):
+#   * PITCH — tilt of +Z above/below horizontal = asin(az), where az is the
+#     approach's z-component (col 2, row 2). Kept when |az| <= sin(APPROACH_MAX_
+#     PITCH_DEG). This rejects near-vertical (top-down / bottom-up) approaches the
+#     arm can't reach — the gripper Z bottoms out at ~35 deg down or up.
+#   * YAW — heading of +Z off robot-forward +X in the horizontal plane =
+#     atan2(ay, ax) (approach's y- and x-components). Kept when |yaw| <=
+#     APPROACH_MAX_YAW_DEG. A SYMMETRIC forward cone (both sides), so it also
+#     rejects sideways and behind-the-object approaches (|yaw| > 90).
+# The two gates are ANDed. Replaces the old single forward-cone (APPROACH_MAX_
+# ANGLE_DEG) plus per-arm lateral cut with an explicit pitch/yaw reach envelope.
+APPROACH_MAX_PITCH_DEG = 35.0   # max tilt of the +Z approach axis off horizontal (down or up)
+APPROACH_MAX_YAW_DEG = 45.0     # max heading of the +Z approach axis off robot-forward +X
+APPROACH_MAX_PITCH_SIN = math.sin(math.radians(APPROACH_MAX_PITCH_DEG))
+APPROACH_MAX_YAW_RAD = math.radians(APPROACH_MAX_YAW_DEG)
 
 # viser visualizer: a web GUI (http://localhost:VISER_PORT) that renders the scene
 # cloud, object cloud, and ranked grasps live alongside the RViz markers. The ros
@@ -405,43 +423,40 @@ class GraspGenServer(Node):
         # print(f"{grasps.shape=}")
         # print("\n\n\n")
         # Approach-direction filter, in `frame` (pelvis: +x forward, +y left, +z up).
-        # Keep grasps whose +Z approach axis (col 2) lies in the executing arm's
-        # forward quadrant: forward (ax >= threshold, i.e. not back toward the robot)
-        # AND on the arm's lateral side — right arm sweeps forward..+y(left) so ay>=0,
-        # left arm sweeps forward..-y(right) so ay<=0. The vertical component (az) is
-        # never constrained, so a near-vertical (top-down / bottom-up) approach has
-        # ax,ay ~ 0 and passes for either arm. Done before collision filtering —
-        # cheaper to discard wrong-direction grasps before the GPU cdist.
+        # Keep grasps whose +Z approach axis (col 2) lies inside the gripper's reach
+        # envelope: pitch (tilt off horizontal) within APPROACH_MAX_PITCH_DEG AND yaw
+        # (heading off +X) within APPROACH_MAX_YAW_DEG. Pitch rejects near-vertical
+        # (top-down / bottom-up) approaches the arm can't reach; yaw keeps a
+        # symmetric forward cone and rejects sideways / behind approaches. Done
+        # before collision filtering — cheaper to discard out-of-envelope grasps
+        # before the GPU cdist.
         arm = (request.arm or '').strip().lower()
-        ax = grasps[:, 0, 2]            # approach forward (+x) component
-        ay = grasps[:, 1, 2]            # approach lateral (+y = robot-left) component
-        keep_forward = ax >= APPROACH_MIN_FORWARD_COS
-        if arm == 'right':
-            keep_side = ay >= 0.0       # forward..+y (left) sector
-            side_desc = 'forward..+y(left)'
-        elif arm == 'left':
-            keep_side = ay <= 0.0       # forward..-y (right) sector
-            side_desc = 'forward..-y(right)'
-        else:                          # unknown/empty arm -> forward half, no lateral cut
-            keep_side = np.ones(len(grasps), dtype=bool)
-            side_desc = 'forward-half'
-            self.get_logger().warn(
-                f'approach filter: unknown arm {request.arm!r}; lateral cut skipped')
-        keep_approach = keep_forward & keep_side
+        ax = grasps[:, 0, 2]            # approach +x (forward) component
+        ay = grasps[:, 1, 2]            # approach +y (robot-left) component
+        az = grasps[:, 2, 2]            # approach +z (up) component
+        keep_pitch = np.abs(az) <= APPROACH_MAX_PITCH_SIN
+        keep_yaw = np.abs(np.arctan2(ay, ax)) <= APPROACH_MAX_YAW_RAD
+        keep_approach = keep_pitch & keep_yaw
         n_before = len(grasps)
         rec.set(arm=arm or 'unknown',
                 n_approach_kept=int(keep_approach.sum()),
-                n_approach_rejected=int(n_before - keep_approach.sum()))
+                n_approach_rejected=int(n_before - keep_approach.sum()),
+                n_pitch_rejected=int((~keep_pitch).sum()),
+                n_yaw_rejected=int((~keep_yaw).sum()))
         self.get_logger().info(
             f'approach filter [{arm or "unknown"}]: {int(keep_approach.sum())}/{n_before} '
-            f'kept (ax>={APPROACH_MIN_FORWARD_COS}, {side_desc})')
+            f'kept (pitch<={APPROACH_MAX_PITCH_DEG:.0f}deg off-horizontal, '
+            f'yaw<=+/-{APPROACH_MAX_YAW_DEG:.0f}deg off +X; '
+            f'rejected {int((~keep_pitch).sum())} pitch, {int((~keep_yaw).sum())} yaw)')
         if not keep_approach.any():
             # Mirror the collision-filter empty path so the failure is inspectable:
             # render the rejected grasps (no obstacles) before returning.
             self._render_viser(pts, np.empty((0, 3)), grasps, confs, gr.info, obb_dict)
             self._save_grasp_viz(rec, pts, grasps, width)
-            response.success, response.message = False, \
-                f'no grasps in the {arm or "forward"} approach sector ({side_desc})'
+            response.success, response.message = False, (
+                f'no grasps within the approach envelope '
+                f'(pitch<={APPROACH_MAX_PITCH_DEG:.0f}deg, '
+                f'yaw<=+/-{APPROACH_MAX_YAW_DEG:.0f}deg off +X)')
             rec.finish(success=False, message=response.message)
             return response
         grasps, confs = grasps[keep_approach], confs[keep_approach]

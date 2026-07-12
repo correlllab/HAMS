@@ -3,7 +3,7 @@
 yolo_server — ROS 2 pub/sub node for open-vocabulary object detection.
 
 Subscribes to one or more `sensor_msgs/CompressedImage` topics and, on a fixed
-timer (default 1 Hz), runs the most recent frame of each topic through a
+timer (default 5 Hz), runs the most recent frame of each topic through a
 self-contained Ultralytics YOLO-World wrapper (see YoloWorld below) and publishes
 a `custom_ros_messages/DetectionBundle` on that subscriber's OWN output topic —
 one detection topic per image topic. Each bundle echoes the source image in
@@ -24,7 +24,7 @@ Parameters:
                               image_topics. If empty (or a length mismatch), each
                               output is derived as "<image_topic>/detections".
   queries           string[]  open-vocabulary class prompts (e.g. ['bottle','cup']).
-  publish_rate_hz   double    per-topic inference/publish rate (default 1.0).
+  publish_rate_hz   double    per-topic inference/publish rate (default 5.0).
   conf_threshold    double    detection confidence threshold (default 0.90).
   nms_iou           double    NMS IoU threshold (default 0.01).
   enable_logging / enable_visualization / clear_logs — see model_logging.
@@ -74,7 +74,7 @@ YOLO_NMS_IOU = 0.01
 # (txt_feats) as FP32; with half=True the image branch runs FP16 and the detection
 # head then multiplies a Half activation by a Float text embedding, raising
 # "expected scalar type Float but found Half". Keeping the whole graph FP32 avoids
-# that dtype mismatch. At ~1 Hz across a few cameras the FP16 speedup is irrelevant.
+# that dtype mismatch. At ~5 Hz across a few cameras the FP16 speedup is irrelevant.
 YOLO_HALF = False
 
 # Defaults for the pub/sub wiring (all overridable via ROS params, see below).
@@ -92,7 +92,7 @@ DEFAULT_IMAGE_TOPICS = [
 # the checkpoint's training labels exactly.
 DEFAULT_QUERIES = ["Bolt", "BusBar", "InteriorScrew", "Nut", "OrageCover",
                    "Screw", "ScrewHole"]
-DEFAULT_PUBLISH_RATE_HZ = 1.0
+DEFAULT_PUBLISH_RATE_HZ = 5.0
 # Suffix appended to an image topic to derive its detection topic when
 # `detection_topics` is not supplied explicitly.
 DETECTION_TOPIC_SUFFIX = "/detections"
@@ -346,7 +346,10 @@ class YoloServer(Node):
         rec.set(n_detections=n, detections_per_query=per_query,
                 best_score=float(scores[0]) if n else 0.0,
                 image_hw=[int(H), int(W)])
-        self.get_logger().info(
+        # Per-frame result line — debug so it doesn't spam the console at the
+        # default level (run with --log-level debug to see it). The same counts
+        # are recorded on `rec` above for the metrics log.
+        self.get_logger().debug(
             f"{channel.detection_topic}: {n} detection(s) for "
             f"{len(queries)} quer(ies) per_query={per_query}" if n else
             f"{channel.detection_topic}: no detections for queries={queries}")

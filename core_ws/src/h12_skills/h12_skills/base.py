@@ -10,8 +10,9 @@ listener, the executor-safe service/action call plumbing (_call_service /
 _send_action / _wait_future), and the `_Run` per-goal execution context.
 
 Perception pipeline helpers (`query_gemini`, `segment`, `mask_to_cloud`,
-`plan_grasp`) and the motion primitives (`move_frame_to`, gripper ops) are
-implemented here; each skill under skills/ composes them in its `_exec_*` mixin.
+`detect_object_cloud`, `plan_grasp`) and the motion primitives (`move_frame_to`,
+gripper ops) are implemented here; each skill under skills/ composes them in its
+`_exec_*` mixin.
 SkillsNode (node.py) multiply-inherits from SkillsBase plus every skill mixin.
 """
 
@@ -36,6 +37,7 @@ from std_msgs.msg import Header
 from sensor_msgs_py import point_cloud2
 from tf2_ros import Buffer, TransformBroadcaster, TransformListener, TransformException
 
+from custom_ros_messages.msg import DetectionBundle
 from custom_ros_messages.srv import GeminiQuery, SamSegment, GraspGen
 from custom_ros_messages.action import FrameTask
 from custom_ros_messages.action import (
@@ -49,6 +51,7 @@ from std_srvs.srv import Trigger
 from .perception_utils import (
     decode_compressed_depth_image, deproject_mask, transform_points,
     transform_to_matrix, pose_to_matrix, matrix_to_pose, quat_geodesic,
+    extract_json,
 )
 
 
@@ -57,6 +60,19 @@ CAMERA_NS = '/realsense/head'
 COLOR_IMAGE_TOPIC = f'{CAMERA_NS}/color/image_raw/compressed'
 DEPTH_IMAGE_TOPIC = f'{CAMERA_NS}/aligned_depth_to_color/image_raw/compressedDepth'
 CAMERA_INFO_TOPIC = f'{CAMERA_NS}/color/camera_info'
+# yolo_server's per-camera DetectionBundle output for the head color frame (it
+# derives '<image_topic>/detections'). Bbox pixels are in this color frame's grid,
+# so they line up directly with the aligned depth cache for back-projection. Feeds
+# the battery-object top-down grasp (skills/grasp.py) which skips gemini/sam/graspgen.
+DETECTION_TOPIC = f'{COLOR_IMAGE_TOPIC}/detections'
+# Per-arm HAND-camera DetectionBundle topics (same yolo_server, one channel per
+# camera; the hand cameras publish RECTIFIED color, so the '.../image_rect_raw'
+# stem differs from the head). The battery grasp reads the relevant arm's hand
+# detections once the GraspGenX frame is parked above the object.
+ARM_DETECTION_TOPICS = {
+    'left':  '/realsense/left_hand/color/image_rect_raw/compressed/detections',
+    'right': '/realsense/right_hand/color/image_rect_raw/compressed/detections',
+}
 
 # GraspGenX gripper-BASE frames (URDF frames whose axes match the GraspGenX
 # planning convention: +Z approach, +X finger-close, origin at the magpie gripper
@@ -81,6 +97,23 @@ DEFAULT_SKILL_TIMEOUT = 300.0
 # grasp detection can take ~3 min to answer — far beyond _call_service's 30s
 # default — so give GeminiQuery its own generous ceiling.
 GEMINI_TIMEOUT_SEC = 240.0
+
+# Ask Gemini for a box that fully ENCOMPASSES the whole object — this box is a
+# prompt for a segmentation model (SAM), which needs a box around the entire
+# target so its mask captures the full object cloud the downstream consumer
+# (GraspGenX planning, place-target localization) works on. Same
+# [y1,x1,y2,x2]-normalized-to-1000 convention the vision pipeline uses.
+GEMINI_GRASP_PROMPT = (
+    'Locate the {obj} so a segmentation model can be prompted with a bounding box. '
+    'Return a JSON array with exactly one box that FULLY ENCOMPASSES the entire '
+    '{obj} — every visible part of it (including any handle, spout, lid, or other '
+    'protrusion) must fall inside the box, with the edges snug to the object\'s '
+    'outermost extent. Do not box just one part and do not crop the object: '
+    '[{{"box_2d": [y1, x1, y2, x2], "label": "{obj}", "score": 0.9}}], integer '
+    'coordinates normalized to 0-1000 with y first. Always return a 4-number '
+    '"box_2d" bounding box — never a single point. '
+    'If the {obj} is not visible, return [].'
+)
 # Depth back-projection range [m] and the floor on usable object points.
 # Keep MIN_GRASP_POINTS in sync with graspgen_server.MIN_OBJECT_POINTS so a cloud
 # the server would reject is dropped client-side with an accurate message.
@@ -238,6 +271,19 @@ class SkillsBase(Node):
         self.frame_task_cli = ActionClient(
             self, FrameTask, '/frame_task', callback_group=self._cb_group)
 
+        # --- in-process skill composition ---------------------------------------
+        # pick_place drives the grasp through this node's OWN /skill/grasp action
+        # server (the ReentrantCallbackGroup + MultiThreadedExecutor make the
+        # nested call safe). No wait_for_server at startup: the server comes up
+        # with this same node. Because caller and server share the process, extra
+        # per-call parameters and rich results travel on the instance instead of
+        # the (unchanged) action message — see skills/grasp.py for the contract.
+        self.grasp_skill_cli = ActionClient(
+            self, SkillGrasp, SKILL_ACTIONS['grasp'][1],
+            callback_group=self._cb_group)
+        self._grasp_overrides = None      # consumed-once per-goal grasp options
+        self._last_grasp_outcome = None   # GraspOutcome of the last generic grasp
+
         # --- TF listener + broadcaster ----------------------------------------
         self.tf_buffer = Buffer()
         self.tf_listener = TransformListener(self.tf_buffer, self)
@@ -255,6 +301,8 @@ class SkillsBase(Node):
         self._latest_image = None      # color CompressedImage (for gemini/sam)
         self._latest_depth = None      # aligned depth CompressedImage (mm)
         self._latest_caminfo = None    # color CameraInfo (intrinsics + frame)
+        self._latest_detections = None  # head-camera YOLO DetectionBundle
+        self._latest_arm_detections = {arm: None for arm in ARM_DETECTION_TOPICS}
         self.create_subscription(
             CompressedImage, COLOR_IMAGE_TOPIC, self._on_color_image,
             qos_profile_sensor_data, callback_group=self._cb_group)
@@ -264,6 +312,14 @@ class SkillsBase(Node):
         self.create_subscription(
             CameraInfo, CAMERA_INFO_TOPIC, self._on_caminfo,
             qos_profile_sensor_data, callback_group=self._cb_group)
+        self.create_subscription(
+            DetectionBundle, DETECTION_TOPIC, self._on_detections,
+            qos_profile_sensor_data, callback_group=self._cb_group)
+        for arm, topic in ARM_DETECTION_TOPICS.items():
+            self.create_subscription(
+                DetectionBundle, topic,
+                lambda msg, a=arm: self._on_arm_detections(a, msg),
+                qos_profile_sensor_data, callback_group=self._cb_group)
 
         # Wait for the underlying endpoints (non-fatal).
         self.get_logger().info('Waiting for gemini/sam/graspgen, grippers, frame_task...')
@@ -289,6 +345,14 @@ class SkillsBase(Node):
         """Cache the latest color CameraInfo (intrinsics + optical frame id)."""
         self._latest_caminfo = msg
 
+    def _on_detections(self, msg: DetectionBundle):
+        """Cache the latest head-camera YOLO DetectionBundle (battery grasp input)."""
+        self._latest_detections = msg
+
+    def _on_arm_detections(self, arm, msg: DetectionBundle):
+        """Cache the latest hand-camera YOLO DetectionBundle for `arm`."""
+        self._latest_arm_detections[arm] = msg
+
     def latest_image(self):
         """Most recent head-camera color frame (sensor_msgs/CompressedImage), or None."""
         return self._latest_image
@@ -296,6 +360,14 @@ class SkillsBase(Node):
     def latest_caminfo(self):
         """Most recent color CameraInfo, or None."""
         return self._latest_caminfo
+
+    def latest_detections(self):
+        """Most recent head-camera YOLO DetectionBundle, or None."""
+        return self._latest_detections
+
+    def latest_arm_detections(self, arm):
+        """Most recent hand-camera YOLO DetectionBundle for `arm`, or None."""
+        return self._latest_arm_detections.get(arm)
 
     # --------------------------------------------------------------- debug TF
     def publish_tf(self, transform):
@@ -427,6 +499,62 @@ class SkillsBase(Node):
             return None
         return resp.mask
 
+    def _gemini_box(self, obj, run, gh):
+        """Query Gemini for one bounding box of `obj`; return pixel [x1,y1,x2,y2]
+        or None (SAM then uses the text prompt alone). The call is capped
+        at the skill's remaining time budget (never longer than GEMINI_TIMEOUT_SEC)
+        and `gh` is threaded through so a goal cancel aborts it promptly."""
+        timeout = min(GEMINI_TIMEOUT_SEC, run.remaining())
+        txt = self.query_gemini(GEMINI_GRASP_PROMPT.format(obj=obj),
+                                timeout_sec=timeout, outer_gh=gh)
+        data = extract_json(txt)
+        entry = None
+        if isinstance(data, list) and data:
+            entry = data[0]
+        elif isinstance(data, dict):
+            entry = data
+        if not isinstance(entry, dict) or 'box_2d' not in entry:
+            return None
+        info = self.latest_caminfo()
+        if info is None or not info.width or not info.height:
+            return None
+        try:
+            y1, x1, y2, x2 = (float(v) for v in entry['box_2d'])
+        except (ValueError, TypeError):
+            return None
+        w, h = info.width, info.height
+        px1, px2 = sorted((x1 / 1000.0 * w, x2 / 1000.0 * w))
+        py1, py2 = sorted((y1 / 1000.0 * h, y2 / 1000.0 * h))
+        return [px1, py1, px2, py2]
+
+    def detect_object_cloud(self, obj, run, gh):
+        """Locate `obj` in the head camera: gemini box (optional, budget-capped)
+        -> sam mask -> pelvis-frame object cloud, plus the whole-frame scene
+        cloud as obstacle context. Returns (obj_cloud, scene_cloud, None) on
+        success or (None, None, reason). Shared by the grasp skill (pick object)
+        and pick_place (place target).
+
+        Always prompts SAM with the object name; when Gemini returns a box that
+        encompasses the whole object, it is passed too as a positive exemplar so
+        text + box together pin down the right instance. The box is optional —
+        the text alone (concept segmentation) is the fallback when Gemini has no
+        box. Gemini latency is highly variable (seconds to minutes) and None is
+        also a legitimate "no box", so cancel/timeout is disambiguated here
+        before spending the SAM call."""
+        box = self._gemini_box(obj, run, gh)   # whole-object box (pixel xyxy), or None
+        if gh.is_cancel_requested or run.remaining() <= 0.0:
+            return None, None, 'detection canceled or timed out'
+        mask = self.segment(text=obj, positive_boxes=box, outer_gh=gh)
+        if mask is None:
+            return None, None, f'no mask for {obj!r}'
+        obj_cloud = self.mask_to_cloud(mask, target_frame='pelvis')
+        if obj_cloud is None:
+            return None, None, f'{obj!r} mask produced no usable cloud'
+        # Whole-frame cloud as obstacle context so graspgen can collision-filter
+        # grasps against the surroundings (optional — None just skips filtering).
+        scene = self.scene_to_cloud(target_frame='pelvis')
+        return obj_cloud, scene, None
+
     def _depth_to_cloud(self, mask, target_frame):
         """Back-project `mask` (bool HxW over the color grid, or None for every
         valid pixel) with the latest aligned depth/intrinsics into (N, 3) points
@@ -513,22 +641,34 @@ class SkillsBase(Node):
 
     # ------------------------------------------------------- motion primitives
     def move_frame_to(self, frame, pose,
-                      outer_gh=None, duration_sec=3,):
-        """Send a frame to (x, y, z) in the pelvis frame via /frame_task. Defaults
-        to the arm's grip-site frame; pass `frame` to drive a different URDF frame
-        (e.g. GRASP_FRAMES[arm], the GraspGenX gripper-base frame, for grasping).
-        Pass the skill's goal handle as outer_gh so a skill cancel promptly cancels
-        the in-flight frame_task goal too."""
-        frame_name = frame
-        goal = FrameTask.Goal()
-        goal.frame_names = [frame_name]
-        x, y, z = pose.position.x, pose.position.y, pose.position.z
+                      outer_gh=None, duration_sec=3, do_plan=True):
+        """Send a frame to `pose` (position + orientation, in the pelvis frame) via
+        /frame_task as a single combined move to the full target pose (target
+        position + target orientation reached together).
+
+        Defaults to the arm's grip-site frame; pass `frame` to drive a different
+        URDF frame (e.g. GRASP_FRAMES[arm], the GraspGenX gripper-base frame, for
+        grasping). Pass the skill's goal handle as outer_gh so a skill cancel
+        promptly cancels the in-flight frame_task goal too. Returns whether the
+        move reached the target."""
+        x, y, z = float(pose.position.x), float(pose.position.y), float(pose.position.z)
         quat = (pose.orientation.x, pose.orientation.y, pose.orientation.z, pose.orientation.w)
-        pose = Pose()
-        pose.position = Point(x=float(x), y=float(y), z=float(z))
-        pose.orientation = Quaternion(
+        target = Pose()
+        target.position = Point(x=x, y=y, z=z)
+        target.orientation = Quaternion(
             x=float(quat[0]), y=float(quat[1]), z=float(quat[2]), w=float(quat[3]))
+        return self._send_frame_move(frame, target, duration_sec, outer_gh, do_plan)
+
+    def _send_frame_move(self, frame, pose, duration_sec, outer_gh, do_plan):
+        """Command ONE /frame_task goal: drive `frame` to `pose` (a Pose already in
+        the pelvis frame) over `duration_sec`, returning whether it reached the
+        target (gated on the server's streamed IK convergence). The building block
+        for move_frame_to."""
+        goal = FrameTask.Goal()
+        goal.frame_names = [frame]
         goal.frame_targets = [pose]
+        goal.plan = do_plan
+        x, y, z = pose.position.x, pose.position.y, pose.position.z
         # Preserve fractional seconds (int() truncation silently shortened the
         # motion budget, e.g. 1.8s -> 1s).
         whole = int(duration_sec)
@@ -536,8 +676,7 @@ class SkillsBase(Node):
             sec=whole, nanosec=int(round((float(duration_sec) - whole) * 1e9)))
 
         self.get_logger().info(
-            f'frame_task: {frame_name} -> ({x:.3f}, {y:.3f}, {z:.3f}) '
-            f'in {duration_sec}s')
+            f'frame_task: {frame} -> ({x:.3f}, {y:.3f}, {z:.3f}) in {duration_sec}s')
 
         # Log the frame_task server's streamed IK convergence (errors_linear /
         # errors_angular, one entry per driven frame) so a skill's approach/contact
@@ -551,7 +690,7 @@ class SkillsBase(Node):
             last['lin'] = max(fb.errors_linear) if fb.errors_linear else 0.0
             last['ang'] = max(fb.errors_angular) if fb.errors_angular else 0.0
             self.get_logger().info(
-                f'frame_task[{frame_name}] converging: '
+                f'frame_task[{frame}] converging: '
                 f'lin={last["lin"] * 1000:.1f}mm ang={last["ang"]:.3f}rad',
                 throttle_duration_sec=0.5)
 
@@ -567,7 +706,7 @@ class SkillsBase(Node):
             ok = last['lin'] < 0.01 and last['ang'] < 0.05
         if last:
             self.get_logger().info(
-                f'frame_task[{frame_name}] done: lin={last["lin"] * 1000:.1f}mm '
+                f'frame_task[{frame}] done: lin={last["lin"] * 1000:.1f}mm '
                 f'ang={last["ang"]:.3f}rad success={ok}')
         return ok
 
@@ -604,7 +743,8 @@ class SkillsBase(Node):
 
     def servo_frame_to_world(self, frame, world_pose, fallback_pose, outer_gh=None,
                              duration_sec=10.0, max_iter=SERVO_ITER,
-                             lin_tol=SERVO_LIN_TOL, ang_tol=SERVO_ANG_TOL):
+                             lin_tol=SERVO_LIN_TOL, ang_tol=SERVO_ANG_TOL,
+                             do_plan=True):
         """Drive `frame` to `world_pose` (a Pose in WORLD_FRAME), compensating for
         pelvis drift during the motion. Each iteration re-resolves the fixed world
         target into the LIVE pelvis frame, commands frame_task there, then MEASURES
@@ -616,13 +756,17 @@ class SkillsBase(Node):
 
         If `world_pose` is None (no world anchor — navigation/odom down) or the
         world TF drops mid-servo, falls back to ONE direct pelvis move to
-        `fallback_pose` so the skill still works without drift compensation."""
+        `fallback_pose` so the skill still works without drift compensation.
+
+        `do_plan` is forwarded to every frame_task move: pass False for a short,
+        committed straight-in move (e.g. pre-grasp -> contact) where collision-aware
+        planning would fight the intended approach into the object."""
         if world_pose is None:
             self.get_logger().warn(
                 f'servo[{frame}]: no {WORLD_FRAME} anchor; direct pelvis move '
                 '(pelvis-drift compensation OFF)')
             return self.move_frame_to(frame, fallback_pose, outer_gh=outer_gh,
-                                      duration_sec=duration_sec)
+                                      duration_sec=duration_sec, do_plan=do_plan)
         tp = np.array([world_pose.position.x, world_pose.position.y,
                        world_pose.position.z])
         tq = (world_pose.orientation.x, world_pose.orientation.y,
@@ -636,10 +780,10 @@ class SkillsBase(Node):
                 self.get_logger().warn(
                     f'servo[{frame}]: lost {WORLD_FRAME} TF; pelvis fallback')
                 return self.move_frame_to(frame, fallback_pose, outer_gh=outer_gh,
-                                          duration_sec=duration_sec)
+                                          duration_sec=duration_sec, do_plan=do_plan)
             dur = duration_sec if i == 0 else 3.0   # iter 0 = full approach; later = drift fixes
             ok = self.move_frame_to(frame, pelvis_pose, outer_gh=outer_gh,
-                                    duration_sec=dur)
+                                    duration_sec=dur, do_plan=do_plan)
             lin, ang = self._world_frame_error(frame, tp, tq)
             if lin is None:                    # could not measure -> pelvis-frame result
                 return ok

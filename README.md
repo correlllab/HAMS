@@ -137,7 +137,7 @@ silently drops datagrams. Lost DDS fragments mean whole point-cloud/image
 samples stall or drop — topics go laggy even though the network isn't full. The
 tell is `RcvbufErrors` climbing in `/proc/net/snmp`.
 
-Two settings fix this and **both are required**:
+Three settings fix this and **all are required**:
 
 1. **Host kernel buffers.** The containers run `network_mode: host`, so these
    are the host's `net.core` sysctls. CycloneDDS can only *request* a large
@@ -165,6 +165,30 @@ Two settings fix this and **both are required**:
    bind-mounts it to `/home/code/cyclonedds.xml` and sets
    `CYCLONEDDS_URI=file:///home/code/cyclonedds.xml`. Edit the file and restart
    the container to change the tuning (e.g. to pin the DDS network interface).
+
+3. **Pin the NIC IRQ off the real-time cores.** `eno1` has a single RX queue, so
+   *all* inbound DDS traffic is processed in one `NET_RX` softirq on whichever core
+   holds its IRQ. `irqbalance` parks that IRQ on core 11 — inside the MJPC planner's
+   `0-11` set — so under a balance run the robot's 500 Hz `/lowstate` stream arrives
+   at niraj at only ~400 Hz with multi-second stalls (tf fades in rviz, the lowerbody
+   controller trips its state-stale safe-hold). The wire and the robot are fine; the
+   loss is this single-core contention. Move the IRQ onto a dedicated core off the RT
+   set (0–12) and stop irqbalance from moving it back. For the current session:
+
+   ```bash
+   sudo systemctl stop irqbalance
+   echo 13 | sudo tee /proc/irq/$(awk -F: '/eno1/{gsub(/ /,"",$1);print $1}' /proc/interrupts)/smp_affinity_list
+   ```
+
+   To persist, `sudo systemctl disable --now irqbalance` and run `scripts/pin_net_irq.sh`
+   at boot (it derives the IRQ, pins it, and prints a ready-made systemd unit). The
+   launch's CPU map reserves core 13 for exactly this — `OTHER_CPUS` starts at 14 so
+   no ROS node lands on the network core, and the estimator has core 12. Confirm the
+   softirq moved (counts should now grow on core 13, not 11):
+
+   ```bash
+   grep NET_RX /proc/softirqs
+   ```
 
 Verify under load — `RcvbufErrors` should stop climbing:
 
