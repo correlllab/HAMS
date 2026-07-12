@@ -49,9 +49,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # -----------------------------------------------------------------------------
-# Python: the Pink differential-IK stack + QP backends used by
-# h12_ros2_controller's frame_task_server. numpy<2 first so transitive
-# C-extension installs bind to the numpy 1.x ABI (matches apt scipy).
+# Python: the Pink differential-IK stack + QP backends + OMPL path planning used
+# by h12_ros2_controller's frame_task_server. numpy<2 first so transitive
+# C-extension installs bind to the numpy 1.x ABI (matches apt scipy). OMPL ships
+# a manylinux2014_aarch64 wheel, so it installs on arm64 with no source build.
 # -----------------------------------------------------------------------------
 RUN pip install --no-cache-dir --ignore-installed blinker \
         "numpy<2" \
@@ -60,6 +61,7 @@ RUN pip install --no-cache-dir --ignore-installed blinker \
         qpsolvers \
         quadprog \
         proxsuite \
+        "ompl==2.0.1" \
         pyquaternion \
         tqdm \
         meshcat \

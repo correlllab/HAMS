@@ -85,9 +85,9 @@ RUN git clone --depth 1 https://github.com/Livox-SDK/Livox-SDK2.git /tmp/Livox-S
     rm -rf /tmp/Livox-SDK2
 
 # -----------------------------------------------------------------------------
-# 3. Python: controller / IK stack (Pink differential IK + QP backends, viz).
-#    numpy<2 is forced first so transitive C-extension installs bind to the
-#    numpy 1.x ABI matching apt scipy 1.8 / pinocchio.
+# 3. Python: controller / IK stack (Pink differential IK + QP backends, viz,
+#    OMPL path planning). numpy<2 is forced first so transitive C-extension
+#    installs bind to the numpy 1.x ABI matching apt scipy 1.8 / pinocchio.
 #    `--ignore-installed blinker` works around apt's old python3-blinker that
 #    pip cannot cleanly uninstall.
 # -----------------------------------------------------------------------------
@@ -98,6 +98,7 @@ RUN pip install --no-cache-dir --ignore-installed blinker \
         qpsolvers \
         quadprog \
         proxsuite \
+        "ompl==2.0.1" \
         meshcat \
         meshcat-shapes \
         pyquaternion \
