@@ -291,7 +291,8 @@ def _robot_env_contacts(model, data, prefixes=("robot0_", "gripper0_")):
     return out
 
 
-def place_robot_collision_free(env, base_pos, base_quat, step=0.02, max_iters=25, clearance=0.02):
+def place_robot_collision_free(env, base_pos, base_quat, step=0.02, max_iters=25,
+                               clearance=0.02, extra_backoff=0.0):
     """Place the robot collision-free at spawn by backing it away from whatever it
     overlaps.
 
@@ -304,7 +305,13 @@ def place_robot_collision_free(env, base_pos, base_quat, step=0.02, max_iters=25
     Tracks the least-penetrating position seen (fewest contacts, then least total
     depth). If still colliding after max_iters, restores that best position and
     warns (best-effort), so the sim still launches. Self-collisions at the zero
-    pose are not addressed here — translation can't fix them."""
+    pose are not addressed here — translation can't fix them.
+
+    extra_backoff: after clearing the spawn collision, keep backing off up to this
+    many more metres (stopping before a new collision behind) so the robot stands
+    in OPEN FLOOR with room in front — needed for nav2, which rejects a goal when
+    the robot's start cell is occupied. Default 0 keeps the robot at the counter
+    for manipulation reach."""
     back = _backward_dir(base_quat)
     model = env.sim.model._model
     data = env.sim.data._data
@@ -319,6 +326,17 @@ def place_robot_collision_free(env, base_pos, base_quat, step=0.02, max_iters=25
         if not contacts:
             if i:
                 print(f"[h1_2_robosuite] moved robot back {i * step:.2f} m to clear spawn collision")
+            if extra_backoff > 0.0:
+                last_clear, moved = pos.copy(), 0.0
+                for _ in range(int(extra_backoff / step)):
+                    pos[:2] += step * back[:2]
+                    place_robot_clear(env, pos, base_quat, clearance)
+                    if _robot_env_contacts(model, data):
+                        break
+                    last_clear, moved = pos.copy(), moved + step
+                place_robot_clear(env, last_clear, base_quat, clearance)
+                if moved:
+                    print(f"[h1_2_robosuite] backed robot {moved:.2f} m further into open floor (nav spawn)")
             return
         pos[:2] += step * back[:2]
     place_robot_clear(env, best_pos, base_quat, clearance)  # restore least-penetrating try

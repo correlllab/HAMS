@@ -1,5 +1,6 @@
 import argparse
 import math
+import os
 import random
 import threading
 import time
@@ -99,7 +100,6 @@ def sim_loop(task, viewer=True, layout=None, style=None, seed=None):
     drives it; RoboCasa's _check_success/reward/lang are read off the shared env.
     """
 
-
     create_kwargs = {}
     if layout is not None:
         create_kwargs["layout_ids"] = layout
@@ -129,9 +129,14 @@ def sim_loop(task, viewer=True, layout=None, style=None, seed=None):
         init_qpos = _initial_motor_qpos()
         data.qpos[resolver.motor_qpos] = init_qpos
         data.qvel[:] = 0.0
+        # HAMS_SPAWN_BACKOFF backs the robot further off the counter into open
+        # floor (default 0 = at the counter for manipulation). Set ~1.0 for nav2,
+        # which needs the robot's start cell to be free to plan.
+        _spawn_backoff = float(os.environ.get("HAMS_SPAWN_BACKOFF", "0") or 0)
         h1_2_robosuite.place_robot_collision_free(
             env, env.init_robot_base_pos,
             h1_2_robosuite._euler_to_wxyz(getattr(env, "init_robot_base_ori", None)),
+            extra_backoff=_spawn_backoff,
         )
         print("[h12_mujoco] initial stance from baked-in sim defaults")
     except Exception as e:
@@ -170,6 +175,22 @@ def sim_loop(task, viewer=True, layout=None, style=None, seed=None):
     sim_lock = threading.Lock()
     pfx = env.robots[0].robot_model.naming_prefix   # "robot0_"
 
+    # Body carrying the pelvis free joint — its world pose is ground-truth base
+    # odometry, which the bridge publishes as odom -> pelvis TF + /odom (feeds
+    # SLAM without needing FAST-LIO). OFF by default so the shared sim bridge does
+    # not inject a second odom->pelvis anchor that competes with the real stack's
+    # FAST-LIO (camera_init) TF; the Mac nav/SLAM demo opts in with HAMS_SIM_ODOM=1.
+    odom_base_body_id = -1
+    _sim_odom_on = os.environ.get('HAMS_SIM_ODOM', '0').strip().lower() not in ('0', 'off', 'false', 'no', '')
+    if _sim_odom_on:
+        try:
+            _fj = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT,
+                                    f"{pfx}{h1_2_robosuite.FREE_JOINT_NAME}")
+            odom_base_body_id = int(model.jnt_bodyid[_fj])
+        except Exception as e:
+            print(f"[h12_mujoco] base odom body resolve skipped: {e}")
+    print(f"[h12_mujoco] ground-truth sim odom {'ON (HAMS_SIM_ODOM=1)' if _sim_odom_on else 'OFF'}")
+
     # DDS control bridge: publishes rt/lowstate, subscribes rt/lowcmd, drives the
     # 27 body motors by name via the resolver (grippers handled by the hand
     # bridges below; gripper ctrl indices are disjoint from the body motors).
@@ -182,13 +203,19 @@ def sim_loop(task, viewer=True, layout=None, style=None, seed=None):
     # unprefixed (ctor defaults). cameras: (mujoco name, /realsense/<ns>, frame_id).
     # Head rides the robot prefix; the eye-in-hand gripper cameras ride the gripper
     # prefixes (same as the hand bridges below).
+    # RGBD camera rendering (3x 256x256 offscreen renders per frame) is the
+    # heaviest per-step cost on CPU. HAMS_CAMERAS=0 drops them to speed the sim up
+    # for locomotion/SLAM (lidar + odom are unaffected).
+    _cameras_on = os.environ.get('HAMS_CAMERAS', '1').strip().lower() not in ('0', 'off', 'false', 'no')
+    _cameras = [
+        (f"{pfx}head_cam",          "head",       "camera_color_optical_frame"),
+        ("gripper0_left_hand_cam",  "left_hand",  "left_hand_camera_color_optical_frame"),
+        ("gripper0_right_hand_cam", "right_hand", "right_hand_camera_color_optical_frame"),
+    ] if _cameras_on else []
+    print(f"[h12_mujoco] RGBD cameras {'ON' if _cameras_on else 'OFF (HAMS_CAMERAS=0)'}")
     ros_bridge = RosSensorBridge(
         model, data,
-        cameras=[
-            (f"{pfx}head_cam",          "head",       "camera_color_optical_frame"),
-            ("gripper0_left_hand_cam",  "left_hand",  "left_hand_camera_color_optical_frame"),
-            ("gripper0_right_hand_cam", "right_hand", "right_hand_camera_color_optical_frame"),
-        ],
+        cameras=_cameras,
         cam_width=256, cam_height=256,   # all 3 cameras render at 256x256 (RoboCasa default)
         # MID-360 fidelity: 360x56 @ 10Hz ~= 201k pts/s (real ~200k), 0.1m near /
         # 40m far range, per-point offset_time for FAST-LIO deskew. el_rays/rate
@@ -200,6 +227,17 @@ def sim_loop(task, viewer=True, layout=None, style=None, seed=None):
         imu_quat_sensor=f"{pfx}livox_imu_quat",
         imu_gyro_sensor=f"{pfx}livox_imu_gyro",
         imu_acc_sensor=f"{pfx}livox_imu_acc",
+        base_body_id=odom_base_body_id,   # -> odom -> pelvis TF + /odom
+        # Drop the robot's own legs/arms from the lidar (self-returns otherwise map
+        # a phantom obstacle under the robot and nav2 rejects the start). Default on
+        # for this locomotion/SLAM/nav sim; HAMS_LIDAR_SELF_FILTER=0 restores them
+        # as occluders.
+        lidar_self_prefixes=(
+            (pfx, "gripper0_")
+            if os.environ.get("HAMS_LIDAR_SELF_FILTER", "1").strip().lower()
+            not in ("0", "off", "false", "no")
+            else ()
+        ),
         sim_lock=sim_lock,
     )
 
