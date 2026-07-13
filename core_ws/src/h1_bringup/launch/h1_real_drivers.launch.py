@@ -38,7 +38,7 @@ def generate_launch_description():
     )
 
     # Equivalent of `ros2 launch cl_realsense h12_rs_cams.launch.py` — brings up
-    # the head and left-hand RealSense cameras and their camera->link static TFs.
+    # the head and both hand RealSense cameras and their camera->link static TFs.
     realsense_share = get_package_share_directory('cl_realsense')
     realsense_cams = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(

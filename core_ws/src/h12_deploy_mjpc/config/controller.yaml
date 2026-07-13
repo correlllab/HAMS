@@ -1,6 +1,7 @@
 # Minimal runtime params for the MJPC lower-body controller. Everything else
 # (ctrl_hz, strategy=stand, ramp/hold/blend timings, gains, torque clamp,
-# synchronous planning) is hardcoded in mjpc_deploy_lowerbody_controller.cpp.
+# synchronous planning) is hardcoded in the fork core (mjpc/deploy/
+# h12_lower_body_controller.cc + deploy_common.cc).
 /**:
   ros__parameters:
     gravity_ff: 0.85      # gravity feedforward scale (tau = gravity_ff * qfrc_bias)

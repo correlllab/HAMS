@@ -12,7 +12,7 @@ retired independently.
 | `gemini_server` | `/gemini_query` | `custom_ros_messages/srv/GeminiQuery` | Image/text → Gemini text. Needs `GEMINI_API_KEY` (or `GOOGLE_API_KEY`). |
 | `sam_server` | `/sam_segment` | `custom_ros_messages/srv/SamSegment` | SAM3 promptable segmentation. Loads `weights/sam3.pt`. |
 | `graspgen_server` | `/graspgen` | `custom_ros_messages/srv/GraspGen` | GraspGenX 6-DOF grasp planning. Loads `weights/graspgen/release/{gen,dis}`. |
-| `yolo_server` | pub/sub: `<image_topic>/detections` | `custom_ros_messages/msg/DetectionBundle` | YOLO-World open-vocabulary detection. Subscribes to N `image_topics` (CompressedImage), publishes a DetectionBundle per input topic at `publish_rate_hz` (1 Hz). Classes come from the live `queries` param. Loads `weights/yolo_world_battery_best.pt`. |
+| `yolo_server` | pub/sub: `<image_topic>/detections` | `custom_ros_messages/msg/DetectionBundle` | YOLO-World open-vocabulary detection. Subscribes to N `image_topics` (CompressedImage), publishes a DetectionBundle per input topic at `publish_rate_hz` (default 5 Hz). Classes come from the live `queries` param. Loads `weights/yolo_world_battery_best.pt`. |
 
 Run with `ros2 run model_server <executable>`.
 

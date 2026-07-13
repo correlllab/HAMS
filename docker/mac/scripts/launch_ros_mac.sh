@@ -114,10 +114,10 @@ cd "$WS"
 # that check; they carry no ament index marker so they never show up in
 # `ros2 pkg list`. NOTE only h1_sim_bringup_mac.launch.py runs here — the other
 # launch files exec-launch the omitted packages (nav2, FAST_LIO, model_server...).
-# unitree_hg + h12_lowerbody_controller provide the optional lower-body stack
+# unitree_hg + h12_lowerbody_rl provide the optional lower-body stack
 # (walk/FAME policies). They build cheaply and are only *launched* when
 # HAMS_LOWERBODY is set (see the bringup), but building them always keeps
-# `ros2 run h12_lowerbody_controller fame_node` available in a shell. unitree_hg
+# `ros2 run h12_lowerbody_rl fame_node` available in a shell. unitree_hg
 # needs ros-humble-rosidl-generator-dds-idl (added to the image); torch is
 # already present. NOTE: FAME balances the robot standing unsupported; the walk
 # policy currently does not stay up in the RoboCasa sim (see README).

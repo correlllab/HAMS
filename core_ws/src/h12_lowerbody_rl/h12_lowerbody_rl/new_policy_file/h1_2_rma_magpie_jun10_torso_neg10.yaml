@@ -28,7 +28,7 @@ default_angles: [-0.16, 0.0, 0.0, 0.36, -0.2, 0.0,
                  -0.16, 0.0, 0.0, 0.36, -0.2, 0.0]
 
 # torso + 7 left arm + 7 right arm = 15
-# torso (index 0) given a -10 deg (-0.1745 rad) lean offset.
+# torso (index 0) given a -0.35 rad (~-20 deg) lean offset.
 default_angles_arms: [-0.35,
                       -0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
                       -0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]

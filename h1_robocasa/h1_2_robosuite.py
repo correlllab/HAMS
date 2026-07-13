@@ -49,8 +49,9 @@ LEG_JOINT_RENAME = {
 FREE_JOINT_NAME = "floating_base_joint"
 
 # Initial stance for the 27 actuated joints (excludes the 7-DoF free joint).
-# Model-level init stays zeros, and the harness spawns at zeros too
-# (h12_mujoco.sim_loop). NOMINAL_STANCE / nominal_stance_vector below stay
+# Model-level init stays zeros; the harness overrides the spawn with a baked-in
+# bent-knee leg stance and zero arms (h12_mujoco.INIT_LEG_POS via
+# _initial_motor_qpos). NOMINAL_STANCE / nominal_stance_vector below stay
 # available for an upright standing spawn but are not the default.
 _INIT_QPOS = np.zeros(27)
 
@@ -71,9 +72,9 @@ NOMINAL_STANCE = {
 
 def nominal_stance_vector():
     """The 27-vector of NOMINAL_STANCE angles ordered by sim_names.ROS_MOTOR_ORDER
-    (== NameResolver.motor_qpos order). Not used by the default all-zero spawn;
-    write data.qpos[resolver.motor_qpos] = nominal_stance_vector() for a standing
-    pose."""
+    (== NameResolver.motor_qpos order). Not used by the default spawn (bent-knee
+    legs, zero arms); write data.qpos[resolver.motor_qpos] = nominal_stance_vector()
+    for a standing pose."""
     from sim_names import ROS_MOTOR_ORDER
 
     return np.array([NOMINAL_STANCE.get(n, 0.0) for n in ROS_MOTOR_ORDER], dtype=float)
@@ -375,7 +376,7 @@ def install_robocasa_patches():
     """Redirect RoboCasa base placement to the pelvis free joint for H1_2.
 
     RoboCasa's Kitchen._reset_internal positions the robot two ways and BOTH
-    raise for our NoActuationBase + freejoint robot (they write the absent
+    raise for our NullBase + freejoint robot (they write the absent
     mobilebase0_joint_mobile_* joints):
       * fresh/random branch: EnvUtils.set_robot_base(env=..., anchor_pos=...,
         anchor_ori=..., ...) -> returns robot_pos, which kitchen stores.

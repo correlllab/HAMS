@@ -90,9 +90,12 @@ docker/scripts/docker_run.sh robocasa bash       # drop to a shell instead
 # set ROS_DOMAIN_ID in docker/.env (see Configuration above)
 ```
 
-Once it's up, RoboCasa publishes `rt/lowstate` over CycloneDDS plus
-`/head/color/image_raw`, `/head/depth/image_raw`, `/head/color/camera_info`,
-`/lidar/points`, and `/tf` on the chosen ROS domain (default `1`).
+Once it's up, RoboCasa publishes `rt/lowstate` over CycloneDDS plus, on the
+chosen ROS domain (default `1`): `/clock`; the RealSense topics
+`/realsense/{head,left_hand,right_hand}/color/image_raw` and
+`.../aligned_depth_to_color/image_raw` (each raw and compressed) with
+`.../color/camera_info`; the Livox topics `/livox/lidar` (CustomMsg),
+`/livox/pointcloud`, and `/livox/imu`; and `/{left,right}/gripper/state`.
 
 ## Run the ROS container and bringup
 
@@ -252,8 +255,9 @@ instructions above apply — use this section instead.
   (`brew install colima docker docker-compose`). No Docker Desktop, no NVIDIA
   toolkit, and no XQuartz (see the GUI note below).
 - Git LFS and submodules, exactly as in [Prerequisites](#prerequisites) above.
-- No `docker/.env` is needed; the Mac compose only reads `ROS_DOMAIN_ID`
-  (optional, defaults to `1`), `HAMS_DISPLAY`, and `HAMS_RVIZ`.
+- No `docker/.env` is needed; the Mac compose reads `ROS_DOMAIN_ID` (optional,
+  defaults to `1`) plus the `HAMS_*` feature toggles (`HAMS_DISPLAY`,
+  `HAMS_RVIZ`, `HAMS_LOWERBODY`, `HAMS_SLAM`, `HAMS_NAV2`, …) documented below.
 - Start the VM with enough resources — one software-GL viewer alone uses ~5
   cores, and running both the MuJoCo viewer and RViz wants headroom:
 
@@ -353,8 +357,10 @@ HAMS_DISPLAY=vnc HAMS_RVIZ=vnc HAMS_LOWERBODY=switch \
   docker compose -f docker/mac/docker-compose.yml up
 ```
 
-It starts band-held idle; `rob_stand` engages FAME (stand free), `rob_walk` hands
-over to the TorchScript walk policy, and `rob_go <vx> <vy> <wz>` drives it. The
+It starts band-held idle and auto-switches stand↔walk from the commanded velocity:
+`rob_stand` settles it into FAME (stand free) and `rob_go <vx> <vy> <wz>` drives the
+TorchScript walk policy — any non-zero `/cmd_vel` engages walk automatically, so
+there is no manual `rob_walk` handover step (`rob_walk` just prints a reminder). The
 walk policy **does stay upright** now, handed over from a settled FAME stance — the
 earlier "falls a few seconds after the tether releases" was a too-tight motor
 watchdog on the slow sim (see gotchas). Launching the raw policy directly

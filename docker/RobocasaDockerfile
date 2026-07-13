@@ -12,7 +12,7 @@ ENV http_proxy=${http_proxy}
 ENV https_proxy=${https_proxy}
 
 # Default backend baked into the image. Operational default is GLFW: docker-compose
-# exports MUJOCO_GL=${MUJOCO_GL:-glfw} and launch_mujoco.sh forces glfw unless
+# exports MUJOCO_GL=${MUJOCO_GL:-glfw} and launch_robocasa.sh forces glfw unless
 # --headless (in which case it switches to egl for offscreen GPU rendering).
 ENV MUJOCO_GL=egl
 
@@ -85,7 +85,7 @@ CMD ["/bin/bash"]
 
 # -----------------------------------------------------------------------------
 # msgs_ws toolchain — minimal colcon + ament + rosidl_default_generators so
-# launch_mujoco.sh can build the IDL-only workspace at every container start
+# launch_robocasa.sh can build the IDL-only workspace at every container start
 # (magpie_msgs + custom_ros_messages, both ament_cmake interface packages).
 # Appended at the end intentionally so iterating on this layer does not bust
 # the heavy mujoco/robocasa/asset layers above.

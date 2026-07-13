@@ -22,14 +22,15 @@ ASSETS_DIR = '/home/code/CL_Assets'
 
 
 def generate_launch_description():
-    # The included h12_ros2_controller/full_launch.py starts its own rviz2. We
-    # can't patch that upstream package, so this bringup inlines its non-rviz
-    # nodes (plus the model_server vision services) and runs a single rviz with sim.rviz.
+    # Companion-desktop bringup: runs the model_server vision services, the
+    # /skill/* servers, and the MJPC lower-body controller/estimator, then a
+    # single rviz with sim.rviz. The state publishers and frame_task_server run
+    # on the onboard PC (h1_real_controller.launch.py), not here.
     bringup_share = get_package_share_directory('h1_bringup')
     default_rviz = os.path.join(bringup_share, 'rviz', 'sim.rviz')
 
-    # MuJoCo publishes /clock with sim time. All nodes should use it so
-    # TF lookups and sensor timestamps are coherent with the simulation.
+    # Real robot runs on wall-clock time (no MuJoCo /clock), so use_sim_time is
+    # False; all nodes below share this parameter.
     sim_time_param = {'use_sim_time': False}
 
     # --- CPU affinity (soft pin, i7-14700F hybrid: 0-15 P-cores, 16-27 E-cores) ---
@@ -105,7 +106,7 @@ def generate_launch_description():
 
         # yolo_server: YOLO-World open-vocabulary detection publisher. Subscribes
         # to the head + both hand color cameras (its DEFAULT_IMAGE_TOPICS) and
-        # publishes a DetectionBundle on <image_topic>/detections at 1 Hz per cam,
+        # publishes a DetectionBundle on <image_topic>/detections at 5 Hz per cam,
         # using the fine-tuned battery weights (weights/yolo_world_battery_best.pt).
         # Detects the battery-workcell classes by default (DEFAULT_QUERIES: Bolt,
         # BusBar, InteriorScrew, Nut, OrageCove, Screw, ScrewHole). The vocabulary

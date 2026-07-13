@@ -39,7 +39,7 @@ is required before anything builds.
 
 **`core_ws/src` in-tree packages** (versioned directly in this repo, *not*
 submodules): `FAST_LIO`, `h12_deploy_mjpc`, `h12_lowerbody_rl`,
-`h12_lowerbody_rl`, `h12_skills`, `h1_bringup`, `model_server`.
+`h12_skills`, `h1_bringup`, `model_server`.
 
 Large binary assets (meshes, XML, USD) are tracked with **Git-LFS**; run
 `git lfs install` first. Some weights are *not* in git and are fetched manually

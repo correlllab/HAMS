@@ -53,7 +53,7 @@ services:
       - QT_X11_NO_MITSHM=1
       - LIBGL_ALWAYS_INDIRECT=0
       # Default to GLFW (native passive viewer). Export MUJOCO_GL=egl on the
-      # host (or pass --headless to launch_mujoco.sh) for offscreen rendering.
+      # host (or pass --headless to launch_robocasa.sh) for offscreen rendering.
       - MUJOCO_GL=${MUJOCO_GL:-glfw}
       - ROS_DOMAIN_ID=${ROS_DOMAIN_ID:-1}
     volumes:
@@ -65,7 +65,7 @@ services:
       - ../CL_Assets:/home/code/CL_Assets:ro
       - ./scripts:/home/code/h12_sim_scripts
       # Only the message packages the magpi sim needs — keeps the rest of
-      # core_ws (vision_pipeline weights, FAST_LIO, root-owned host build
+      # core_ws (model_server weights, FAST_LIO, root-owned host build
       # dir, etc.) out of this container. The parent rw mount persists
       # build/install/log on the host under container_cache/msgs_ws/ so
       # colcon's incremental rebuild on launch is a near-no-op when the

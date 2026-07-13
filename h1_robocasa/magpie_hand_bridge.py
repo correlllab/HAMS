@@ -45,13 +45,13 @@ except ModuleNotFoundError as exc:
     raise
 
 
-# Aperture calibration: linear map between an MJCF hinge_1 angle (rad) and the
+# Aperture calibration: linear map between an MJCF finger_joint1 angle (rad) and the
 # reported aperture (mm). 0 rad ≈ fingers parallel/open; CLOSED_RAD ≈ tips
 # touching. Default chosen so the open/closed states roughly match the real
 # magpie's ~0–110 mm range. Tune in one place if the geometry changes.
 OPEN_MM = 110.0
 CLOSED_MM = 0.0
-CLOSED_RAD = 2.05  # matches the upper limit of left_hinge_1 / leftg_left_hinge_1
+CLOSED_RAD = 2.05  # matches the upper limit of finger_joint1 (MJCF range -0.035 2.05)
 
 # Force model: MuJoCo reports actuator torque (Nm) at the hinge; convert to an
 # approximate fingertip force (N) using a constant lever arm.
@@ -67,13 +67,13 @@ KP_MAX = 200.0
 
 
 def mm_to_rad(mm: float) -> float:
-    """Aperture millimeters → hinge_1 angle (radians)."""
+    """Aperture millimeters → finger_joint1 angle (radians)."""
     f = (OPEN_MM - mm) / (OPEN_MM - CLOSED_MM)
     return float(np.clip(f, 0.0, 1.0)) * CLOSED_RAD
 
 
 def rad_to_mm(rad: float) -> float:
-    """Hinge_1 angle (radians) → aperture millimeters."""
+    """finger_joint1 angle (radians) → aperture millimeters."""
     f = float(np.clip(rad, 0.0, CLOSED_RAD)) / CLOSED_RAD
     return OPEN_MM - f * (OPEN_MM - CLOSED_MM)
 
@@ -202,7 +202,7 @@ class MagpieHandBridge(Node):
         rad_right = float(self.data.sensordata[self.pos_right])
         mm_left  = rad_to_mm( rad_left)
         mm_right = rad_to_mm(-rad_right)  # right finger ctrl sign is negated
-        # finger_positions order matches gripper_node.py:107-110 — [right, left].
+        # finger_positions order matches gripper_node.py:123-126 — [right, left].
         return 0.5 * (mm_left + mm_right), [mm_right, mm_left]
 
     def _read_force_n_locked(self) -> float:
@@ -326,7 +326,7 @@ class MagpieHandBridge(Node):
         Loops up to MAX_ITERS: if measured force < initial_force after a
         short settle, close by additional_closure mm and bump the force
         ceiling by additional_force N. Stops on contact, cancellation, or
-        iteration cap. Mirrors the API of gripper_node.py:222-282.
+        iteration cap. Mirrors the API of gripper_node.py:238-298.
         """
         params = goal_handle.request.params
         feedback = DeliGrasp.Feedback()

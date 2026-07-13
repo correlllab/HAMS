@@ -1,7 +1,9 @@
 #!/bin/bash
-# Usage: ./launch_isaac.sh [--reset-cache] [--headless] [task_name]
-# Default task: Isaac-Stack-RgyBlock-H12-27dof-Inspire-Joint
-# Set HEADLESS=1 in the environment (or pass --headless) to run without a viewport.
+# Usage: ./launch_isaac.sh [--reset-cache]
+# Runs the hardcoded task Isaac-PickPlace-Cylinder-H12-27dof-Inspire-Joint. A
+# [task_name] arg, --headless, and HEADLESS=1 are parsed below but NOT forwarded
+# to the exec (dead code — task and viewport are hardcoded on the exec line); to
+# change the task or run headless, invoke sim_main.py directly.
 #
 # ROS publishing uses Isaac-Sim's bundled isaacsim.ros2.bridge extension
 # (loaded by Kit at app startup); there is no /opt/ros/humble in this image

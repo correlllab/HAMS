@@ -65,7 +65,7 @@ To remove: `claude mcp remove ros_debug`.
 | `call_service(name,type,args)` | call any service |
 | `node_list()` | list active nodes |
 
-The first eight are the warm/fast path; the generic passthroughs shell out to the
+The first seven are the warm/fast path; the generic passthroughs shell out to the
 `ros2` CLI for the occasional arbitrary topic.
 
 ## Notes & caveats

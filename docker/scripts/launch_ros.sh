@@ -107,8 +107,8 @@ if [ "$NEEDS_BUILD" = "1" ]; then
     # livox_ros_driver2 ships a build.sh that picks the ROS 2 file variants
     # (package_ROS2.xml → package.xml, launch_ROS2 → launch) and drives colcon
     # from the workspace root. Upstream invokes `colcon build --cmake-args ...`
-    # without --symlink-install; inject the flag so vision_pipeline's
-    # ModelWeights/*.pt are reachable via the install symlink instead of
+    # without --symlink-install; inject the flag so model_server's
+    # weights/*.pt are reachable via the install symlink instead of
     # needing a manual post-build copy. Idempotent — won't re-patch if already
     # present (e.g. after a previous run on the same bind-mounted clone).
     LIVOX_DIR="$WS/src/livox_ros_driver2"

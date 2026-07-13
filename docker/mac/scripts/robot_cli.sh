@@ -24,8 +24,7 @@ export ROS_DOMAIN_ID="${ROS_DOMAIN_ID:-1}"
 export RMW_IMPLEMENTATION=rmw_fastrtps_cpp
 
 # Named postures available to rob_pose (from utility/named_config.py):
-#   home t_pose arms_front arms_front_elbow t_pose_elbow arms_overhead
-#   arms_asym arms_front_yaw elbow_only
+#   home t_pose arms_front_45 arms_overhead arms_asym arms_front_yaw elbow_only
 rob_poses() {
     echo "home t_pose arms_front arms_front_elbow t_pose_elbow arms_overhead arms_asym arms_front_yaw elbow_only"
 }

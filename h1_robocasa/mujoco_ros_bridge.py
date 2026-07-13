@@ -198,7 +198,7 @@ class RosSensorBridge(Node):
         # above horizon). The sensor is mounted upside-down in the MJCF, so
         # local +Z = world -Z; flipping signs gives a LOCAL elevation range
         # of [-52°, +7°] that produces the correct world coverage.
-        # Defaults of 360 az × 56 el rays at 10 Hz ≈ 200,000 pts/s, matching
+        # The sim runs 360 az × 56 el rays at 10 Hz ≈ 200,000 pts/s, matching
         # the real sensor's per-second density. The uniform grid is a
         # simplification of the MID-360's non-repetitive scan pattern.
         az = np.linspace(0.0, 2.0 * np.pi, lidar_az_rays, endpoint=False, dtype=np.float64)

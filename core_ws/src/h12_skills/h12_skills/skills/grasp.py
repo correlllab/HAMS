@@ -139,8 +139,8 @@ class GraspSkill:
         """gemini (locate) -> sam (mask) -> graspgen (6-DOF grasp) -> approach +
         close. No lift (by design). Gemini gives a box to focus SAM; SAM's mask is
         back-projected to an object cloud; GraspGenX picks the grasp; frame_task
-        drives the grip_site there. `overrides` come from the in-process side
-        channel documented on _exec_grasp."""
+        drives the GraspGenX gripper-base frame there. `overrides` come from the
+        in-process side channel documented on _exec_grasp."""
         goal = gh.request
         run = _Run(self, gh, SkillGrasp, 'grasp')
         arm = self._validated_arm(goal)

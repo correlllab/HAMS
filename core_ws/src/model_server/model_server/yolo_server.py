@@ -110,11 +110,11 @@ _WEIGHTS_DIR = os.environ.get("MODEL_SERVER_WEIGHTS_DIR",
 
 
 class YoloWorld:
-    """Minimal Ultralytics YOLO-World wrapper for the yolo_detect service.
+    """Minimal Ultralytics YOLO-World wrapper for the yolo_server node.
 
     Loads the model once (from <weights>/YOLO_MODEL if present, else by name so
-    ultralytics downloads it), moves it to CUDA when available (FP16 inference is
-    requested per call in `detect`), and detects a per-call, text-prompted class
+    ultralytics downloads it), moves it to CUDA when available (FP32 inference is
+    used per call in `detect`, see YOLO_HALF), and detects a per-call, text-prompted class
     vocabulary via `detect`.
     """
 

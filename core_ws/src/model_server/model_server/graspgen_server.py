@@ -3,13 +3,13 @@
 
 Serves custom_ros_messages/srv/GraspGen on `graspgen`: a segmented object
 PointCloud2 in, ranked 6-DOF grasp poses out. The GraspGenXSampler (heavy GPU
-model) is built ONCE per gripper and cached. Checkpoints default to
-<package>/weights/graspgen (override with GRASPGENX_CHECKPOINT_DIR); the gripper
-assets default to /opt/graspgenx/assets (override with GRASPGENX_ASSETS_DIR), where
-the magpie gripper description is staged.
+model) is built ONCE per gripper and cached. Checkpoints come from
+GRASPGENX_CHECKPOINT_DIR (required; the ros compose sets it to
+<package>/weights/graspgen); the gripper assets come from GRASPGENX_ASSETS_DIR
+(required; compose sets it to /opt/graspgenx/assets), where the magpie gripper
+description is staged.
 
-Runs inside the ros container (GraspGenX is pip-installed there). Import of
-graspgenx is deferred to __init__ so the module can be inspected without it.
+Runs inside the ros container, where GraspGenX is pip-installed.
 """
 
 import inspect

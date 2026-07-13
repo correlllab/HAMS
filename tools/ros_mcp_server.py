@@ -12,7 +12,7 @@ Design: a single warm rclpy node subscribes once to the hot topics (odom,
 costmap, plan, scan, clock) and caches the latest message, so status tools answer
 instantly instead of paying node-startup + DDS-discovery on every call (the thing
 that made `ros2 topic echo --once` slow to poll). Actuation (lower-body mode,
-/cmd_vel) uses warm publishers/clients. Generic passthroughs (list/echo/hz/service
+/cmd_vel) uses warm publishers/clients. Generic passthroughs (echo/hz/service
 call for arbitrary topics) shell out to the ros2 CLI, which is robust for the
 rarely-used cold path. rclpy spins in a background thread; tool handlers read the
 thread-safe cache.

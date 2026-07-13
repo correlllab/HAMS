@@ -647,11 +647,10 @@ class SkillsBase(Node):
         /frame_task as a single combined move to the full target pose (target
         position + target orientation reached together).
 
-        Defaults to the arm's grip-site frame; pass `frame` to drive a different
-        URDF frame (e.g. GRASP_FRAMES[arm], the GraspGenX gripper-base frame, for
-        grasping). Pass the skill's goal handle as outer_gh so a skill cancel
-        promptly cancels the in-flight frame_task goal too. Returns whether the
-        move reached the target."""
+        `frame` is the URDF frame to drive (GRASP_FRAMES[arm], the GraspGenX
+        gripper-base frame, for grasping). Pass the skill's goal handle as outer_gh
+        so a skill cancel promptly cancels the in-flight frame_task goal too. Returns
+        whether the move reached the target."""
         x, y, z = float(pose.position.x), float(pose.position.y), float(pose.position.z)
         quat = (pose.orientation.x, pose.orientation.y, pose.orientation.z, pose.orientation.w)
         target = Pose()

@@ -4,8 +4,10 @@
 # (auto-applied when no DISPLAY is reachable, e.g. SSH without X11 / CI).
 # Sim publishes:
 #   - rt/lowstate on CycloneDDS domain 1 (unitree_sdk2py)
-#   - /head/color/image_raw, /head/depth/image_raw, /head/color/camera_info,
-#     /lidar/points, /tf on ROS 2 (ROS_DOMAIN_ID=1 unless overridden)
+#   - /realsense/{head,left_hand,right_hand}/color/image_raw[/compressed],
+#     .../aligned_depth_to_color/image_raw[/compressedDepth], .../color/camera_info,
+#     /livox/lidar (CustomMsg), /livox/pointcloud, /livox/imu, /clock, and
+#     /{left,right}/gripper/state on ROS 2 (ROS_DOMAIN_ID=1 unless overridden)
 set -e
 
 source /opt/ros/humble/setup.bash

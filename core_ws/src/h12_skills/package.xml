@@ -20,8 +20,6 @@
   <depend>cv_bridge</depend>
   <depend>python3-numpy</depend>
   <depend>python3-scipy</depend>
-  <!-- Gemini Robotics client: pip package google-genai (no rosdep key); install
-       with `pip install google-genai`. Optional at runtime — see _init_gemini. -->
   <exec_depend>python3-opencv</exec_depend>
 
   <test_depend>ament_copyright</test_depend>

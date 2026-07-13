@@ -5,7 +5,7 @@
 # source), uv, unitree_sdk2_python, torch cu130, and pin/pink/mink, then
 # layers on the ROS workspace extras: colcon, rviz2, apt pinocchio (for C++
 # packages in core_ws), FAST_LIO / livox_ros_driver2 deps, and the
-# vision_pipeline ML stack. numpy is pinned to <2 at the end for
+# model_server ML stack. numpy is pinned to <2 at the end for
 # scipy/pinocchio ABI compatibility.
 #
 # Cross-container DDS: base installs CycloneDDS 0.10.x from source with
@@ -106,10 +106,10 @@ RUN pip install --no-cache-dir --ignore-installed blinker \
         open3d
 
 # -----------------------------------------------------------------------------
-# 4. Python: vision_pipeline ML stack.
+# 4. Python: model_server ML stack.
 #    All versions exact-pinned for reproducibility; CLIP is fetched at a SHA
 #    because it is not on PyPI. Model weights ship under
-#    vision_pipeline/core/ModelWeights and are bind-mounted via core_ws.
+#    model_server/weights and are bind-mounted via core_ws.
 # -----------------------------------------------------------------------------
 RUN pip install --no-cache-dir \
         "transformers==4.47.1" \
@@ -362,7 +362,7 @@ RUN mkdir -p "$GRASPGENX_CHECKPOINT_DIR" "$GRASPGENX_GRIPPER_CFG_DIR"
 # MuJoCo MPC (MJPC) — badinkajink/mujoco_mpc @ extended_hw_patched, cloned to
 # /home/code/mujoco_mpc, built, and installed so later code can `import
 # mujoco_mpc` (the gRPC Agent API for real-time predictive control, e.g. the
-# h12_lowerbody_rl).
+# h12_deploy_mjpc).
 #
 # Appended last (same reasoning as the GraspGenX / nav2 / tk blocks above) so
 # iterating here can't bust the heavy apt / pip / SAM / robocasa layers earlier

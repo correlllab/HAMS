@@ -196,8 +196,8 @@ def generate_launch_description():
 
         # h12_skills: serves the /skill/* atomic-skill actions (open_door,
         # grasp, pick_place, ...). On startup it waits ~10s each on the vision
-        # pipeline + graspgen services, the grippers, and the frame_task / nav
-        # action servers (all started above), then idles ready for goals.
+        # pipeline + graspgen services, the grippers, and the frame_task
+        # action server (all started above), then idles ready for goals.
         Node(
             package='h12_skills',
             executable='skills',
