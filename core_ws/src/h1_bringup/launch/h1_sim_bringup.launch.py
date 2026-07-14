@@ -65,6 +65,11 @@ def generate_launch_description():
         DeclareLaunchArgument('use_sliders', default_value='true'),
         DeclareLaunchArgument('use_nav', default_value='true'),
         DeclareLaunchArgument('use_skills', default_value='true'),
+        # MJPC lower-body estimator + balance controller. On by default for a
+        # normal bringup; the grasp benchmark passes use_mjpc:=false — the robot
+        # is held by the elastic-band tether and the upper-body frame_task IK is
+        # independent of the lower body, so skipping MJPC frees RAM/GPU/CPU.
+        DeclareLaunchArgument('use_mjpc', default_value='true'),
         DeclareLaunchArgument('model_logging', default_value='true'),
         DeclareLaunchArgument('model_visualization', default_value='true'),
         DeclareLaunchArgument('model_clear_logs', default_value='true'),
@@ -72,23 +77,15 @@ def generate_launch_description():
 
         nav_launch,
 
-        # The MuJoCo bridge back-projects depth into 3D using REP-103 optical
-        # convention (+z = forward, +x = right, +y = down) but stamps the
-        # resulting camera_info / image / depth messages with the optical
-        # frame name below. The URDF defines only camera_link (a ROS link
-        # frame, +x = forward, +z = up); without this static TF the vision
-        # pipeline would treat optical-convention points as if they were in
-        # camera_link, rotating every detection ~90 deg out of place.
-        Node(
-            package='tf2_ros',
-            executable='static_transform_publisher',
-            name='camera_optical_frame_broadcaster',
-            arguments=['0', '0', '0',
-                       '-1.5707963267948966', '0', '-1.5707963267948966',
-                       'camera_link', 'camera_color_optical_frame'],
-            parameters=[sim_time_param],
-            output='screen',
-        ),
+        # NOTE: the head camera's optical frame (pelvis -> camera_color_optical_frame)
+        # is published by the MuJoCo sim bridge directly from the MJCF head_cam
+        # pose (exact by construction, since it's the same camera that renders
+        # the depth we back-project). A static transform here (previously
+        # head_camera_link/camera_link -> camera_color_optical_frame) used the
+        # URDF head-camera pose, which does NOT match the MJCF camera and mis-
+        # placed every head-cam cloud by ~0.8 m; it is intentionally removed so
+        # the sim-published frame is the single source of truth. (A real-robot
+        # bringup, where the RealSense driver owns this frame, is unaffected.)
 
         Node(
             package="h12_ros2_controller",
@@ -162,6 +159,7 @@ def generate_launch_description():
                             'config', 'mjpc_sim.yaml'),
             ],
             output='screen',
+            condition=IfCondition(LaunchConfiguration('use_mjpc')),
         ),
 
         # --- MJPC lower-body balance controller (spawns mjpc_lowerbody_core) ---
@@ -178,6 +176,7 @@ def generate_launch_description():
             # the model is null -> mj_makeData segfault on startup.
             additional_env={'MJPC_TASKS_DIR': '/home/code/mujoco_mpc/build/mjpc/tasks'},
             output='screen',
+            condition=IfCondition(LaunchConfiguration('use_mjpc')),
         ),
 
 

@@ -43,6 +43,13 @@ from std_srvs.srv import Trigger
 from tf2_ros import TransformBroadcaster
 
 
+def _mat_to_quat(R: np.ndarray):
+    """Rotation matrix -> (w, x, y, z) unit quaternion via mujoco's converter."""
+    q = np.empty(4, dtype=np.float64)
+    mujoco.mju_mat2Quat(q, np.ascontiguousarray(R, dtype=np.float64).reshape(9))
+    return float(q[0]), float(q[1]), float(q[2]), float(q[3])
+
+
 def _sim_time_to_msg(sim_time: float) -> TimeMsg:
     """Convert MuJoCo sim time (float seconds) to a ROS Time message."""
     sec = int(sim_time)
@@ -258,6 +265,26 @@ class RosSensorBridge(Node):
                 pub_info=self.create_publisher(
                     CameraInfo, f"/realsense/{ns}/color/camera_info", qos_profile_sensor_data),
             ))
+        # TF for ALL cameras (head + eye-in-hand): broadcast pelvis -> <optical
+        # frame> straight from MuJoCo's cam_xpos/cam_xmat, exact by construction
+        # because it's the SAME camera that renders the depth we back-project.
+        # The head was previously excluded on the assumption that bringup's
+        # URDF static transform (head_camera_link -> camera_color_optical_frame)
+        # matched the MJCF head_cam pose — it does NOT (the magpie URDF's
+        # head_camera_joint disagrees with the MuJoCo camera), which back-
+        # projected every head-cam cloud a full ~0.8 m off (behind/above the
+        # robot) so no grasp was ever reachable. Publishing it here from MuJoCo
+        # fixes the placement; the launch static TF for this frame is removed so
+        # the two don't fight over the same child.
+        self._tf_broadcaster = TransformBroadcaster(self)
+        self._tf_pelvis_id = -1
+        for pelvis_name in ("robot0_pelvis", "pelvis"):
+            bid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, pelvis_name)
+            if bid >= 0:
+                self._tf_pelvis_id = int(bid)
+                break
+        self._tf_cam_frames = {c.frame for c in self.cameras}
+
         # FAST-LIO subscribes to /livox/lidar (CustomMsg) and /livox/imu (Imu)
         # with RELIABLE QoS (laserMapping.cpp:923,929). Match it so DDS doesn't
         # drop scans on a QoS mismatch.
@@ -289,7 +316,8 @@ class RosSensorBridge(Node):
         self.odom_period = 1.0 / odom_rate_hz
         self._last_odom_sim_t = 0.0
         if self.base_body_id >= 0:
-            self._tf_broadcaster = TransformBroadcaster(self)
+            # Shares the node's single _tf_broadcaster (created above for the
+            # camera optical frames) rather than opening a second /tf publisher.
             self.pub_odom = self.create_publisher(Odometry, "/odom", 10)
 
         if elastic_band is not None:
@@ -529,6 +557,36 @@ class RosSensorBridge(Node):
             info = cam.info_msg
             info.header.stamp = stamp
             cam.pub_info.publish(info)
+
+            if cam.frame in self._tf_cam_frames and self._tf_pelvis_id >= 0:
+                self._tf_broadcaster.sendTransform(
+                    self._camera_tf(cam, stamp))
+
+    def _camera_tf(self, cam, stamp: TimeMsg) -> TransformStamped:
+        """pelvis -> optical-frame transform for `cam`, from MuJoCo's world
+        camera pose. MuJoCo cameras look along LOCAL -Z with +Y up; the ROS
+        optical convention is +Z into the scene, +Y down — related by a flip of
+        the Y and Z axes (diag(1, -1, -1) on the right)."""
+        R_cam = self.data.cam_xmat[cam.cam_id].reshape(3, 3)
+        R_opt = R_cam @ np.diag([1.0, -1.0, -1.0])
+        p_cam = self.data.cam_xpos[cam.cam_id]
+        R_pelv = self.data.xmat[self._tf_pelvis_id].reshape(3, 3)
+        p_pelv = self.data.xpos[self._tf_pelvis_id]
+        R_rel = R_pelv.T @ R_opt
+        p_rel = R_pelv.T @ (p_cam - p_pelv)
+        qw, qx, qy, qz = _mat_to_quat(R_rel)
+        t = TransformStamped()
+        t.header.stamp = stamp
+        t.header.frame_id = "pelvis"
+        t.child_frame_id = cam.frame
+        t.transform.translation.x = float(p_rel[0])
+        t.transform.translation.y = float(p_rel[1])
+        t.transform.translation.z = float(p_rel[2])
+        t.transform.rotation.w = qw
+        t.transform.rotation.x = qx
+        t.transform.rotation.y = qy
+        t.transform.rotation.z = qz
+        return t
 
     def _publish_lidar_scan(self, stamp: TimeMsg) -> None:
         origin = np.ascontiguousarray(self.data.xpos[self.lidar_body_id], dtype=np.float64).reshape(3, 1)
