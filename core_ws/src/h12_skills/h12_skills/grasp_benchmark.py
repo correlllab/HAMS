@@ -19,6 +19,13 @@ Methods (--method):
                      (short_side + long_side), rendered as one labelled contact
                      sheet; Gemini picks the grasp (magpie pickup-pipeline
                      style VLM-as-judge).
+  skill              the DEPLOYED /skill/grasp action (skills/grasp.py) as
+                     pick_place invokes it: box -> SAM -> GraspGenX -> priority
+                     tier + diversity re-rank -> walk the ranked candidates with
+                     a multi-pass servo. Not a reimplementation, so this is the
+                     reference the methods above are worth comparing against —
+                     and the only one that retries after an unreachable
+                     candidate. It does not lift, so the harness lifts for it.
 
 Success is ground truth, not vision: the sim's MeasurementBridge publishes
 /robocasa/object_poses (JSON, MuJoCo world frame) and the episode succeeds when
@@ -39,14 +46,17 @@ import numpy as np
 
 import rclpy
 from rclpy.action import ActionClient
+from rclpy.duration import Duration as RclpyDuration
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.qos import qos_profile_sensor_data
+from rclpy.time import Time
 
 from geometry_msgs.msg import Pose
 from sensor_msgs.msg import CameraInfo, CompressedImage
 from std_msgs.msg import Bool, String
+from tf2_ros import TransformException
 
-from custom_ros_messages.action import NamedConfig
+from custom_ros_messages.action import NamedConfig, SkillGrasp
 
 from .base import SkillsBase, GRASP_FRAMES
 from .perception_utils import (
@@ -93,6 +103,11 @@ GRASP_TILTS = ((np.pi / 9, '20deg'), (np.pi / 6, '30deg'),
 # move keeps the strict default, since that's where the fingers actually close.
 PREGRASP_LIN_TOL = 0.035   # m
 PREGRASP_ANG_TOL = 0.12    # rad
+# Budget for the whole deployed /skill/grasp call (--method skill). It is far
+# larger than any single benchmark method's because the skill can walk up to
+# MAX_GRASP_ATTEMPTS ranked candidates, each with its own multi-pass servo
+# (skills/grasp.py: SERVO_DURATION_SEC x SERVO_MAX_ITER), before giving up.
+SKILL_TIMEOUT_SEC = 300.0
 
 
 def _tilted_pose(fingertip_xyz, yaw, tilt=0.0):
@@ -390,7 +405,61 @@ class GraspBenchmark(SkillsBase):
         return self.move_frame_to(GRASP_FRAMES[self.arm], pose,
                                   duration_sec=LIFT_SEC)
 
+    def frame_pose_pelvis(self, frame):
+        """Live pose of `frame` in the pelvis frame, straight off TF."""
+        try:
+            tf = self.tf_buffer.lookup_transform(
+                'pelvis', frame, Time(), timeout=RclpyDuration(seconds=2.0))
+        except TransformException as e:
+            self.get_logger().error(f'TF pelvis <- {frame!r} failed: {e}')
+            return None
+        pose = Pose()
+        pose.position.x = tf.transform.translation.x
+        pose.position.y = tf.transform.translation.y
+        pose.position.z = tf.transform.translation.z
+        pose.orientation = tf.transform.rotation
+        return pose
+
+    def lift_from_current(self):
+        """Lift straight up from wherever the gripper ACTUALLY ended up.
+
+        The benchmark's own methods lift from the pose they commanded
+        (self._last_grasp_pose), but the deployed skill grasps in ANOTHER process
+        and its chosen pose never crosses the action boundary, so read the driven
+        frame's live pose off TF instead."""
+        pose = self.frame_pose_pelvis(GRASP_FRAMES[self.arm])
+        if pose is None:
+            return False
+        pose.position.z += LIFT_DIST_M
+        return self.move_frame_to(GRASP_FRAMES[self.arm], pose,
+                                  duration_sec=LIFT_SEC)
+
     # ------------------------------------------------------------- the methods
+    def run_skill(self, obj_text):
+        """Dispatch the DEPLOYED /skill/grasp action and report whether it grasped.
+
+        Unlike the method_* functions below, this measures skills/grasp.py exactly
+        as pick_place invokes it — gemini/yolo box -> SAM -> GraspGenX -> priority
+        tier + diversity re-rank -> walk-the-ranked-candidates servo — rather than a
+        benchmark reimplementation of it. That makes it the reference the other
+        methods are worth comparing against, and the only one that exercises the
+        skill's retry loop.
+
+        It plans AND executes internally, so it does not fit the plan -> execute
+        split the other methods use, and it deliberately does not lift (see
+        SkillGrasp.action); the caller lifts with lift_from_current().
+        Returns (grasped, message)."""
+        goal = SkillGrasp.Goal()
+        goal.target_object = obj_text
+        goal.arm = self.arm
+        goal.timeout.sec = int(SKILL_TIMEOUT_SEC)
+        resp = self._send_action(self.grasp_skill_cli, goal,
+                                 accept_timeout=30.0,
+                                 result_timeout=SKILL_TIMEOUT_SEC + 30.0)
+        if resp is None:
+            return False, 'no result from /skill/grasp (server up? timed out?)'
+        return bool(resp.result.success), str(resp.result.message)
+
     def method_centroid(self, obj_text):
         """Naive baseline: object-cloud centroid, fixed top-down grasp, fingers
         closing across the pelvis-Y axis (whatever the object's orientation)."""
@@ -658,7 +727,7 @@ class GraspBenchmark(SkillsBase):
         return choice, reason
 
 
-METHODS = ('centroid', 'topdown_antipodal', 'graspgenx', 'vlm_judge')
+METHODS = ('centroid', 'topdown_antipodal', 'graspgenx', 'vlm_judge', 'skill')
 
 
 def main():
@@ -701,19 +770,31 @@ def main():
         rec['gt_start'] = base.tolist()
 
         t0 = time.monotonic()
-        plan = getattr(node, f'method_{args.method}')(args.object)
-        rec['plan_time_s'] = round(time.monotonic() - t0, 2)
-        if plan is None:
-            raise RuntimeError('grasp synthesis produced no candidates')
-        rec['meta'] = plan['meta']
+        if args.method == 'skill':
+            # The deployed skill plans AND executes behind one action call, so
+            # there is no plan/execute split to time separately; charge it all to
+            # exec_time_s and lift from the pose it actually reached.
+            ok, msg = node.run_skill(args.object)
+            rec.update(plan_time_s=0.0, meta={}, executed=ok,
+                       chosen_index=-1, chosen_label=msg)
+            if ok:
+                node.lift_from_current()
+                time.sleep(HOLD_SEC)
+            rec['exec_time_s'] = round(time.monotonic() - t0, 2)
+        else:
+            plan = getattr(node, f'method_{args.method}')(args.object)
+            rec['plan_time_s'] = round(time.monotonic() - t0, 2)
+            if plan is None:
+                raise RuntimeError('grasp synthesis produced no candidates')
+            rec['meta'] = plan['meta']
 
-        t1 = time.monotonic()
-        ok, idx, label = node.execute(plan['candidates'], plan['width_m'])
-        rec.update(executed=ok, chosen_index=idx, chosen_label=label)
-        if ok:
-            node.lift()
-            time.sleep(HOLD_SEC)
-        rec['exec_time_s'] = round(time.monotonic() - t1, 2)
+            t1 = time.monotonic()
+            ok, idx, label = node.execute(plan['candidates'], plan['width_m'])
+            rec.update(executed=ok, chosen_index=idx, chosen_label=label)
+            if ok:
+                node.lift()
+                time.sleep(HOLD_SEC)
+            rec['exec_time_s'] = round(time.monotonic() - t1, 2)
 
         now = node.gt_pos(args.gt_name)
         dz = float(now[2] - base[2]) if now is not None else 0.0

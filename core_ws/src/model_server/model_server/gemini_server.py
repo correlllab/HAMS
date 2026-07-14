@@ -9,6 +9,8 @@ constant below, and a GEMINI_MAX_RETRIES retry loop, with a general
 spatial-reasoning system prompt (SYSTEM_INSTRUCTION) and no forced JSON mime type,
 so the caller's prompt chooses the output format (plain text, JSON, coordinates).
 """
+import hashlib
+import json
 import os
 import time
 
@@ -46,6 +48,24 @@ GEMINI_HTTP_TIMEOUT_MS = 210_000
 # most consistent latency. Raise it (e.g. 1024) or set -1 only if a caller needs
 # complex spatial reasoning (counting, gauge reading) at the cost of latency.
 GEMINI_THINKING_BUDGET = 0
+# Optional content-addressed response cache, enabled by pointing GEMINI_CACHE_DIR
+# at a writable directory. OFF by default, and it must stay that way on the real
+# robot: there the scene changes between calls, so serving a remembered box for a
+# moved object would be actively dangerous.
+#
+# In SIM it is close to mandatory. A seeded RoboCasa episode renders a
+# byte-identical head-camera frame every run (now that the legs are held and the
+# spawn stance is reproducible), so detection is deterministic — and then:
+#   * the method comparison gets a byte-identical box, which is the fairness
+#     property the whole benchmark rests on (vs. re-rolling the detector per
+#     method and blaming synthesis for a box that moved);
+#   * re-runs and post-hoc debugging cost zero API calls;
+#   * a matrix stays inside the free tier's 20-requests/day quota for
+#     gemini-robotics-er-1.6-preview, which otherwise halts a run partway
+#     through and looks exactly like "perception found nothing".
+# The key is the sha256 of the EXACT (prompt, image bytes) pair, so a hit is only
+# ever served for a byte-identical request.
+GEMINI_CACHE_DIR = os.environ.get('GEMINI_CACHE_DIR', '').strip()
 
 
 # Robust, task-agnostic system prompt for the shared gemini_query service. It
@@ -169,6 +189,18 @@ class GeminiServer(Node):
         )
         self.get_logger().info(f"gemini_server ready (model={self.model})")
 
+    def _cache_path(self, prompt, image_bytes):
+        """Cache file for this exact (prompt, image) pair, or None when caching is
+        off. Content-addressed: the digest covers the prompt AND the raw image
+        bytes, so a hit can only ever be a byte-identical request."""
+        if not GEMINI_CACHE_DIR:
+            return None
+        h = hashlib.sha256()
+        h.update((prompt or "").encode("utf-8"))
+        h.update(b"\x00")                      # domain separator: prompt | image
+        h.update(bytes(image_bytes))
+        return os.path.join(GEMINI_CACHE_DIR, f"{h.hexdigest()}.json")
+
     def query_callback(self, request, response):
         t_start = time.monotonic()
         rec = self.logger.start()
@@ -181,6 +213,24 @@ class GeminiServer(Node):
         self.get_logger().info(
             f"request received: image={has_image} prompt={preview!r} "
             f"(model={self.model})")
+
+        cache_path = self._cache_path(request.prompt, request.image.data)
+        if cache_path and os.path.exists(cache_path):
+            try:
+                with open(cache_path) as f:
+                    cached = json.load(f)
+                response.response = cached['response']
+                response.success = True
+                response.message = "ok (cached)"
+                rec.set(cached=True)
+                rec.save_text('response', response.response)
+                self.get_logger().info(
+                    f"cache HIT ({os.path.basename(cache_path)}) — no API call")
+                rec.finish(success=True, message=response.message)
+                return response
+            except Exception as e:               # corrupt/partial entry: re-query
+                self.get_logger().warn(
+                    f"cache entry {cache_path} unreadable ({e}); re-querying")
 
         # Build the Gemini contents list from whichever inputs were provided.
         contents = []
@@ -232,6 +282,20 @@ class GeminiServer(Node):
                 boxes = _extract_boxes(response.response)
                 if boxes:
                     rec.set(boxes=boxes)
+                if cache_path:
+                    # Write via a temp file + atomic rename so a crash mid-write
+                    # can't leave a half-JSON entry that later reads as a miss.
+                    try:
+                        tmp = f"{cache_path}.tmp"
+                        with open(tmp, 'w') as f:
+                            json.dump({'prompt': request.prompt,
+                                       'model': self.model,
+                                       'response': response.response}, f)
+                        os.replace(tmp, cache_path)
+                        self.get_logger().info(
+                            f"cached -> {os.path.basename(cache_path)}")
+                    except Exception as e:
+                        self.get_logger().warn(f"could not write cache: {e}")
                 self._save_gemini_overlay(rec, rgb, request.prompt,
                                           response.response, boxes)
                 rec.finish(success=True, message="ok")

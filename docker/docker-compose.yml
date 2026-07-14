@@ -143,6 +143,14 @@ services:
       # Gemini API key for the vision pipeline's gemini backbone + h12_skills.
       # Passed through from the host shell: export GEMINI_API_KEY before running.
       - GEMINI_API_KEY=${GEMINI_API_KEY:-}
+      # Content-addressed cache for gemini_server responses, keyed on the exact
+      # (prompt, image bytes). UNSET = off, which is what a real-robot bringup
+      # wants (a remembered box for a moved object would be wrong). The grasp
+      # benchmark exports it: a seeded sim episode renders an identical frame each
+      # run, so caching gives every method a byte-identical box AND keeps a matrix
+      # inside the free tier's 20-req/day quota. Lives under core_ws (bind-mounted),
+      # so the cache survives container restarts between episodes.
+      - GEMINI_CACHE_DIR=${GEMINI_CACHE_DIR:-}
       # GraspGenX released checkpoints ship in the repo (git-LFS) and reach the
       # container via the core_ws bind mount below. The image's
       # GRASPGENX_CHECKPOINT_DIR defaults to an empty /opt staging dir, so point

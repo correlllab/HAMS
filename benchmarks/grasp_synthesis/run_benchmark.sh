@@ -58,6 +58,13 @@ mkdir -p "$VIDEOS_DIR"
 # docker/.env drives ROS_DOMAIN_ID + GEMINI_API_KEY for every container.
 if [ -f docker/.env ]; then set -a; source docker/.env; set +a; fi
 export ROS_DOMAIN_ID="${ROS_DOMAIN_ID:-1}"
+# Cache gemini_server responses for the whole matrix (see docker-compose.yml).
+# A seeded episode renders the same head-cam frame every run, so every method
+# gets a BYTE-IDENTICAL box — the fairness property the comparison depends on —
+# and a re-run costs no API calls. Without this a matrix exhausts the free tier's
+# 20-requests/day quota partway through and the 429s look exactly like
+# "perception found nothing". Set GEMINI_CACHE_DIR= to force live calls.
+export GEMINI_CACHE_DIR="${GEMINI_CACHE_DIR-/home/code/core_ws/benchmark_results/gemini_cache}"
 
 cleanup() {
     docker rm -f hams_sim_robocasa >/dev/null 2>&1 || true
@@ -99,11 +106,17 @@ $COMPOSE --profile ros run -d --rm --remove-orphans --name hams_ros ros \
 # "up to date" heuristic while missing most of the workspace.
 wait_for 1800 "core_ws colcon build (model_server installed)" \
     docker exec hams_ros test -d /home/code/core_ws/install/model_server
-# Force-build h12_skills so the grasp_benchmark entry point exists even when
-# launch_ros.sh skipped the build on an up-to-date install/.
+# Force-build h12_skills AND its message deps, so the grasp_benchmark entry point
+# exists even when launch_ros.sh skipped the build on an up-to-date install/.
+# --packages-up-to (not --packages-select) is load-bearing: launch_ros.sh's "up to
+# date" heuristic looks only at install/, so after a custom_ros_messages bump that
+# adds an action (e.g. SkillFrontierExplore) the generated python is missing while
+# install/ still looks complete — the skills node then dies at IMPORT and every
+# episode fails for a reason that has nothing to do with grasping. Building up-to
+# h12_skills regenerates the messages it imports.
 docker exec hams_ros bash -lc \
     "source /opt/ros/humble/setup.bash && cd /home/code/core_ws && \
-     colcon build --symlink-install --packages-select h12_skills"
+     colcon build --symlink-install --packages-up-to h12_skills"
 
 IN_ROS="docker exec hams_ros bash -lc"
 SRC="source /opt/ros/humble/setup.bash && source /home/code/core_ws/install/setup.bash && export ROS_DOMAIN_ID=$ROS_DOMAIN_ID"
@@ -148,6 +161,12 @@ for seed in $SEEDS; do
             $IN_ROS "$SRC && ros2 service list | grep -q sam_segment"
         wait_for 120 "named_config action" \
             $IN_ROS "$SRC && ros2 action list | grep -q named_config"
+        # /skill/grasp specifically: named_config is served by h12_ros2_controller,
+        # NOT the skills node, so it comes up even when h12_skills has died at
+        # import (a stale custom_ros_messages install/ did exactly that). Without
+        # this gate the episode runs anyway and fails for an unrelated-looking reason.
+        wait_for 120 "skills node (/skill/grasp action)" \
+            $IN_ROS "$SRC && ros2 action list | grep -q '/skill/grasp'"
         sleep 5   # settle: model warmup, first camera frames, TF tree
 
         # --- the episode -------------------------------------------------------
@@ -156,6 +175,13 @@ for seed in $SEEDS; do
                 --arm $ARM --out $out_json"; then
             echo "episode $stamp FAILED (see container logs)" >&2
         fi
+        # Salvage the bringup log BEFORE the containers go away: it holds the
+        # skill's own filter/tier/IK lines (how many candidates survived each
+        # stage, which ones were tried, why each was rejected), which is the only
+        # record of WHY an episode failed. The EXIT trap removes the containers,
+        # so a log left inside one is lost exactly when it's most wanted.
+        docker cp "hams_ros:/tmp/bringup_${stamp}.log" \
+            "$RESULTS_DIR/${stamp}.bringup.log" >/dev/null 2>&1 || true
         $IN_ROS "pkill -INT -f h1_sim_bringup" || true
         docker rm -f hams_sim_robocasa >/dev/null 2>&1 || true
     done
