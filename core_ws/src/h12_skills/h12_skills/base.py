@@ -710,7 +710,8 @@ class SkillsBase(Node):
 
     # ------------------------------------------------------- motion primitives
     def move_frame_to(self, frame, pose,
-                      outer_gh=None, duration_sec=3, do_plan=True):
+                      outer_gh=None, duration_sec=3, do_plan=True,
+                      lin_tol=0.01, ang_tol=0.05):
         """Send a frame to `pose` (position + orientation, in the pelvis frame) via
         /frame_task as a single combined move to the full target pose (target
         position + target orientation reached together).
@@ -718,20 +719,28 @@ class SkillsBase(Node):
         `frame` is the URDF frame to drive (GRASP_FRAMES[arm], the GraspGenX
         gripper-base frame, for grasping). Pass the skill's goal handle as outer_gh
         so a skill cancel promptly cancels the in-flight frame_task goal too. Returns
-        whether the move reached the target."""
+        whether the move reached the target.
+
+        `lin_tol` / `ang_tol` are how close the driven frame must actually get for
+        this to report success. The defaults suit a pose you're about to act at;
+        loosen them for a via-point (e.g. a pre-grasp standoff, where a couple of
+        cm of slop is irrelevant and the strict default would reject an otherwise
+        perfectly good grasp)."""
         x, y, z = float(pose.position.x), float(pose.position.y), float(pose.position.z)
         quat = (pose.orientation.x, pose.orientation.y, pose.orientation.z, pose.orientation.w)
         target = Pose()
         target.position = Point(x=x, y=y, z=z)
         target.orientation = Quaternion(
             x=float(quat[0]), y=float(quat[1]), z=float(quat[2]), w=float(quat[3]))
-        return self._send_frame_move(frame, target, duration_sec, outer_gh, do_plan)
+        return self._send_frame_move(frame, target, duration_sec, outer_gh, do_plan,
+                                     lin_tol=lin_tol, ang_tol=ang_tol)
 
-    def _send_frame_move(self, frame, pose, duration_sec, outer_gh, do_plan):
+    def _send_frame_move(self, frame, pose, duration_sec, outer_gh, do_plan,
+                         lin_tol=0.01, ang_tol=0.05):
         """Command ONE /frame_task goal: drive `frame` to `pose` (a Pose already in
         the pelvis frame) over `duration_sec`, returning whether it reached the
-        target (gated on the server's streamed IK convergence). The building block
-        for move_frame_to."""
+        target (gated on the server's streamed IK convergence to within
+        `lin_tol` m / `ang_tol` rad). The building block for move_frame_to."""
         goal = FrameTask.Goal()
         goal.frame_names = [frame]
         goal.frame_targets = [pose]
@@ -771,7 +780,7 @@ class SkillsBase(Node):
         # unreachable one. Gate on the last streamed pelvis-frame error instead
         # (loose vs the server's 1mm/2mrad to absorb feedback-vs-break jitter).
         if ok and last:
-            ok = last['lin'] < 0.01 and last['ang'] < 0.05
+            ok = last['lin'] < lin_tol and last['ang'] < ang_tol
         if last:
             self.get_logger().info(
                 f'frame_task[{frame}] done: lin={last["lin"] * 1000:.1f}mm '
