@@ -171,7 +171,7 @@ def generate_launch_description():
                             'config', 'mjpc_real.yaml'),
             ],
             output='screen',
-            #condition=IfCondition(LaunchConfiguration('start_position_verified')),
+            condition=IfCondition(LaunchConfiguration('start_position_verified')),
 
         ),
 

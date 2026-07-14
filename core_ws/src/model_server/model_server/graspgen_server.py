@@ -25,11 +25,9 @@ from rclpy.qos import QoSProfile, DurabilityPolicy
 from rclpy.callback_groups import ReentrantCallbackGroup
 from rclpy.executors import MultiThreadedExecutor
 
-from builtin_interfaces.msg import Time
-from geometry_msgs.msg import Point, PoseStamped
+from geometry_msgs.msg import PoseStamped
 from sensor_msgs.msg import PointCloud2
 from sensor_msgs_py import point_cloud2
-from visualization_msgs.msg import Marker, MarkerArray
 
 import trimesh
 from graspgenx.samplers import run_planner_on_object
@@ -43,7 +41,7 @@ import cv2
 
 # viser web visualizer (graspgenx.utils.viser_utils imports `viser` at module
 # load). It's an optional, viz-only dep that may be absent on a pre-rebuild image,
-# so guard the import and degrade to RViz-markers-only when it's missing.
+# so guard the import and skip the live viser scene when it's missing.
 try:
     from graspgenx.utils.viser_utils import (
         create_visualizer, visualize_pointcloud, visualize_x_grasp,
@@ -59,14 +57,6 @@ except Exception:                                 # viser not installed
 # overrides per request.
 DEFAULT_GRIPPER = 'magpie'
 MIN_OBJECT_POINTS = 30
-# RViz grasp markers: how many of the ranked grasps to draw. Each is drawn as an
-# arrow from the GraspGenX pose ORIGIN (the gripper base, where the IK pins
-# *_graspgenx_frame) along +Z (approach) to the CONTACT point where the fingers
-# close — so the arrow TIP sits on the object, i.e. "where the gripper point is".
-# GRASPGEN_MARKER_LENGTH_M is that base->contact arrow length; magpie = 0.1146 m
-# (its config fingertip = [~0, 0.0022, 0.1146]).
-N_GRASP_MARKERS = 5
-GRASPGEN_MARKER_LENGTH_M = 0.1146
 
 # Collision filtering against an optional scene cloud (obstacles), done only when
 # the request carries a non-empty scene_cloud. A grasp is dropped when the gripper
@@ -112,16 +102,23 @@ DUMMY_MESH_MIN_EXTENT_M = 0.05
 # angles, each gated on its own (see _plan_cb):
 #   * PITCH — tilt of +Z above/below horizontal = asin(az), where az is the
 #     approach's z-component (col 2, row 2). Kept when |az| <= sin(APPROACH_MAX_
-#     PITCH_DEG). This rejects near-vertical (top-down / bottom-up) approaches the
-#     arm can't reach — the gripper Z bottoms out at ~35 deg down or up.
+#     PITCH_DEG). At 90 deg this admits every pitch (sin(90)=1), i.e. the gate is
+#     effectively disabled — near-vertical top-down / bottom-up approaches pass.
+#     (Earlier reach notes put the arm's steepest reachable approach at ~45 deg
+#     below horizontal, so values above ~45 may admit unreachable grasps.)
 #   * YAW — heading of +Z off robot-forward +X in the horizontal plane =
 #     atan2(ay, ax) (approach's y- and x-components). Kept when |yaw| <=
-#     APPROACH_MAX_YAW_DEG. A SYMMETRIC forward cone (both sides), so it also
-#     rejects sideways and behind-the-object approaches (|yaw| > 90).
+#     APPROACH_MAX_YAW_DEG. A SYMMETRIC forward cone (both sides); at 180 deg
+#     |yaw| <= pi is always true, so every heading passes — including sideways
+#     and behind-the-object approaches.
 # The two gates are ANDed. Replaces the old single forward-cone (APPROACH_MAX_
 # ANGLE_DEG) plus per-arm lateral cut with an explicit pitch/yaw reach envelope.
-APPROACH_MAX_PITCH_DEG = 35.0   # max tilt of the +Z approach axis off horizontal (down or up)
-APPROACH_MAX_YAW_DEG = 45.0     # max heading of the +Z approach axis off robot-forward +X
+# NOTE: with pitch=90 and yaw=180 BOTH gates are no-ops, so the approach-direction
+# filter is effectively disabled — the widest, most varied grasp set is returned
+# and reachability pruning is left entirely to the grasp skill's IK fallback. Dial
+# these back down (pitch ~45, yaw ~45) to re-impose a real reach envelope.
+APPROACH_MAX_PITCH_DEG = 90.0    # max tilt of the +Z approach axis off horizontal (down or up)
+APPROACH_MAX_YAW_DEG = 180.0     # max heading of the +Z approach axis off robot-forward +X
 APPROACH_MAX_PITCH_SIN = math.sin(math.radians(APPROACH_MAX_PITCH_DEG))
 APPROACH_MAX_YAW_RAD = math.radians(APPROACH_MAX_YAW_DEG)
 
@@ -145,12 +142,24 @@ GRASPGEN_GRASPS_FILENAME = 'generated_grasps.npy'
 _Gripper = namedtuple('_Gripper', 'sampler width info surf_pts')
 
 # Candidate planner kwargs (filtered to run_planner_on_object's real signature).
+# Tuned for MAXIMUM grasp count and variety (paired with the disabled approach
+# filter above). Levers, vs. the stock 1024 / 36-yaw / 2-offset / 1cm config:
+#   * num_grasps / topk_num_grasps 1024 -> 2048: keep twice as many ranked grasps.
+#   * moe_num_yaws 36 -> 72: sample a yaw every 5 deg (was 10), doubling the
+#     rotational spread of finger-closing directions at each grasp position.
+#   * moe_z_offsets_cm (-2,0) -> (-4,-2,0,2): four approach-DEPTH standoffs instead
+#     of two, so grasps vary along the approach axis as well.
+#   * moe_obb_position_spacing_cm 1.0 -> 0.5: sample OBB grasp positions on a 5mm
+#     grid (was 10mm), roughly 4x the spatial candidate density.
+# grasp_threshold stays -1.0 (no confidence cut). These multiply the pre-topk
+# candidate pool, so planning is heavier/slower on the GPU — trim any lever back
+# if latency matters more than breadth.
 PLANNER_KWARGS = dict(
-    planner='graspmoe', grasp_threshold=-1.0, num_grasps=1024,
-    topk_num_grasps=1024, moe_num_yaws=36, moe_z_offsets_cm=(-2.0, 0.0),
+    planner='graspmoe', grasp_threshold=-1.0, num_grasps=2048,
+    topk_num_grasps=2048, moe_num_yaws=72, moe_z_offsets_cm=(-4.0, -2.0, 0.0, 2.0),
     moe_outlier_threshold=0.014, moe_outlier_k=20, moe_obb_mode='advanced',
     moe_skip_obb_rule='auto', moe_obb_density='dense-topandside',
-    moe_obb_position_spacing_cm=1.0,
+    moe_obb_position_spacing_cm=0.5,
 )
 
 # GraspGenX checkpoints: point GRASPGENX_CHECKPOINT_DIR at the dir that holds the
@@ -236,26 +245,23 @@ class GraspGenServer(Node):
                 f'default gripper {DEFAULT_GRIPPER!r} failed to load ({e}); '
                 f'pass a valid gripper_name in the request')
 
-        # Latched (TRANSIENT_LOCAL) so RViz still gets the last grasp markers even
-        # if it subscribes after a plan was served. One arrow per ranked grasp, in
-        # the request's frame (pelvis), drawn along the GraspGenX approach axis.
-        self._marker_pub = self.create_publisher(
-            MarkerArray, 'graspgen_markers',
-            QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL))
         # Republish the object cloud we planned on, so it can be inspected in RViz
-        # against the grasp markers (same frame). Also latched.
+        # against the grasp skill's markers on 'graspgen_markers' (same frame —
+        # the skill, not this server, draws the grasp candidates). Latched
+        # (TRANSIENT_LOCAL) so RViz still gets the last cloud even if it
+        # subscribes after a plan was served.
         self._cloud_pub = self.create_publisher(
             PointCloud2, 'grasp_cloud',
             QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL))
         # Republish the scene/obstacle cloud (when a request carries one) on its own
         # topic, so the obstacles the collision filter ran against are visible in
-        # RViz alongside the object cloud and grasp markers. Also latched.
+        # RViz alongside the object cloud. Also latched.
         self._scene_pub = self.create_publisher(
             PointCloud2, 'scene_cloud',
             QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL))
 
         # Live viser visualizer (web GUI). Started once; each plan resets and
-        # redraws its scene. Optional — degrade to RViz markers if viser is absent.
+        # redraws its scene. Optional — skip the live scene if viser is absent.
         self._vis = None
         if _VISER_OK:
             try:
@@ -263,9 +269,9 @@ class GraspGenServer(Node):
                 self.get_logger().info(
                     f'viser visualizer at http://localhost:{VISER_PORT}')
             except Exception as e:
-                self.get_logger().warn(f'viser init failed ({e}); RViz markers only')
+                self.get_logger().warn(f'viser init failed ({e}); no live grasp viz')
         else:
-            self.get_logger().info('viser not installed; RViz markers only')
+            self.get_logger().info('viser not installed; no live grasp viz')
 
         self.create_service(GraspGen, 'graspgen', self._plan_cb,
                             callback_group=ReentrantCallbackGroup())
@@ -545,7 +551,6 @@ class GraspGenServer(Node):
         rec.save_array('grasps', grasps)            # raw (M, 4, 4) in the cloud frame
         rec.save_array('scores', confs)
         self._append_generated_grasps(grasps)       # persist to the cumulative file
-        self._publish_grasp_markers(frame, grasps)
         self._save_grasp_viz(rec, pts, grasps, width)
         self._render_viser(pts, scene_pts, grasps, confs, gr.info, obb_dict)
         rec.finish(success=True, message=response.message)
@@ -642,77 +647,6 @@ class GraspGenServer(Node):
         except Exception as e:                          # viz must never break planning
             self.get_logger().warn(f'viser render failed: {e}')
 
-    def _publish_grasp_markers(self, frame, grasps):
-        """Publish the generated grasps as RViz markers on 'graspgen_markers'
-        (latched), in `frame` (pelvis). For each ranked grasp:
-          - an ARROW from the GraspGenX pose ORIGIN (gripper base, where the IK
-            pins *_graspgenx_frame) along +Z to the CONTACT point, so the arrow TIP
-            lands on the object = where the fingers close ("the gripper point");
-          - a small SPHERE at that contact point.
-        The base (arrow tail) is where the driven frame — and ~8 cm behind it, the
-        wrist — ends up; the tip is where the gripper actually grasps. This makes
-        the base-vs-contact distinction visible so the wrist sitting near the base
-        isn't mistaken for the gripper being short. Best grasp (grasps[0], the one
-        the skill executes) is bright green; the rest are dim. Mirrors
-        _save_grasp_viz so the markers match the PNG."""
-        try:
-            G = np.asarray(
-                [np.asarray(g, dtype=np.float64).reshape(4, 4) for g in grasps])
-            centers = G[:, :3, 3]                  # already in the cloud frame
-            topk = min(N_GRASP_MARKERS, len(G))
-            # Zero stamp = "use the latest available transform". The markers live in
-            # the moving `pelvis` frame, so a now() stamp races ahead of the latest
-            # pelvis->map TF and RViz drops them ("extrapolation into the future").
-            stamp = Time()
-
-            arr = MarkerArray()
-            # Clear any markers from a previous plan so stale ones don't linger.
-            clear = Marker()
-            clear.header.frame_id = frame
-            clear.action = Marker.DELETEALL
-            arr.markers.append(clear)
-
-            for i in range(topk):
-                R, base = G[i, :3, :3], centers[i]
-                contact = base + GRASPGEN_MARKER_LENGTH_M * R[:, 2]   # +Z approach -> TCP
-                best = (i == 0)
-                r, g, b = (0.0, 1.0, 0.0) if best else (0.5, 0.5, 0.0)
-                a = 1.0 if best else 0.5
-
-                arrow = Marker()
-                arrow.header.frame_id = frame
-                arrow.header.stamp = stamp
-                arrow.ns = 'graspgen_approach'
-                arrow.id = i
-                arrow.type = Marker.ARROW
-                arrow.action = Marker.ADD
-                arrow.points = [
-                    Point(x=float(base[0]), y=float(base[1]), z=float(base[2])),
-                    Point(x=float(contact[0]), y=float(contact[1]),
-                          z=float(contact[2]))]
-                arrow.scale.x = 0.008                  # shaft diameter
-                arrow.scale.y = 0.018                  # head diameter
-                arrow.scale.z = 0.03                   # head length
-                arrow.color.r, arrow.color.g, arrow.color.b, arrow.color.a = r, g, b, a
-                arr.markers.append(arrow)
-
-                dot = Marker()
-                dot.header.frame_id = frame
-                dot.header.stamp = stamp
-                dot.ns = 'graspgen_contact'
-                dot.id = i
-                dot.type = Marker.SPHERE
-                dot.action = Marker.ADD
-                dot.pose.position = Point(
-                    x=float(contact[0]), y=float(contact[1]), z=float(contact[2]))
-                dot.pose.orientation.w = 1.0
-                dot.scale.x = dot.scale.y = dot.scale.z = 0.02
-                dot.color.r, dot.color.g, dot.color.b, dot.color.a = r, g, b, a
-                arr.markers.append(dot)
-            self._marker_pub.publish(arr)
-        except Exception as e:                          # viz must never break planning
-            self.get_logger().warn(f'grasp marker publish failed: {e}')
-
     def _save_grasp_viz(self, rec, pts, grasps, width):
         """Render an orthographic 'photo' of the object cloud + the generated
         grasps, drawn with cv2 (the ros image's matplotlib 3D backend is broken).
@@ -772,7 +706,7 @@ def main():
     rclpy.init()
     node = GraspGenServer()
     # MultiThreadedExecutor (matching gemini/sam servers) so a long GPU plan on the
-    # service thread doesn't block discovery, latched-marker publishing, or a second
+    # service thread doesn't block discovery, latched-cloud publishing, or a second
     # request. The service runs in a ReentrantCallbackGroup (see __init__).
     executor = MultiThreadedExecutor()
     executor.add_node(node)

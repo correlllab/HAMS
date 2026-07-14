@@ -46,6 +46,7 @@ from custom_ros_messages.action import (
     SkillTurnLever, SkillTwistKnob, SkillFrontierExplore,
 )
 from magpie_msgs.srv import SetGripperPosition, SetGripperForce
+from magpie_msgs.msg import GripperState
 from std_srvs.srv import Trigger
 
 from .perception_utils import (
@@ -85,6 +86,12 @@ GRIPPER_NS = {'left': '/left/gripper', 'right': '/right/gripper'}
 
 # Grip-force limit (N) applied via set_force before closing on an object.
 GRIP_FORCE_N = 30.0
+# ROS-time wait (get_clock().sleep_for — respects sim time) after an open/close so
+# the fingers finish moving before the arm starts its next motion. The /close
+# Trigger returns in ~5 ms and the position wait under-estimates finger travel, so
+# without this the arm moves while the gripper is still opening/closing. Raise if
+# the fingers are slower than this.
+GRIPPER_SETTLE_SEC = 1.0
 # Full-open gripper aperture [mm]. The magpie driver clamps set_position to
 # 0-106 mm (gripper.set_goal_aperture), so 106 mm is "fully open" and 0 mm is
 # "fully closed" — the endpoints the open/close percentage helpers map to.
@@ -257,6 +264,23 @@ class SkillsBase(Node):
                                     callback_group=self._cb_group)
             for arm, ns in GRIPPER_NS.items()
         }
+        # Live gripper aperture [mm] from the driver's published state (10 Hz),
+        # cached per arm. Unlike _gripper_actual_mm (only refreshed by a position
+        # command), this tracks the aperture after ANY close — including the
+        # force-based /close close_gripper now uses — so the held-object check
+        # stays valid. Read via gripper_aperture().
+        self._gripper_state_mm = {}
+        self.gripper_state_subs = {
+            arm: self.create_subscription(
+                GripperState, f'{ns}/state',
+                lambda msg, a=arm: self._on_gripper_state(a, msg),
+                10, callback_group=self._cb_group)
+            for arm, ns in GRIPPER_NS.items()
+        }
+        # Aperture [mm] the driver reported after the last set_gripper per arm —
+        # lets callers verify a close actually stopped ON an object (~0 mm =
+        # fingers met each other, nothing held; see pick_place's held check).
+        self._gripper_actual_mm = {}
 
         # --- perception service clients ---------------------------------------
         # gemini_query: image (+/- text) -> Gemini text; sam_segment: image +
@@ -528,29 +552,45 @@ class SkillsBase(Node):
         py1, py2 = sorted((y1 / 1000.0 * h, y2 / 1000.0 * h))
         return [px1, py1, px2, py2]
 
-    def detect_object_cloud(self, obj, run, gh):
-        """Locate `obj` in the head camera: gemini box (optional, budget-capped)
-        -> sam mask -> pelvis-frame object cloud, plus the whole-frame scene
-        cloud as obstacle context. Returns (obj_cloud, scene_cloud, None) on
-        success or (None, None, reason). Shared by the grasp skill (pick object)
-        and pick_place (place target).
+    def detect_object_cloud(self, obj, run, gh, box_provider=None, use_sam=True):
+        """Locate `obj` in the head camera: bounding box -> object cloud, plus the
+        whole-frame scene cloud as obstacle context. Returns (obj_cloud,
+        scene_cloud, None) on success or (None, None, reason). Shared by the grasp
+        skill (pick object) and pick_place (place target).
 
-        Always prompts SAM with the object name; when Gemini returns a box that
-        encompasses the whole object, it is passed too as a positive exemplar so
-        text + box together pin down the right instance. The box is optional —
-        the text alone (concept segmentation) is the fallback when Gemini has no
-        box. Gemini latency is highly variable (seconds to minutes) and None is
-        also a legitimate "no box", so cancel/timeout is disambiguated here
-        before spending the SAM call."""
-        box = self._gemini_box(obj, run, gh)   # whole-object box (pixel xyxy), or None
+        `box_provider(obj, run, gh) -> pixel-xyxy box or None` supplies the box;
+        it defaults to self._gemini_box, but the grasp skill passes self._yolo_box
+        for battery-workcell parts so the head-camera YOLO detector supplies the box
+        instead of Gemini.
+
+        `use_sam` selects how the box becomes an object cloud:
+          * True  (default) — SAM segments the box region and only the masked pixels
+            are back-projected. Best for larger/irregular objects.
+          * False — the box RECTANGLE is back-projected directly (box_to_cloud), no
+            SAM. Used for small components (screws/nuts/bolts) where SAM
+            segmentation is unreliable at that scale; the box then MUST be present.
+
+        With SAM: always prompts it with the object name; a whole-object box is
+        passed too as a positive exemplar so text + box together pin down the right
+        instance. The box is optional there (text alone is the fallback). Gemini
+        latency is highly variable and None is a legitimate "no box", so
+        cancel/timeout is disambiguated here before spending the SAM call."""
+        box = (box_provider or self._gemini_box)(obj, run, gh)  # box (pixel xyxy) or None
         if gh.is_cancel_requested or run.remaining() <= 0.0:
             return None, None, 'detection canceled or timed out'
-        mask = self.segment(text=obj, positive_boxes=box, outer_gh=gh)
-        if mask is None:
-            return None, None, f'no mask for {obj!r}'
-        obj_cloud = self.mask_to_cloud(mask, target_frame='pelvis')
+        if use_sam:
+            mask = self.segment(text=obj, positive_boxes=box, outer_gh=gh)
+            if mask is None:
+                return None, None, f'no mask for {obj!r}'
+            obj_cloud = self.mask_to_cloud(mask, target_frame='pelvis')
+            reason = f'{obj!r} mask produced no usable cloud'
+        else:
+            if box is None:
+                return None, None, f'no bounding box for {obj!r} (SAM disabled)'
+            obj_cloud = self.box_to_cloud(box, target_frame='pelvis')
+            reason = f'{obj!r} bounding box produced no usable cloud'
         if obj_cloud is None:
-            return None, None, f'{obj!r} mask produced no usable cloud'
+            return None, None, reason
         # Whole-frame cloud as obstacle context so graspgen can collision-filter
         # grasps against the surroundings (optional — None just skips filtering).
         scene = self.scene_to_cloud(target_frame='pelvis')
@@ -602,6 +642,34 @@ class SkillsBase(Node):
             return None
         if len(pts) < MIN_GRASP_POINTS:
             self.get_logger().warn(f'mask_to_cloud: only {len(pts)} valid points')
+            return None
+        return pts
+
+    def box_to_cloud(self, box, target_frame='pelvis'):
+        """Back-project the pixel-xyxy `box` RECTANGLE (every valid pixel inside it,
+        no SAM mask) with the latest aligned depth/intrinsics into an (N, 3) object
+        cloud in `target_frame`, or None. For small components (screws/nuts/bolts)
+        where SAM segmentation is unreliable — the detector box + depth IS the
+        object cloud. The box is clamped to the image; note it also picks up
+        whatever surface shows between/around the part inside the box."""
+        info = self.latest_caminfo()
+        if box is None or info is None or not info.width or not info.height:
+            self.get_logger().error('box_to_cloud: missing box or caminfo')
+            return None
+        w, h = int(info.width), int(info.height)
+        x1, y1, x2, y2 = box
+        u0, u1 = max(0, int(round(min(x1, x2)))), min(w, int(round(max(x1, x2))))
+        v0, v1 = max(0, int(round(min(y1, y2)))), min(h, int(round(max(y1, y2))))
+        if u1 <= u0 or v1 <= v0:
+            self.get_logger().warn(f'box_to_cloud: degenerate box {box}')
+            return None
+        mask = np.zeros((h, w), dtype=bool)
+        mask[v0:v1, u0:u1] = True
+        pts = self._depth_to_cloud(mask, target_frame)
+        if pts is None:
+            return None
+        if len(pts) < MIN_GRASP_POINTS:
+            self.get_logger().warn(f'box_to_cloud: only {len(pts)} valid points')
             return None
         return pts
 
@@ -808,6 +876,18 @@ class SkillsBase(Node):
             f'best-effort (last lin={lin * 1000:.1f}mm ang={ang:.3f}rad)')
         return True
 
+    def _on_gripper_state(self, arm, msg):
+        """Cache the driver's published gripper aperture [mm] for `arm`."""
+        self._gripper_state_mm[arm] = float(msg.position)
+
+    def gripper_aperture(self, arm):
+        """Latest gripper opening width [mm] for `arm`, or None. Prefers the
+        driver's published state (which tracks the aperture after ANY close,
+        including the force-based /close); falls back to the last position-command
+        result when no state has been received yet."""
+        val = self._gripper_state_mm.get(arm)
+        return val if val is not None else self._gripper_actual_mm.get(arm)
+
     def set_gripper(self, arm, position_mm, speed=1.0):
         """Direct position command (mm); used to pre-open to a measured grasp
         width. Full open/close go through the dedicated services below."""
@@ -818,6 +898,7 @@ class SkillsBase(Node):
             self.gripper_clis[arm], req, f'SetGripperPosition({arm})')
         if result is None:
             return False
+        self._gripper_actual_mm[arm] = float(result.actual_position)
         self.get_logger().info(
             f'gripper {arm}: success={result.success} '
             f'actual={result.actual_position:.2f} mm — {result.message}')
@@ -846,19 +927,28 @@ class SkillsBase(Node):
     def open_gripper(self, arm, amount=1.0):
         """Open the gripper by `amount`, a fraction of its full range where 0 is
         fully closed and 1 is fully open (default 1 = fully open). Commanded as a
-        position so intermediate openings are honored."""
+        position so intermediate openings are honored. Waits GRIPPER_SETTLE_SEC
+        after commanding so the fingers finish moving before the arm does."""
         amount = min(max(float(amount), 0.0), 1.0)
-        return self.set_gripper(arm, amount * GRIPPER_MAX_WIDTH_MM)
-
-    def close_gripper(self, arm, amount=1.0):
-        """Bound the grip force, then close the gripper by `amount`, a fraction of
-        its full range where 0 is fully open and 1 is fully closed (default
-        1 = fully closed). Commanded as a position so the force limit still stops
-        the fingers when they meet the object."""
-        amount = min(max(float(amount), 0.0), 1.0)
-        if not self.set_gripper_force(arm):
+        if not self.set_gripper(arm, amount * GRIPPER_MAX_WIDTH_MM):
             return False
-        return self.set_gripper(arm, (1.0 - amount) * GRIPPER_MAX_WIDTH_MM)
+        self.get_clock().sleep_for(RclpyDuration(seconds=GRIPPER_SETTLE_SEC))   # let the fingers finish before the arm moves
+        return True
+
+    def close_gripper(self, arm, force_n=GRIP_FORCE_N):
+        """Close the gripper with a SET FORCE, using the gripper node's own
+        services: bound the grip force (torque limit) via set_force, then trigger
+        the node's /close, which drives the fingers shut and holds against the
+        object at that force. A force-based close rather than a position command —
+        the fingers seek and grip the object at `force_n` (N) whatever its width.
+        Waits GRIPPER_SETTLE_SEC after triggering so the fingers finish closing
+        before the arm moves (the /close service returns almost immediately)."""
+        if not self.set_gripper_force(arm, force_n):
+            return False
+        if not self._trigger_gripper(self.gripper_close_clis[arm], f'close({arm})'):
+            return False
+        self.get_clock().sleep_for(RclpyDuration(seconds=GRIPPER_SETTLE_SEC))   # let the fingers finish closing before the arm moves
+        return True
 
     def _validated_arm(self, goal):
         arm = goal.arm.strip().lower()
