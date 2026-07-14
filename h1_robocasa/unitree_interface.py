@@ -54,6 +54,11 @@ class SimInterface:
         self._cmd_kp = np.zeros(MOTOR_NUM, dtype=np.float64)
         self._cmd_kd = np.zeros(MOTOR_NUM, dtype=np.float64)
         self._cmd_tau = np.zeros(MOTOR_NUM, dtype=np.float64)
+        # Fallback stance PD for motors no controller is driving (see set_hold).
+        # NaN target == no hold, i.e. the original zero-torque behaviour.
+        self._hold_q = np.full(MOTOR_NUM, np.nan, dtype=np.float64)
+        self._hold_kp = np.zeros(MOTOR_NUM, dtype=np.float64)
+        self._hold_kd = np.zeros(MOTOR_NUM, dtype=np.float64)
 
         # initialize channel
         ChannelFactoryInitialize(id=DOMAIN_ID)
@@ -136,24 +141,45 @@ class SimInterface:
             self._cmd_kd[i] = mc.kd
             self._cmd_tau[i] = mc.tau
 
+    def set_hold(self, motor_ids, q, kp, kd):
+        """Passively hold `motor_ids` at `q` whenever NOTHING is commanding them.
+
+        A motor nobody commands gets zero torque, i.e. it goes limp. With the
+        lower-body controller disabled (the grasp benchmark runs use_mjpc:=false,
+        since the robot hangs in the elastic-band tether and only the arms move)
+        that left the 12 leg joints dead: the robot flopped into a different pose
+        every run — pelvis height varied ~15 cm between otherwise identical
+        episodes — which silently randomised what the arm could reach. Holding the
+        legs at their spawn stance makes the stance reproducible.
+
+        This only applies to motors in mode 0, so it is inert the moment a real
+        controller (MJPC, walking policy, ...) takes a joint over."""
+        self._hold_q[motor_ids] = q
+        self._hold_kp[motor_ids] = kp
+        self._hold_kd[motor_ids] = kd
+
     def write_ctrl(self):
         """Per-sim-step PD: tau + kp*(q*-q) + kd*(dq*-dq) from the latched command
         and the CURRENT q/dq. Call every step (caller holds the sim lock) so the
-        damping tracks the true velocity instead of a 20ms-stale one."""
+        damping tracks the true velocity instead of a 20ms-stale one. Motors that
+        nobody commands fall back to set_hold()'s stance PD, or to zero torque."""
         if self.data is None:
             return
         r = self.resolver
-        if self.timeout_detected:
-            self.data.ctrl[r.motor_ctrl] = 0.0
-            return
+        timed_out = self.timeout_detected
         for i in range(self.num_motor):
             ci = int(r.motor_ctrl[i])
-            if self._cmd_mode[i] == 1:
+            if (not timed_out) and self._cmd_mode[i] == 1:
                 q_cur = self.data.qpos[r.motor_qpos[i]]
                 dq_cur = self.data.qvel[r.motor_qvel[i]]
                 self.data.ctrl[ci] = (self._cmd_tau[i]
                                       + self._cmd_kp[i] * (self._cmd_q[i] - q_cur)
                                       + self._cmd_kd[i] * (self._cmd_dq[i] - dq_cur))
+            elif not np.isnan(self._hold_q[i]):
+                q_cur = self.data.qpos[r.motor_qpos[i]]
+                dq_cur = self.data.qvel[r.motor_qvel[i]]
+                self.data.ctrl[ci] = (self._hold_kp[i] * (self._hold_q[i] - q_cur)
+                                      - self._hold_kd[i] * dq_cur)
             else:
                 self.data.ctrl[ci] = 0.0
 

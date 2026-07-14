@@ -35,6 +35,11 @@ VIEW_CAM_LOOKAT_DZ = 0.0     # m, focal point offset along z (irrelevant for top
 
 NUM_LEG_JOINTS = 12
 NUM_MOTORS = 27
+# Stance-hold gains for the legs when no lower-body controller is running
+# (see SimInterface.set_hold). Stiff enough to hold the spawn stance against
+# gravity; MuJoCo clamps the result to each actuator's ctrlrange anyway.
+LEG_HOLD_KP = 300.0
+LEG_HOLD_KD = 10.0
 INIT_LEG_POS = np.array([
     0.0, -0.16, 0.0, 0.36, -0.2, 0.0,
     0.0, -0.16, 0.0, 0.36, -0.2, 0.0,
@@ -87,7 +92,70 @@ def _draw_band(handle, anchor, body_pos):
         scn.ngeom += 1
 
 
-def sim_loop(task, viewer=True, layout=None, style=None, seed=None):
+class VideoRecorder:
+    """Offscreen third-person video of the sim, streamed straight to an mp4 via
+    imageio-ffmpeg (frames are NOT accumulated in RAM). Intended for headless
+    benchmark runs (MUJOCO_GL=egl) where no passive viewer is up but we still
+    want a recording of each trial. The free camera re-frames on the robot base
+    every captured frame so the robot stays in shot as it sways on the tether."""
+
+    def __init__(self, model, data, body_id, path, fps=30, width=640, height=480):
+        import os as _os
+        import imageio
+        self._body_id = body_id
+        self._path = path
+        self._frames = 0
+        _os.makedirs(_os.path.dirname(_os.path.abspath(path)), exist_ok=True)
+        self._renderer = mujoco.Renderer(model, height=height, width=width)
+        self._cam = mujoco.MjvCamera()
+        self._cam.type = mujoco.mjtCamera.mjCAMERA_FREE
+        self._opt = mujoco.MjvOption()
+        self._opt.geomgroup[0] = 0            # hide collision geoms, like the viewer
+        # yuv420p + even dims => the mp4 plays in every browser / QuickTime.
+        # Fragmented mp4 (frag_keyframe+empty_moov) writes the index incrementally
+        # instead of only in a trailing moov atom, so the benchmark's `docker rm
+        # -f` on the sim between episodes (a hard kill, no clean shutdown) still
+        # leaves a PLAYABLE file with every frame flushed so far — a plain mp4
+        # killed mid-run is an unplayable ~48-byte stub. imageio already passes a
+        # -pix_fmt, so set the pixel format via ffmpeg_params to avoid a dup.
+        self._writer = imageio.get_writer(
+            path, fps=fps, macro_block_size=None, codec='libx264',
+            pixelformat='yuv420p',
+            output_params=['-movflags', '+frag_keyframe+empty_moov+default_base_moof'])
+        self._frame_on_robot(data)
+
+    def _frame_on_robot(self, data):
+        if self._body_id < 0:
+            return
+        pos = data.xpos[self._body_id]
+        w, x, y, z = (float(v) for v in data.xquat[self._body_id])
+        yaw = math.degrees(math.atan2(2.0 * (w * z + x * y),
+                                      1.0 - 2.0 * (y * y + z * z)))
+        self._cam.lookat[:] = (float(pos[0]), float(pos[1]), float(pos[2]))
+        self._cam.distance = 2.2
+        self._cam.azimuth = yaw + 150.0       # oblique 3/4 view onto the robot's workspace
+        self._cam.elevation = -20.0
+
+    def capture(self, data):
+        self._frame_on_robot(data)
+        self._renderer.update_scene(data, camera=self._cam, scene_option=self._opt)
+        self._writer.append_data(self._renderer.render())
+        self._frames += 1
+
+    def close(self):
+        for closer in (getattr(self._writer, 'close', None),
+                       getattr(self._renderer, 'close', None)):
+            try:
+                if closer is not None:
+                    closer()
+            except Exception:
+                pass
+        print(f"[h12_mujoco] video: wrote {self._frames} frames to {self._path}",
+              flush=True)
+
+
+def sim_loop(task, viewer=True, layout=None, style=None, seed=None, record_video=None,
+             cam_width=256, cam_height=256, hold_legs=True):
     """Launch a RoboCasa task env around the H1-2 and run the shared-MjData loop.
 
     Builds the env with robots='H1_2' and steps the env's *own* MjData with our
@@ -196,6 +264,18 @@ def sim_loop(task, viewer=True, layout=None, style=None, seed=None):
     # bridges below; gripper ctrl indices are disjoint from the body motors).
     sim_interface = SimInterface(model, data, lock=sim_lock, resolver=resolver)  # noqa: F841
 
+    # Keep the legs at their spawn stance whenever no lower-body controller is
+    # driving them (i.e. MJPC/walking off — as the grasp benchmark runs it). Without
+    # this the leg motors get zero torque, the robot flops on the elastic band, and
+    # the pelvis lands somewhere different every episode (~15 cm of spread), which
+    # randomises what the arm can reach. Inert as soon as a real controller takes
+    # the joints over, so it costs nothing in a normal walking bringup.
+    if hold_legs:
+        sim_interface.set_hold(np.arange(NUM_LEG_JOINTS), INIT_LEG_POS,
+                               kp=LEG_HOLD_KP, kd=LEG_HOLD_KD)
+        print(f"[h12_mujoco] holding {NUM_LEG_JOINTS} leg joints at the spawn "
+              f"stance (kp={LEG_HOLD_KP}, kd={LEG_HOLD_KD}) while nothing commands them")
+
     init_ros()
 
     # Sensor bridge: /clock, RGBD cameras (head + both hands), livox lidar + IMU.
@@ -216,7 +296,13 @@ def sim_loop(task, viewer=True, layout=None, style=None, seed=None):
     ros_bridge = RosSensorBridge(
         model, data,
         cameras=_cameras,
-        cam_width=256, cam_height=256,   # all 3 cameras render at 256x256 (RoboCasa default)
+        # Camera render size for all 3 RGBD cameras (--cam-width/--cam-height).
+        # 256x256 is the RoboCasa default and is enough for the gemini detector to
+        # box the target (the earlier "cheese not found" was a PROMPT problem —
+        # "wedge of cheese" returned [] where "cheese" boxes it — not resolution).
+        # Raising this costs host RAM on an already-tight box, so keep the default
+        # unless a detection genuinely needs the pixels.
+        cam_width=cam_width, cam_height=cam_height,
         # MID-360 fidelity: 360x56 @ 10Hz ~= 201k pts/s (real ~200k), 0.1m near /
         # 40m far range, per-point offset_time for FAST-LIO deskew. el_rays/rate
         # are the knobs to dial back if the ray cast (main thread) hurts RTF.
@@ -285,12 +371,33 @@ def sim_loop(task, viewer=True, layout=None, style=None, seed=None):
                     _frame_viewer_on_robot(handle, data, cam_body_id)
             except Exception as e:
                 print(f"[h12_mujoco] viewer camera framing skipped: {e}")
+    # Optional offscreen third-person recording (headless benchmark runs). Frame
+    # on the torso; if the band setup resolved it, reuse that id, else look it up.
+    recorder = None
+    steps_per_frame = 1
+    if record_video:
+        rec_body_id = band_body_id
+        if rec_body_id < 0:
+            try:
+                rec_body_id = resolver.body_id("torso_link")
+            except Exception:
+                rec_body_id = -1
+        try:
+            recorder = VideoRecorder(model, data, rec_body_id, record_video)
+            steps_per_frame = max(1, round(1.0 / (30.0 * model.opt.timestep)))
+            print(f"[h12_mujoco] recording video -> {record_video} "
+                  f"(1 frame / {steps_per_frame} sim steps, ~30 fps)", flush=True)
+        except Exception as e:
+            print(f"[h12_mujoco] video recording disabled: {e}", flush=True)
+            recorder = None
+
     # Fall logger: watch the torso's uprightness + height and log once when the
     # robot falls, including how long it stood after the elastic band was released.
     _fall_logged = False
     _band_release_t = None
     _band_prev_on = bool(band.enabled) if band is not None else False
 
+    _step_idx = 0
     try:
         while True:
             start_time = time.time()
@@ -331,6 +438,18 @@ def sim_loop(task, viewer=True, layout=None, style=None, seed=None):
                 done = measurement.tick()
             if done:
                 print("[h12_mujoco] task success (debounced).")
+            # Offscreen recording runs on the main thread (MuJoCo renderer is
+            # thread-affine) outside sim_lock: qpos is only written by mj_step
+            # here, so the read is consistent without blocking the bridge threads.
+            if recorder is not None and _step_idx % steps_per_frame == 0:
+                try:
+                    recorder.capture(data)
+                except Exception as e:
+                    print(f"[h12_mujoco] video capture failed, stopping recorder: {e}",
+                          flush=True)
+                    recorder.close()
+                    recorder = None
+            _step_idx += 1
             if viewer:
                 if band is not None and band.enabled:
                     _draw_band(handle, band.point, data.xpos[band_body_id])
@@ -339,6 +458,8 @@ def sim_loop(task, viewer=True, layout=None, style=None, seed=None):
                 handle.sync()
             time.sleep(max(0, model.opt.timestep - (time.time() - start_time)))
     finally:
+        if recorder is not None:
+            recorder.close()
         if handle is not None:
             handle.close()
         executor.shutdown()
@@ -435,6 +556,19 @@ if __name__ == "__main__":
     parser.add_argument("--layout", type=int, default=None, help="RoboCasa kitchen layout id")
     parser.add_argument("--style", type=int, default=None, help="RoboCasa kitchen style id")
     parser.add_argument("--seed", type=int, default=None, help="episode seed")
+    parser.add_argument("--record-video", default=None, metavar="PATH",
+                        help="Write an offscreen third-person mp4 of the run to "
+                             "PATH (streamed; no passive viewer required).")
+    # Bigger frames cost host RAM on an already-tight box; 256 is enough for the
+    # gemini detector to box the target (see sim_loop). Raise deliberately.
+    parser.add_argument("--cam-width", type=int, default=256,
+                        help="RGBD camera render width (default 256)")
+    parser.add_argument("--cam-height", type=int, default=256,
+                        help="RGBD camera render height (default 256)")
+    parser.add_argument("--no-hold-legs", action="store_true",
+                        help="Leave the legs limp when no lower-body controller is "
+                             "running (default: hold them at the spawn stance, which "
+                             "keeps the robot's pose reproducible across episodes)")
     args = parser.parse_args()
 
     task = args.task
@@ -445,4 +579,7 @@ if __name__ == "__main__":
         task = _resolve_task(task, seed=args.seed)
 
     sim_loop(task, viewer=not args.headless,
-             layout=args.layout, style=args.style, seed=args.seed)
+             layout=args.layout, style=args.style, seed=args.seed,
+             record_video=args.record_video,
+             cam_width=args.cam_width, cam_height=args.cam_height,
+             hold_legs=not args.no_hold_legs)
