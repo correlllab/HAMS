@@ -67,3 +67,9 @@ wandb/
 core
 core.*
 *.core
+
+# local secrets: GEMINI api key et al (docker/.env.example is the committed template)
+.dotenv
+
+# benchmark trial recordings (large, regenerated per run)
+h1_robocasa/benchmark_videos/
