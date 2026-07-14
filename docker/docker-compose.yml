@@ -9,6 +9,9 @@ services:
     runtime: nvidia
     privileged: true
     shm_size: 16g
+    # Host RAM ceiling — see the ros service below for why this exists.
+    mem_limit: 10g
+    mem_swappiness: 0
     network_mode: host
     stdin_open: true
     tty: true
@@ -43,6 +46,11 @@ services:
     runtime: nvidia
     privileged: true
     shm_size: 16g
+    # Host RAM ceiling — see the ros service below for why this exists (and why
+    # the SUM of the caps, not each cap alone, is what has to fit). Sim peaks
+    # ~3.8g (headless, 3 cameras + video recorder), so 7g is ample headroom.
+    mem_limit: 7g
+    mem_swappiness: 0
     network_mode: host
     stdin_open: true
     tty: true
@@ -91,6 +99,32 @@ services:
     runtime: nvidia
     privileged: true
     shm_size: 16g
+    # Host has 30 GB RAM total and only a 2 GB swapfile. The 2026-07-13 crashes
+    # were host-wide OOM: an unbounded container drove anon-page usage to
+    # ~29/30 GB, exhausted swap, and thrashed the desktop into a hard freeze —
+    # the kernel OOM killer picked an unrelated victim (Chrome) instead of the
+    # actual hog, and never got ahead of it. mem_limit gives each container its
+    # own cgroup ceiling: if the ros stack (torch + SAM3 + GraspGenX + MJPC)
+    # overshoots, the CONTAINER's cgroup OOM-kills it — fast and isolated —
+    # instead of the host thrashing to a stop. mem_swappiness: 0 stops a
+    # container from leaning on the (tiny) host swap in the first place.
+    #
+    # 2026-07-13 (2nd freeze): no container exceeded its cap (ros peaked 9.1/14,
+    # sim 3.8/10). The host simply ran out: containers (~13g actual) + desktop
+    # (~6g: chrome + vscode/cpptools + bambustu) + kernel ≈ 29 of 31.7g, and with
+    # only a 2g swapfile MemAvailable fell to 605 MB and PSI-full hit 36% — a
+    # hard freeze. sam_server (SAM3) is the single biggest consumer: ~7g RSS at
+    # its load-time peak, INDEPENDENT of camera resolution.
+    #
+    # These caps are runaway CEILINGS, not reservations — actual use is ~10g
+    # (ros) + ~3g (sim). Do NOT set them below the real peak: an 11g ros cap made
+    # the container thrash its own cgroup reclaim during the SAM3 load and hang.
+    # The load-bearing rule is that ACTUAL (containers + desktop) must fit in RAM,
+    # so keep heavy desktop apps closed while the stack runs, and watch
+    # MemAvailable + /proc/pressure/memory (docker/scripts/monitor_resources.sh),
+    # NOT the misleading `free` column.
+    mem_limit: 13g
+    mem_swappiness: 0
     network_mode: host
     stdin_open: true
     tty: true

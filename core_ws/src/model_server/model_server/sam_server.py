@@ -28,6 +28,7 @@ from sam3.model.sam3_image_processor import Sam3Processor
 
 from custom_ros_messages.srv import SamSegment
 
+from model_server.mem_utils import release_load_memory
 from model_server.model_logging import ModelLogger, declare_logging_params
 
 # ----- config -----
@@ -65,6 +66,9 @@ class SAM3:
         self.processor = Sam3Processor(sam_model, confidence_threshold=SAM3_CONFIDENCE_THRESHOLD)
         self._inference_state = None
         self._img_hw = None
+        # 3.4 GB of checkpoint streams through the CPU heap here; hand it back to
+        # the OS or this process holds ~7 GB RSS forever. See mem_utils.
+        release_load_memory()
         print(f"[SAM3 init] Initialized on device {self.device}")
 
     def _set_image(self, rgb_img):

@@ -1,2 +1,3 @@
 # Local secrets / env overrides — use .env.example as the committed template.
 .env
+diagnostics/

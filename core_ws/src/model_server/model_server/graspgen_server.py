@@ -30,6 +30,7 @@ from sensor_msgs.msg import PointCloud2
 from sensor_msgs_py import point_cloud2
 
 import trimesh
+from model_server.mem_utils import release_load_memory
 from graspgenx.samplers import run_planner_on_object
 from graspgenx.utils.checkpoint_io import load_model_cfg
 from graspgenx.grasp_server import GraspGenXSampler
@@ -220,6 +221,10 @@ class GraspGenServer(Node):
         self.get_logger().info(f'Loading GraspGenX model cfg from {checkpoints} ...')
         self._model_cfg = load_model_cfg(
             os.path.join(checkpoints, 'gen'), os.path.join(checkpoints, 'dis'), None, None)
+        # The generator (1.2 GB) + discriminator (0.5 GB) checkpoints stream
+        # through the CPU heap on their way to the GPU; glibc keeps the freed
+        # arenas unless told otherwise, inflating this process's RSS for good.
+        release_load_memory()
 
         # Keep only the planner kwargs the installed run_planner_on_object accepts.
         sig = inspect.signature(run_planner_on_object)
