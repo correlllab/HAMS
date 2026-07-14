@@ -21,6 +21,21 @@
     xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
     xsi:schemaLocation="https://cdds.io/config https://raw.githubusercontent.com/eclipse-cyclonedds/cyclonedds/master/etc/cyclonedds.xsd">
   <Domain Id="any">
+    <General>
+      <!-- Never multicast user data (spdp = multicast for discovery only).
+           On a wired network Cyclone's default is full multicast, so a writer
+           flips a topic from unicast to multicast as soon as a SECOND
+           subscribing process matches it. The robot's internal switch floods
+           that multicast to every port, including the locomotion computer
+           (192.168.123.161) — whose DDS chokes on the camera stream and stops
+           publishing rt/lowstate for ~20 s at a time. Trigger in practice:
+           h12_skills joining yolo_server on head color made /lowstate drop
+           from 500 Hz to ~276 Hz with 18-22 s stalls. Verified 2026-07-10:
+           two head-color readers with this setting = steady 500 Hz; without
+           it = 21.9 s lowstate gap. Costs one extra unicast copy per
+           additional subscriber — negligible on the gigabit link. -->
+      <AllowMulticast>spdp</AllowMulticast>
+    </General>
     <Internal>
       <!-- Ask the kernel for a 16 MB UDP receive buffer (capped by
            net.core.rmem_max on the host). Absorbs the sensor bursts that
