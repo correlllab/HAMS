@@ -542,3 +542,11 @@ RUN BIN=/usr/local/lib/python3.10/dist-packages/mujoco_mpc/mjpc/agent_server; \
 b = pathlib.Path(mujoco_mpc.__file__).parent / 'mjpc' / 'agent_server'; \
 assert b.exists(), f'agent_server binary missing at {b}'; \
 print('MJPC OK — mujoco', mujoco.__version__, '| agent_server:', b)"
+
+# -----------------------------------------------------------------------------
+# 10. OMPL python bindings — required by h12_ros2_controller's frame_task_server
+#     (core/planner/reduced_joint_planner.py; pinned in that submodule's
+#     requirements.txt). Late layer so adding it doesn't invalidate the heavy
+#     torch/graspgenx/MJPC layers above.
+# -----------------------------------------------------------------------------
+RUN pip install --no-cache-dir "ompl==2.0.1"
