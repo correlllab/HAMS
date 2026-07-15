@@ -16,6 +16,8 @@ gripper ops) are implemented here; each skill under skills/ composes them in its
 SkillsNode (node.py) multiply-inherits from SkillsBase plus every skill mixin.
 """
 
+import json
+import os
 import threading
 import time
 
@@ -32,7 +34,7 @@ from action_msgs.msg import GoalStatus
 from builtin_interfaces.msg import Duration
 from geometry_msgs.msg import Point, Pose, Quaternion
 from sensor_msgs.msg import CameraInfo, CompressedImage
-from std_msgs.msg import Header
+from std_msgs.msg import Header, String
 
 from sensor_msgs_py import point_cloud2
 from tf2_ros import Buffer, TransformBroadcaster, TransformListener, TransformException
@@ -127,6 +129,11 @@ GEMINI_GRASP_PROMPT = (
 DEPTH_MIN_M = 0.1
 DEPTH_MAX_M = 3.0
 MIN_GRASP_POINTS = 30
+# Radius [m] of the ball the SIM-ONLY ground-truth grasp path crops the head
+# cloud to around the object's true centroid (see _gt_object_cloud). Matches
+# grasp_benchmark's GT_CROP_R so the skill and the benchmark perceive the same
+# object cloud when both run in GT mode.
+GT_CROP_R = 0.12
 
 # Debug/visualization TF frames (e.g. the grasp target) are re-broadcast at this
 # period so they stay alive in RViz instead of expiring after a single send.
@@ -346,6 +353,29 @@ class SkillsBase(Node):
                 lambda msg, a=arm: self._on_arm_detections(a, msg),
                 qos_profile_sensor_data, callback_group=self._cb_group)
 
+        # --- SIM-ONLY ground-truth grasp perception (opt-in) ------------------
+        # HAMS_GRASP_BOX_SOURCE=gt makes detect_object_cloud skip Gemini+SAM and
+        # instead crop the head cloud around the sim's ground-truth object
+        # centroid (/robocasa/object_poses). This exists ONLY to iterate on grasp
+        # synthesis/execution without spending the Gemini free-tier quota — it
+        # "cheats" and silently no-ops on the real robot (no such topic). Default
+        # off, per "ground truth must NEVER be on by default" (CLAUDE.md §8): we
+        # don't even subscribe unless it's explicitly enabled. HAMS_GRASP_GT_NAME
+        # overrides which /robocasa/object_poses key to target (default: the
+        # goal's target_object text, which for RoboCasa cfg objects is the key).
+        self._grasp_box_source = os.environ.get(
+            'HAMS_GRASP_BOX_SOURCE', 'gemini').strip().lower() or 'gemini'
+        self._grasp_gt_name = os.environ.get('HAMS_GRASP_GT_NAME', '').strip()
+        self._obj_poses = {}
+        if self._grasp_box_source == 'gt':
+            self.create_subscription(
+                String, '/robocasa/object_poses', self._on_obj_poses,
+                10, callback_group=self._cb_group)
+            self.get_logger().warn(
+                'HAMS_GRASP_BOX_SOURCE=gt: grasp perception is using SIM GROUND '
+                'TRUTH (/robocasa/object_poses), NOT Gemini/SAM. Sim-only — this '
+                'has no effect on the real robot.')
+
         # Wait for the underlying endpoints (non-fatal).
         self.get_logger().info('Waiting for gemini/sam/graspgen, grippers, frame_task...')
         self.gemini_cli.wait_for_service(timeout_sec=10.0)
@@ -552,11 +582,81 @@ class SkillsBase(Node):
         py1, py2 = sorted((y1 / 1000.0 * h, y2 / 1000.0 * h))
         return [px1, py1, px2, py2]
 
+    # ------------------------------------------- SIM-ONLY ground-truth object
+    def _on_obj_poses(self, msg):
+        """Cache the sim's ground-truth object poses (JSON, MuJoCo world frame,
+        plus a '__pelvis__' entry). Only subscribed when HAMS_GRASP_BOX_SOURCE=gt."""
+        try:
+            self._obj_poses = json.loads(msg.data)
+        except (ValueError, TypeError):
+            pass
+
+    def gt_pos(self, name):
+        """Object `name`'s ground-truth MuJoCo-world position (x,y,z), or None."""
+        v = self._obj_poses.get(name)
+        return np.array(v[:3], dtype=float) if v else None
+
+    def gt_pos_pelvis(self, name):
+        """Object `name`'s ground-truth position in the PELVIS frame (the frame
+        perception + the controller work in), or None. Uses the '__pelvis__'
+        pose the sim's MeasurementBridge publishes alongside the objects. SIM
+        ONLY. Mirrors grasp_benchmark.gt_pos_pelvis."""
+        obj = self.gt_pos(name)
+        pel = self._obj_poses.get('__pelvis__')
+        if obj is None or not pel:
+            return None
+        p = np.array(pel[:3], dtype=float)
+        qw, qx, qy, qz = (float(v) for v in pel[3:7])
+        R = np.array([
+            [1 - 2 * (qy * qy + qz * qz), 2 * (qx * qy - qz * qw), 2 * (qx * qz + qy * qw)],
+            [2 * (qx * qy + qz * qw), 1 - 2 * (qx * qx + qz * qz), 2 * (qy * qz - qx * qw)],
+            [2 * (qx * qz - qy * qw), 2 * (qy * qz + qx * qw), 1 - 2 * (qx * qx + qy * qy)],
+        ])
+        return R.T @ (obj - p)
+
+    def _gt_object_cloud(self, name, target_frame='pelvis'):
+        """Object cloud straight from sim ground truth: the whole head-camera
+        cloud cropped to a ball of radius GT_CROP_R around `name`'s GT centroid
+        (pelvis frame). Skips Gemini AND SAM. SIM ONLY — the crop keeps a little
+        support surface around the object exactly as the Gemini box path does, so
+        downstream grasp synthesis sees a comparable cloud. Mirrors
+        grasp_benchmark._gt_cloud. Returns (N,3) float32 or None."""
+        if target_frame != 'pelvis':
+            self.get_logger().error(
+                f'_gt_object_cloud: only pelvis frame supported, got {target_frame!r}')
+            return None
+        c = self.gt_pos_pelvis(name)
+        if c is None:
+            self.get_logger().error(
+                f'_gt_object_cloud: no ground truth for {name!r} — is the sim '
+                'publishing /robocasa/object_poses and is HAMS_GRASP_GT_NAME correct?')
+            return None
+        scene = self.scene_to_cloud(target_frame='pelvis')
+        if scene is None:
+            return None
+        obj = scene[np.linalg.norm(scene - c[None, :], axis=1) <= GT_CROP_R]
+        self.get_logger().info(
+            f'[gt-cloud] {len(obj)}/{len(scene)} head-cloud pts within '
+            f'{GT_CROP_R * 100:.0f}cm of GT {name!r} '
+            f'(pelvis {c[0]:.3f},{c[1]:.3f},{c[2]:.3f})')
+        if len(obj) < MIN_GRASP_POINTS:
+            self.get_logger().warn(
+                f'_gt_object_cloud: only {len(obj)} points (< {MIN_GRASP_POINTS}); '
+                'the object may be occluded or outside the head-camera view')
+            return None
+        return obj.astype(np.float32)
+
     def detect_object_cloud(self, obj, run, gh, box_provider=None, use_sam=True):
         """Locate `obj` in the head camera: bounding box -> object cloud, plus the
         whole-frame scene cloud as obstacle context. Returns (obj_cloud,
         scene_cloud, None) on success or (None, None, reason). Shared by the grasp
         skill (pick object) and pick_place (place target).
+
+        SIM-ONLY shortcut: when HAMS_GRASP_BOX_SOURCE=gt (see __init__) this skips
+        Gemini + SAM entirely and crops the object cloud around the sim's
+        ground-truth centroid, so grasp iteration costs no Gemini quota. `obj` (or
+        HAMS_GRASP_GT_NAME) is the /robocasa/object_poses key. box_provider/use_sam
+        are ignored in this mode.
 
         `box_provider(obj, run, gh) -> pixel-xyxy box or None` supplies the box;
         it defaults to self._gemini_box, but the grasp skill passes self._yolo_box
@@ -575,6 +675,16 @@ class SkillsBase(Node):
         instance. The box is optional there (text alone is the fallback). Gemini
         latency is highly variable and None is a legitimate "no box", so
         cancel/timeout is disambiguated here before spending the SAM call."""
+        # SIM-ONLY: ground-truth crop, no Gemini/SAM (opt-in; see __init__).
+        if self._grasp_box_source == 'gt':
+            gt_name = self._grasp_gt_name or obj
+            obj_cloud = self._gt_object_cloud(gt_name, target_frame='pelvis')
+            if obj_cloud is None:
+                return None, None, (
+                    f'no GT cloud for {gt_name!r} (HAMS_GRASP_BOX_SOURCE=gt; is '
+                    'the sim publishing /robocasa/object_poses?)')
+            scene = self.scene_to_cloud(target_frame='pelvis')
+            return obj_cloud, scene, None
         box = (box_provider or self._gemini_box)(obj, run, gh)  # box (pixel xyxy) or None
         if gh.is_cancel_requested or run.remaining() <= 0.0:
             return None, None, 'detection canceled or timed out'

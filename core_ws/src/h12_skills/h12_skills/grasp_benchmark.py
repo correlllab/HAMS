@@ -234,6 +234,12 @@ class GraspBenchmark(SkillsBase):
         # (mirrors skills/grasp.py GRASP_OFFSET) — a grasp-quality knob for the
         # ~1cm-short contact that leaves small objects insecure. Set via --grasp-offset.
         self._grasp_offset = 0.0
+        # How far BELOW the object's top surface to aim the fingertips [m]. Larger =
+        # grip lower on the object body (more material between the jaws) instead of
+        # pinching the thin top edge, which slips on lift. Distinct from
+        # --grasp-offset: this lowers the target HEIGHT (Z) at the object centroid,
+        # not the reach along the tilted approach axis. Set via --finger-sink.
+        self._finger_sink = FINGER_SINK_M
         self.named_config_cli = ActionClient(
             self, NamedConfig, '/named_config', callback_group=self._cb_group)
 
@@ -511,7 +517,7 @@ class GraspBenchmark(SkillsBase):
         # median, not mean: mask-edge outliers drag the mean off the object.
         c = np.median(cloud, axis=0)
         tip = np.array([c[0], c[1],
-                        max(_robust_top_z(cloud) - FINGER_SINK_M,
+                        max(_robust_top_z(cloud) - self._finger_sink,
                             float(np.percentile(cloud[:, 2], 5)))])
         # Walk the tilts (45 -> 30 -> straight-down); the last entry keeps a second
         # yaw so an IK-blocked primary still has a fallback.
@@ -543,7 +549,7 @@ class GraspBenchmark(SkillsBase):
                 cloud = rough
         pca = _top_layer_pca(cloud)
         tip = np.array([pca['centroid'][0], pca['centroid'][1],
-                        max(pca['top_z'] - FINGER_SINK_M, cloud[:, 2].min())])
+                        max(pca['top_z'] - self._finger_sink, cloud[:, 2].min())])
         # The method's idea is the CLOSING axis (PCA minor = narrowest span); the
         # approach tilt is orthogonal to that, so walk the tilts on the minor axis
         # first and keep the major axis as a fallback.
@@ -582,7 +588,7 @@ class GraspBenchmark(SkillsBase):
         scene = self.scene_to_cloud(target_frame='pelvis')
         pca = _top_layer_pca(cloud)
         tip = np.array([pca['centroid'][0], pca['centroid'][1],
-                        max(pca['top_z'] - FINGER_SINK_M, cloud[:, 2].min())])
+                        max(pca['top_z'] - self._finger_sink, cloud[:, 2].min())])
         # 45° tilt: a straight-down PCA candidate is IK-unreachable on this arm.
         cands = [(_tilted_pose(tip, pca['minor_yaw'], np.pi / 4), 'pca-short_side'),
                  (_tilted_pose(tip, pca['major_yaw'], np.pi / 4), 'pca-long_side')]
@@ -823,28 +829,49 @@ def main():
                     help='drive each grasp this many metres deeper along its '
                          'approach axis before executing (grasp-quality knob for '
                          'the ~1cm-short contact; positive = deeper into object)')
+    ap.add_argument('--finger-sink', type=float, default=FINGER_SINK_M,
+                    help='fingertip depth BELOW the object top surface [m] for '
+                         'centroid/antipodal/pca (default %(default)s). Larger grips '
+                         'lower on the body (more material between the jaws) instead '
+                         'of the thin top edge that slips on lift — distinct from '
+                         '--grasp-offset, which reaches along the tilted approach.')
     ap.add_argument('--no-plan', action='store_true',
                     help='drive the benchmark arm moves via frame_task IK directly '
                          'instead of the OMPL planner (do_plan=False) — isolates '
                          'whether the planner rejects grasps that raw IK can reach')
+    ap.add_argument('--task-success', action='store_true',
+                    help="judge success by the TASK's own signal (/robocasa/success, "
+                         "e.g. the fridge door opened) instead of GT-object lift, and "
+                         "do NOT require a GT object pose. Use for fixture targets that "
+                         "are not task objects — e.g. the OpenFridge handle. The grasp "
+                         "pipeline still runs and reports whether it reached+closed "
+                         "('executed'); this only swaps the success metric and skips "
+                         "the post-grasp lift (which can't open a fridge anyway).")
     ap.add_argument('--box-source', default='gemini', choices=('gemini', 'gt'),
                     help="how methods perceive the object: 'gemini' (gemini box "
                          "-> SAM) or 'gt' (crop the head/wrist cloud around the "
                          "ground-truth centroid, NO detector — removes detection "
                          "as a variable and costs zero API calls). NOTE: 'vlm_judge' "
-                         "still calls gemini for its JUDGE step, and 'skill' runs "
-                         "the deployed skill which detects with gemini internally, "
-                         "so --box-source gt does not make either detector-free.")
+                         "still calls gemini for its JUDGE step regardless. 'skill' "
+                         "runs the DEPLOYED skill node, whose detector is chosen by "
+                         "that node's HAMS_GRASP_BOX_SOURCE env (run_benchmark.sh "
+                         "forwards --box-source to it), NOT by this flag.")
     args = ap.parse_args()
-    if args.box_source == 'gt' and args.method in ('vlm_judge', 'skill'):
-        print(f"[grasp_benchmark] WARNING: --box-source gt does not remove gemini "
-              f"from method {args.method!r} (it still calls gemini internally).")
+    if args.box_source == 'gt' and args.method == 'vlm_judge':
+        print("[grasp_benchmark] WARNING: --box-source gt does not remove gemini "
+              "from 'vlm_judge' — its JUDGE step still calls gemini.")
+    if args.method == 'skill':
+        print("[grasp_benchmark] NOTE: 'skill' perception follows the skills node's "
+              "HAMS_GRASP_BOX_SOURCE env, not --box-source. run_benchmark.sh "
+              "forwards them together, so `-b gt` makes it quota-free; a bare "
+              "`ros2 run ... grasp_benchmark --method skill` does not.")
 
     rclpy.init()
     node = GraspBenchmark(args.arm, gt_name=args.gt_name,
                           box_source=args.box_source)
     node._do_plan = not args.no_plan
     node._grasp_offset = args.grasp_offset
+    node._finger_sink = args.finger_sink
     executor = MultiThreadedExecutor(num_threads=8)
     executor.add_node(node)
     spin = threading.Thread(target=executor.spin, daemon=True)
@@ -853,13 +880,17 @@ def main():
     rec = dict(method=args.method, object=args.object, gt_name=args.gt_name,
                arm=args.arm, success=False, error='')
     try:
-        # sim + ground-truth feed up?
+        # sim (+ GT-object feed, only when success is lift-based) up? In
+        # --task-success mode the target is a fixture (no /robocasa/object_poses
+        # entry), so only the camera has to be live.
+        need_gt = not args.task_success
         for _ in range(100):
-            if node.latest_image() is not None and node.gt_pos(args.gt_name) is not None:
+            gt_ready = (not need_gt) or node.gt_pos(args.gt_name) is not None
+            if node.latest_image() is not None and gt_ready:
                 break
             time.sleep(0.2)
         base = node.gt_pos(args.gt_name)
-        if base is None:
+        if base is None and need_gt:
             raise RuntimeError(
                 f'no ground truth for {args.gt_name!r} on /robocasa/object_poses '
                 '(is the sim running with the updated measurement_bridge?)')
@@ -867,7 +898,8 @@ def main():
             raise RuntimeError('no head-camera image (is the sim publishing?)')
 
         node.go_home()
-        rec['gt_start'] = base.tolist()
+        if base is not None:
+            rec['gt_start'] = base.tolist()
 
         t0 = time.monotonic()
         if args.method == 'skill':
@@ -877,8 +909,12 @@ def main():
             ok, msg = node.run_skill(args.object)
             rec.update(plan_time_s=0.0, meta={}, executed=ok,
                        chosen_index=-1, chosen_label=msg)
+            # Lift measures GT-object rise; pointless (and can yank a fixture) in
+            # --task-success mode, so hold in place there and let /robocasa/success
+            # debounce instead.
             if ok:
-                node.lift_from_current()
+                if not args.task_success:
+                    node.lift_from_current()
                 time.sleep(HOLD_SEC)
             rec['exec_time_s'] = round(time.monotonic() - t0, 2)
         else:
@@ -892,16 +928,18 @@ def main():
             ok, idx, label = node.execute(plan['candidates'], plan['width_m'])
             rec.update(executed=ok, chosen_index=idx, chosen_label=label)
             if ok:
-                node.lift()
+                if not args.task_success:
+                    node.lift()
                 time.sleep(HOLD_SEC)
             rec['exec_time_s'] = round(time.monotonic() - t1, 2)
 
         now = node.gt_pos(args.gt_name)
-        dz = float(now[2] - base[2]) if now is not None else 0.0
+        dz = float(now[2] - base[2]) if (now is not None and base is not None) else 0.0
         rec.update(gt_end=(now.tolist() if now is not None else None),
                    lift_dz_m=round(dz, 4),
-                   success=bool(ok and dz >= args.success_dz),
-                   task_success=node._task_success)
+                   task_success=bool(node._task_success),
+                   success=(bool(node._task_success) if args.task_success
+                            else bool(ok and dz >= args.success_dz)))
     except Exception as e:                                    # noqa: BLE001
         rec['error'] = str(e)
         node.get_logger().error(f'benchmark episode failed: {e}')

@@ -39,8 +39,17 @@ BOX_SOURCE="gt"
 # Extra flags passed straight through to grasp_benchmark (e.g. --no-plan to drive
 # arm moves via frame_task IK instead of the OMPL planner). Set via -x.
 EXTRA_ARGS=""
+# Viz mode (-V): run the sim WITH the native GLFW viewer so a grasp can be
+# watched live. The compose robocasa service already wires DISPLAY, the X
+# socket, and /dev/dri, so dropping --headless is all that's needed (the host
+# must have a reachable DISPLAY). We also drop --record-video in this mode:
+# the offscreen recorder spins up a second mujoco.Renderer that already
+# conflicts with the sensor bridge (known gray-frame bug), and adding the live
+# GLFW context on top invites GL-context contention on an unattended run.
+HEADLESS_FLAG="--headless"
+RECORD_VIDEO=1
 
-while getopts "m:s:t:o:g:a:l:y:b:x:" opt; do
+while getopts "m:s:t:o:g:a:l:y:b:x:V" opt; do
     case "$opt" in
         m) METHODS="$OPTARG" ;;
         s) SEEDS="$OPTARG" ;;
@@ -52,9 +61,19 @@ while getopts "m:s:t:o:g:a:l:y:b:x:" opt; do
         y) STYLE="$OPTARG" ;;
         b) BOX_SOURCE="$OPTARG" ;;
         x) EXTRA_ARGS="$OPTARG" ;;
+        V) HEADLESS_FLAG=""; RECORD_VIDEO=0 ;;
         *) exit 2 ;;
     esac
 done
+
+if [ -n "$HEADLESS_FLAG" ] && [ -z "${DISPLAY:-}" ]; then
+    echo "note: no viz flag / no DISPLAY — running headless." >&2
+elif [ -z "$HEADLESS_FLAG" ]; then
+    echo "== VIZ mode: GLFW viewer on (DISPLAY=${DISPLAY:-<unset!>}), video recording off" >&2
+    if [ -z "${DISPLAY:-}" ]; then
+        echo "   WARNING: DISPLAY is unset — launch_robocasa.sh will force headless anyway." >&2
+    fi
+fi
 
 COMPOSE="docker compose -f docker/docker-compose.yml"
 RESULTS_DIR="core_ws/benchmark_results"
@@ -75,6 +94,16 @@ export ROS_DOMAIN_ID="${ROS_DOMAIN_ID:-1}"
 # 20-requests/day quota partway through and the 429s look exactly like
 # "perception found nothing". Set GEMINI_CACHE_DIR= to force live calls.
 export GEMINI_CACHE_DIR="${GEMINI_CACHE_DIR-/home/code/core_ws/benchmark_results/gemini_cache}"
+# Forward the box source to the DEPLOYED skill node too, so the 'skill' method
+# (which drives /skill/grasp, not grasp_benchmark's own synthesis) honors -b gt
+# and runs quota-free. SkillsBase reads HAMS_GRASP_BOX_SOURCE=gt to skip
+# Gemini+SAM and crop the object cloud around the GT centroid (HAMS_GRASP_GT_NAME
+# = the /robocasa/object_poses key). These are exported ONLY into the bringup
+# exec below (via -e); the standalone grasp_benchmark process uses its own
+# --box-source CLI arg and must NOT inherit these (it would double-subscribe to
+# /robocasa/object_poses).
+export HAMS_GRASP_BOX_SOURCE="$BOX_SOURCE"
+export HAMS_GRASP_GT_NAME="$GT_NAME"
 
 cleanup() {
     docker rm -f hams_sim_robocasa >/dev/null 2>&1 || true
@@ -142,11 +171,13 @@ for seed in $SEEDS; do
         docker rm -f hams_sim_robocasa >/dev/null 2>&1 || true
         # No --remove-orphans here: with only the robocasa profile active, compose
         # treats the ros-profile hams_ros as an orphan and deletes it mid-run.
+        sim_cmd=(/home/code/h12_sim_scripts/launch_robocasa.sh)
+        [ -n "$HEADLESS_FLAG" ] && sim_cmd+=("$HEADLESS_FLAG")
+        sim_cmd+=(--task "$TASK" --layout "$LAYOUT" --style "$STYLE" --seed "$seed")
+        [ "$RECORD_VIDEO" = 1 ] && sim_cmd+=(--record-video "/home/code/h1_robocasa/benchmark_videos/${stamp}.mp4")
         $COMPOSE --profile robocasa run -d --rm \
             --name hams_sim_robocasa robocasa \
-            /home/code/h12_sim_scripts/launch_robocasa.sh --headless \
-            --task "$TASK" --layout "$LAYOUT" --style "$STYLE" --seed "$seed" \
-            --record-video "/home/code/h1_robocasa/benchmark_videos/${stamp}.mp4"
+            "${sim_cmd[@]}"
         wait_for 300 "sim ROS bridges" \
             bash -c "docker logs hams_sim_robocasa 2>&1 | grep -q 'ROS bridges up'"
 
@@ -168,6 +199,7 @@ for seed in $SEEDS; do
             -e HAMS_GRASP_YUP_TOL_DEG -e HAMS_TIER_PITCH_MIN_DEG \
             -e HAMS_TIER_PITCH_MAX_DEG -e HAMS_MAX_GRASP_ATTEMPTS \
             -e HAMS_GRASP_OFFSET \
+            -e HAMS_GRASP_BOX_SOURCE -e HAMS_GRASP_GT_NAME \
             hams_ros bash -lc \
             "$SRC && ros2 launch h1_bringup h1_sim_bringup.launch.py \
              use_rviz:=false use_sliders:=false use_nav:=false use_mjpc:=false \
