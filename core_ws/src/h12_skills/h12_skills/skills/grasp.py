@@ -385,7 +385,21 @@ class GraspSkill:
                     GRASP_FRAMES[arm], approaches_w[i] if have_world else None,
                     approaches_p[i], outer_gh=gh,
                     duration_sec=SERVO_DURATION_SEC, max_iter=SERVO_MAX_ITER,
-                    lin_tol=SERVO_LIN_TOL, ang_tol=SERVO_ANG_TOL):
+                    lin_tol=SERVO_LIN_TOL, ang_tol=SERVO_ANG_TOL,
+                    # do_plan=False: drive the pre-grasp via the direct frame_task
+                    # servo, NOT the OMPL planner. The planner first solves the
+                    # reduced-space IK (plan_to_ik_target), and for these grasp
+                    # poses that pre-solve fails to converge — raising 'IK failed
+                    # to resolve current targets' before OMPL ever runs — so with
+                    # planning on, EVERY grasp candidate is rejected as unreachable
+                    # even though the direct servo reaches it and grasps. See
+                    # docs/KNOWN_ISSUES_reduced_ik.md; revert to do_plan=True once
+                    # the reduced-IK non-convergence is fixed in h12_ros2_controller.
+                    # The contact move below already uses do_plan=False; this makes
+                    # the whole grasp approach consistent. Tradeoff: no OMPL
+                    # collision avoidance on the approach, which for a tabletop
+                    # pick from the home pose has not been an issue.
+                    do_plan=False):
                 idx = i
                 break
             if gh.is_cancel_requested or run.remaining() <= 0.0:

@@ -160,7 +160,14 @@ for seed in $SEEDS; do
         # by the elastic-band tether and the benchmark drives the upper-body
         # frame_task IK in the pelvis frame directly — dropping MJPC also frees
         # RAM/GPU/CPU for SAM3 + GraspGenX.
-        docker exec -d hams_ros bash -lc \
+        # Forward the HAMS_* grasp/IK tunables from the host env into the bringup
+        # (the controller + grasp skill read them at runtime); unset ones are
+        # forwarded empty and fall back to the compiled defaults.
+        docker exec -d \
+            -e HAMS_IK_LIN_THR -e HAMS_IK_ANG_THR \
+            -e HAMS_GRASP_YUP_TOL_DEG -e HAMS_TIER_PITCH_MIN_DEG \
+            -e HAMS_TIER_PITCH_MAX_DEG -e HAMS_MAX_GRASP_ATTEMPTS \
+            hams_ros bash -lc \
             "$SRC && ros2 launch h1_bringup h1_sim_bringup.launch.py \
              use_rviz:=false use_sliders:=false use_nav:=false use_mjpc:=false \
              model_visualization:=false \
