@@ -132,7 +132,11 @@ APPROACH_DIST = 0.1  # metres to back off along the grasp's +Z approach axis for
 # executing it. POSITIVE drives the grasp DEEPER into the object (further along
 # the approach); NEGATIVE backs it off. The pre-grasp standoff (APPROACH_DIST) is
 # measured from this shifted grasp, so the whole approach->grasp pair moves together.
-GRASP_OFFSET = 0.0
+# Overridable via HAMS_GRASP_OFFSET: the contact servo tends to stop a cm or so
+# short of the target (IK/contact limit near the object), so the fingers close in
+# front of a small object and barely catch it; a small positive offset drives the
+# planned grasp deeper so a short contact still closes ONTO the object.
+GRASP_OFFSET = _envf('HAMS_GRASP_OFFSET', 0.0)
 # Single TF frame the planned pre-grasp approach is broadcast to, updated as the
 # loop walks the ranked candidates, so RViz shows the target currently being tried.
 TARGET_FRAME = 'graspgenx_target_frame'

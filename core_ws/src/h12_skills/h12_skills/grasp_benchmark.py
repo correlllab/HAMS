@@ -230,6 +230,10 @@ class GraspBenchmark(SkillsBase):
         # skill plans its pre-grasp, so True matches it; False isolates whether the
         # planner (vs. raw IK reachability) is what rejects a grasp.
         self._do_plan = True
+        # Metres to drive each grasp deeper along its approach axis before executing
+        # (mirrors skills/grasp.py GRASP_OFFSET) — a grasp-quality knob for the
+        # ~1cm-short contact that leaves small objects insecure. Set via --grasp-offset.
+        self._grasp_offset = 0.0
         self.named_config_cli = ActionClient(
             self, NamedConfig, '/named_config', callback_group=self._cb_group)
 
@@ -401,7 +405,13 @@ class GraspBenchmark(SkillsBase):
                       else 106.0, 106.0)
         if not self.set_gripper(self.arm, open_mm):
             return False, -1, 'gripper pre-open failed'
-        for i, (pose, label) in enumerate(candidates[:MAX_ATTEMPTS]):
+        for i, (raw_pose, label) in enumerate(candidates[:MAX_ATTEMPTS]):
+            # Drive the grasp _grasp_offset m deeper along its own approach axis
+            # (mirrors the skill's GRASP_OFFSET): the contact servo tends to stop
+            # ~1 cm short, so a small positive offset closes the fingers ONTO a
+            # small object instead of in front of it. The pre-grasp standoff is
+            # measured from the shifted grasp, so both move together.
+            pose = _offset_along_z(raw_pose, self._grasp_offset)
             approach = _offset_along_z(pose, -APPROACH_DIST_M)
             self.get_logger().info(f'candidate {i} ({label}): trying pre-grasp')
             if not self.move_frame_to(frame, approach, duration_sec=APPROACH_SEC,
@@ -809,6 +819,10 @@ def main():
     ap.add_argument('--out', default='', help='result JSON path')
     ap.add_argument('--success-dz', type=float, default=0.08,
                     help='ground-truth lift height that counts as success [m]')
+    ap.add_argument('--grasp-offset', type=float, default=0.0,
+                    help='drive each grasp this many metres deeper along its '
+                         'approach axis before executing (grasp-quality knob for '
+                         'the ~1cm-short contact; positive = deeper into object)')
     ap.add_argument('--no-plan', action='store_true',
                     help='drive the benchmark arm moves via frame_task IK directly '
                          'instead of the OMPL planner (do_plan=False) — isolates '
@@ -830,6 +844,7 @@ def main():
     node = GraspBenchmark(args.arm, gt_name=args.gt_name,
                           box_source=args.box_source)
     node._do_plan = not args.no_plan
+    node._grasp_offset = args.grasp_offset
     executor = MultiThreadedExecutor(num_threads=8)
     executor.add_node(node)
     spin = threading.Thread(target=executor.spin, daemon=True)
