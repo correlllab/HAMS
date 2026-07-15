@@ -36,8 +36,11 @@ STYLE=1
 # reproducible and keeps a matrix off the gemini free-tier quota; pass -b gemini
 # for an end-to-end run that includes detection.
 BOX_SOURCE="gt"
+# Extra flags passed straight through to grasp_benchmark (e.g. --no-plan to drive
+# arm moves via frame_task IK instead of the OMPL planner). Set via -x.
+EXTRA_ARGS=""
 
-while getopts "m:s:t:o:g:a:l:y:b:" opt; do
+while getopts "m:s:t:o:g:a:l:y:b:x:" opt; do
     case "$opt" in
         m) METHODS="$OPTARG" ;;
         s) SEEDS="$OPTARG" ;;
@@ -48,6 +51,7 @@ while getopts "m:s:t:o:g:a:l:y:b:" opt; do
         l) LAYOUT="$OPTARG" ;;
         y) STYLE="$OPTARG" ;;
         b) BOX_SOURCE="$OPTARG" ;;
+        x) EXTRA_ARGS="$OPTARG" ;;
         *) exit 2 ;;
     esac
 done
@@ -178,7 +182,7 @@ for seed in $SEEDS; do
         # --- the episode -------------------------------------------------------
         if ! $IN_ROS "$SRC && ros2 run h12_skills grasp_benchmark \
                 --method $method --object '$OBJECT' --gt-name $GT_NAME \
-                --arm $ARM --box-source $BOX_SOURCE --out $out_json"; then
+                --arm $ARM --box-source $BOX_SOURCE $EXTRA_ARGS --out $out_json"; then
             echo "episode $stamp FAILED (see container logs)" >&2
         fi
         # Salvage the bringup log BEFORE the containers go away: it holds the

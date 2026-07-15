@@ -225,6 +225,11 @@ class GraspBenchmark(SkillsBase):
         self.arm = arm
         self._gt_name = gt_name
         self._box_source = box_source
+        # Whether the benchmark's own arm moves go through the OMPL planner
+        # (do_plan=True) or drive the frame_task IK directly (False). The deployed
+        # skill plans its pre-grasp, so True matches it; False isolates whether the
+        # planner (vs. raw IK reachability) is what rejects a grasp.
+        self._do_plan = True
         self.named_config_cli = ActionClient(
             self, NamedConfig, '/named_config', callback_group=self._cb_group)
 
@@ -401,14 +406,16 @@ class GraspBenchmark(SkillsBase):
             self.get_logger().info(f'candidate {i} ({label}): trying pre-grasp')
             if not self.move_frame_to(frame, approach, duration_sec=APPROACH_SEC,
                                       lin_tol=PREGRASP_LIN_TOL,
-                                      ang_tol=PREGRASP_ANG_TOL):
+                                      ang_tol=PREGRASP_ANG_TOL,
+                                      do_plan=self._do_plan):
                 self.get_logger().warn(f'candidate {i} pre-grasp unreachable')
                 continue
             # Contact move is best-effort: we already committed to a reachable
             # standoff, so close even if the last few mm don't converge. Log the
             # residual — a large one means the fingers close off-target and tend
             # to knock the object rather than grip it.
-            contact_ok = self.move_frame_to(frame, pose, duration_sec=CONTACT_SEC)
+            contact_ok = self.move_frame_to(frame, pose, duration_sec=CONTACT_SEC,
+                                            do_plan=self._do_plan)
             if not contact_ok:
                 self.get_logger().warn(
                     f'candidate {i}: contact move did not fully converge; '
@@ -428,7 +435,7 @@ class GraspBenchmark(SkillsBase):
         pose.position.z = self._last_grasp_pose.position.z + LIFT_DIST_M
         pose.orientation = self._last_grasp_pose.orientation
         return self.move_frame_to(GRASP_FRAMES[self.arm], pose,
-                                  duration_sec=LIFT_SEC)
+                                  duration_sec=LIFT_SEC, do_plan=self._do_plan)
 
     def frame_pose_pelvis(self, frame):
         """Live pose of `frame` in the pelvis frame, straight off TF."""
@@ -457,7 +464,7 @@ class GraspBenchmark(SkillsBase):
             return False
         pose.position.z += LIFT_DIST_M
         return self.move_frame_to(GRASP_FRAMES[self.arm], pose,
-                                  duration_sec=LIFT_SEC)
+                                  duration_sec=LIFT_SEC, do_plan=self._do_plan)
 
     # ------------------------------------------------------------- the methods
     def run_skill(self, obj_text):
@@ -515,7 +522,7 @@ class GraspBenchmark(SkillsBase):
         scan_tip = np.array([c[0], c[1], rough[:, 2].max() + SCAN_HEIGHT_M - TCP_DEPTH_M])
         scan = _topdown_pose(scan_tip, np.pi / 2)
         if not self.move_frame_to(GRASP_FRAMES[self.arm], scan,
-                                  duration_sec=APPROACH_SEC):
+                                  duration_sec=APPROACH_SEC, do_plan=self._do_plan):
             self.get_logger().warn('antipodal: scan pose unreachable, using head cloud')
             cloud = rough
         else:
@@ -802,6 +809,10 @@ def main():
     ap.add_argument('--out', default='', help='result JSON path')
     ap.add_argument('--success-dz', type=float, default=0.08,
                     help='ground-truth lift height that counts as success [m]')
+    ap.add_argument('--no-plan', action='store_true',
+                    help='drive the benchmark arm moves via frame_task IK directly '
+                         'instead of the OMPL planner (do_plan=False) — isolates '
+                         'whether the planner rejects grasps that raw IK can reach')
     ap.add_argument('--box-source', default='gemini', choices=('gemini', 'gt'),
                     help="how methods perceive the object: 'gemini' (gemini box "
                          "-> SAM) or 'gt' (crop the head/wrist cloud around the "
@@ -818,6 +829,7 @@ def main():
     rclpy.init()
     node = GraspBenchmark(args.arm, gt_name=args.gt_name,
                           box_source=args.box_source)
+    node._do_plan = not args.no_plan
     executor = MultiThreadedExecutor(num_threads=8)
     executor.add_node(node)
     spin = threading.Thread(target=executor.spin, daemon=True)
