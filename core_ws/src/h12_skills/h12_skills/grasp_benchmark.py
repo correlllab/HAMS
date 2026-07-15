@@ -58,7 +58,7 @@ from tf2_ros import TransformException
 
 from custom_ros_messages.action import NamedConfig, SkillGrasp
 
-from .base import SkillsBase, GRASP_FRAMES
+from .base import SkillsBase, GRASP_FRAMES, MIN_GRASP_POINTS
 from .perception_utils import (
     decode_compressed_depth_image, deproject_mask, transform_points,
     transform_to_matrix, mat_to_quat, pose_to_matrix,
@@ -108,6 +108,12 @@ PREGRASP_ANG_TOL = 0.12    # rad
 # MAX_GRASP_ATTEMPTS ranked candidates, each with its own multi-pass servo
 # (skills/grasp.py: SERVO_DURATION_SEC x SERVO_MAX_ITER), before giving up.
 SKILL_TIMEOUT_SEC = 300.0
+# --box-source gt crop radius: keep head/wrist-cloud points within this distance
+# of the object's ground-truth centroid (pelvis frame) as "the object". 12 cm
+# comfortably contains a tabletop object like the CheesyBread wedge (~8 cm) plus
+# a little support surface — matching what the gemini-box cloud picks up — while
+# excluding neighbouring clutter. Widen for a larger target.
+GT_CROP_R = 0.12
 
 
 def _tilted_pose(fingertip_xyz, yaw, tilt=0.0):
@@ -214,10 +220,11 @@ class GraspBenchmark(SkillsBase):
     wrist camera, the ground-truth object-pose feed, and the /named_config
     client, then runs one benchmark episode from the main thread."""
 
-    def __init__(self, arm, gt_name=''):
+    def __init__(self, arm, gt_name='', box_source='gemini'):
         super().__init__(node_name='grasp_benchmark')
         self.arm = arm
         self._gt_name = gt_name
+        self._box_source = box_source
         self.named_config_cli = ActionClient(
             self, NamedConfig, '/named_config', callback_group=self._cb_group)
 
@@ -295,24 +302,32 @@ class GraspBenchmark(SkillsBase):
         if self._wrist_color is None or self._wrist_depth is None or self._wrist_info is None:
             self.get_logger().error('wrist_cloud: no wrist camera data yet')
             return None
-        # Box the WRIST frame too (not just the head): text-only SAM finds nothing,
-        # so without this the scan silently returns None and the method falls back
-        # to the head cloud — i.e. it stops being the wrist-camera method at all.
-        box = self._gemini_box(text, image=self._wrist_color,
-                               width=self._wrist_info.width,
-                               height=self._wrist_info.height)
-        mask_msg = self.segment(text=text, positive_boxes=box,
-                                image=self._wrist_color)
-        if mask_msg is None:
-            return None
-        mask = (np.frombuffer(bytes(mask_msg.data), dtype=np.uint8)
-                .reshape(mask_msg.height, mask_msg.width) > 127)
+        if self._box_source == 'gt':
+            # No detector: keep every wrist-depth pixel and crop the resulting
+            # cloud around the GT centroid below (mask = all valid pixels).
+            mask = None
+        else:
+            # Box the WRIST frame too (not just the head): text-only SAM finds
+            # nothing, so without this the scan silently returns None and the
+            # method falls back to the head cloud — i.e. it stops being the
+            # wrist-camera method at all.
+            box = self._gemini_box(text, image=self._wrist_color,
+                                   width=self._wrist_info.width,
+                                   height=self._wrist_info.height)
+            mask_msg = self.segment(text=text, positive_boxes=box,
+                                    image=self._wrist_color)
+            if mask_msg is None:
+                return None
+            mask = (np.frombuffer(bytes(mask_msg.data), dtype=np.uint8)
+                    .reshape(mask_msg.height, mask_msg.width) > 127)
         try:
             depth = decode_compressed_depth_image(self._wrist_depth).astype(np.float32) / 1000.0
         except (ValueError, TypeError) as e:
             self.get_logger().error(f'wrist_cloud: depth decode failed: {e}')
             return None
-        if depth.shape != mask.shape:
+        if mask is None:
+            mask = np.ones(depth.shape, dtype=bool)
+        elif depth.shape != mask.shape:
             self.get_logger().error(
                 f'wrist_cloud: mask {mask.shape} != depth {depth.shape}')
             return None
@@ -331,7 +346,17 @@ class GraspBenchmark(SkillsBase):
         except Exception as e:
             self.get_logger().error(f'wrist_cloud: TF {cam_frame} failed: {e}')
             return None
-        return transform_points(pts_cam, transform_to_matrix(tf.transform)).astype(np.float32)
+        pts = transform_points(pts_cam, transform_to_matrix(tf.transform)).astype(np.float32)
+        if self._box_source == 'gt' and target_frame == 'pelvis':
+            c = self.gt_pos_pelvis(self._gt_name)
+            if c is not None:
+                pts = pts[np.linalg.norm(pts - c[None, :], axis=1) <= GT_CROP_R]
+                if len(pts) < 20:
+                    self.get_logger().warn(
+                        f'wrist_cloud[gt]: only {len(pts)} points within '
+                        f'{GT_CROP_R * 100:.0f}cm of GT')
+                    return None
+        return pts
 
     # ------------------------------------------------------ debug snapshots
     def _debug_wrist_snapshot(self, tag):
@@ -587,9 +612,45 @@ class GraspBenchmark(SkillsBase):
         except (ValueError, TypeError):
             return None
 
+    def _gt_cloud(self):
+        """Object cloud straight from ground truth: the whole head-camera cloud
+        cropped to a ball of radius GT_CROP_R around the target's GT centroid
+        (pelvis frame). Skips gemini AND SAM entirely, so a seeded episode yields
+        a FIXED, reproducible object cloud and the benchmark measures grasp
+        SYNTHESIS with detection removed as a variable. Requires --gt-name.
+
+        The crop keeps a little of the support surface around the object, exactly
+        as the gemini box path does (box_to_cloud picks up whatever shows inside
+        the box), so the two cloud sources stay comparable rather than one being
+        pristine and the other not."""
+        c = self.gt_pos_pelvis(self._gt_name)
+        if c is None:
+            self.get_logger().error(
+                f'_gt_cloud: no ground truth for {self._gt_name!r} — is the sim '
+                'publishing /robocasa/object_poses and is --gt-name correct?')
+            return None
+        scene = self.scene_to_cloud(target_frame='pelvis')
+        if scene is None:
+            return None
+        obj = scene[np.linalg.norm(scene - c[None, :], axis=1) <= GT_CROP_R]
+        self.get_logger().info(
+            f'[gt-cloud] {len(obj)}/{len(scene)} head-cloud pts within '
+            f'{GT_CROP_R * 100:.0f}cm of GT {self._gt_name!r} '
+            f'(pelvis {c[0]:.3f},{c[1]:.3f},{c[2]:.3f})')
+        if len(obj) < MIN_GRASP_POINTS:
+            self.get_logger().warn(
+                f'_gt_cloud: only {len(obj)} points (< {MIN_GRASP_POINTS}); '
+                'the object may be occluded or outside the head-camera view')
+            return None
+        return obj.astype(np.float32)
+
     def _boxed_cloud(self, obj_text):
-        """gemini box -> SAM (text+box) -> pelvis cloud. Shared by ALL FOUR methods
-        (see _gemini_box) so they differ only in how they synthesize a grasp."""
+        """Object cloud for a method. --box-source gt uses the ground-truth crop
+        (_gt_cloud); the default gemini path is: gemini box -> SAM (text+box) ->
+        pelvis cloud. Shared by ALL FOUR methods so they differ only in how they
+        synthesize a grasp, not in how the object is perceived."""
+        if self._box_source == 'gt':
+            return self._gt_cloud()
         box = self._gemini_box(obj_text)
         mask = self.segment(text=obj_text, positive_boxes=box)
         if mask is None:
@@ -741,10 +802,22 @@ def main():
     ap.add_argument('--out', default='', help='result JSON path')
     ap.add_argument('--success-dz', type=float, default=0.08,
                     help='ground-truth lift height that counts as success [m]')
+    ap.add_argument('--box-source', default='gemini', choices=('gemini', 'gt'),
+                    help="how methods perceive the object: 'gemini' (gemini box "
+                         "-> SAM) or 'gt' (crop the head/wrist cloud around the "
+                         "ground-truth centroid, NO detector — removes detection "
+                         "as a variable and costs zero API calls). NOTE: 'vlm_judge' "
+                         "still calls gemini for its JUDGE step, and 'skill' runs "
+                         "the deployed skill which detects with gemini internally, "
+                         "so --box-source gt does not make either detector-free.")
     args = ap.parse_args()
+    if args.box_source == 'gt' and args.method in ('vlm_judge', 'skill'):
+        print(f"[grasp_benchmark] WARNING: --box-source gt does not remove gemini "
+              f"from method {args.method!r} (it still calls gemini internally).")
 
     rclpy.init()
-    node = GraspBenchmark(args.arm, gt_name=args.gt_name)
+    node = GraspBenchmark(args.arm, gt_name=args.gt_name,
+                          box_source=args.box_source)
     executor = MultiThreadedExecutor(num_threads=8)
     executor.add_node(node)
     spin = threading.Thread(target=executor.spin, daemon=True)

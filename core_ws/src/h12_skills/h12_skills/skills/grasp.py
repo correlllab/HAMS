@@ -8,9 +8,24 @@ a generic object, or the head-camera YOLO detector for a battery-workcell part
 
 import copy
 import math
+import os
 from dataclasses import dataclass
 
 import numpy as np
+
+
+def _envf(name, default):
+    """A float tunable overridable at runtime via env var `name` (default kept
+    when unset/empty/unparseable). Lets a benchmark sweep vary the grasp
+    reachability band per bringup without a rebuild — the real robot leaves the
+    vars unset and gets the tuned defaults below. See the reachable-band sweep."""
+    raw = os.environ.get(name, '').strip()
+    if not raw:
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        return default
 
 from builtin_interfaces.msg import Time
 from geometry_msgs.msg import Pose, Point, TransformStamped
@@ -46,8 +61,11 @@ _BATTERY_OBJECTS_LC = frozenset(o.lower() for o in BATTERY_OBJECTS)
 OPEN_PERCENT = 1.0
 
 # How many of the ranked GraspGenX grasps to try (best-first) before giving up:
-# the top grasp may be IK-unreachable, so fall through to the next one.
-MAX_GRASP_ATTEMPTS = 5
+# the top grasp may be IK-unreachable, so fall through to the next one. NOTE: the
+# candidates are sorted tier-major, so if the top tier alone holds >= this many
+# diverse grasps, every attempt is spent inside that one tier — a mis-set pitch
+# band is then fatal, not merely deprioritised. Overridable for the sweep.
+MAX_GRASP_ATTEMPTS = int(_envf('HAMS_MAX_GRASP_ATTEMPTS', 5))
 # Diversity thresholds for choosing those MAX_GRASP_ATTEMPTS candidates. GraspGenX
 # often returns a cluster of near-identical top-scored grasps; taking the first 5
 # blindly gives the IK fallback loop five poses that share the same reachability
@@ -64,8 +82,9 @@ GRASP_DIVERSITY_ANG_DEG = 20.0   # ... AND orientations within 20 deg = duplicat
 # horizontal ("slightly down" — steeper than ~45 deg is beyond the H1 arm's
 # practical reach, flatter tends to rake the support surface); tiers 4-6 are
 # the same azimuth classes with the pitch requirement dropped.
-TIER_PITCH_MIN_DEG = 20.0
-TIER_PITCH_MAX_DEG = 45.0
+# Overridable via HAMS_TIER_PITCH_MIN_DEG / _MAX_DEG for the reachable-band sweep.
+TIER_PITCH_MIN_DEG = _envf('HAMS_TIER_PITCH_MIN_DEG', 20.0)
+TIER_PITCH_MAX_DEG = _envf('HAMS_TIER_PITCH_MAX_DEG', 45.0)
 # "Forward" tiers (1/4) alignment tolerances: how far the approach azimuth may
 # stray from pelvis +X, and the finger-closing +X axis from pelvis +Y, while
 # still counting as "closely aligned". The same azimuth tolerance is granted on
@@ -88,8 +107,11 @@ TIER2_AZ_HALFWIDTH_DEG = 15.0
 # +Y-from-up equals |asin(az)|, so keep |az| <= sin(this)); steeper approaches
 # can't be made level and are dropped. Arm side is enforced alongside it by
 # dropping tier-7 (out-of-fan azimuth) grasps so a left grasp never runs on the
-# right arm.
-GRASP_YUP_TOL_DEG = 55.0
+# right arm. Overridable via HAMS_GRASP_YUP_TOL_DEG: this gate DROPS approaches
+# steeper than it before IK ever sees them, and the benchmark's one verified lift
+# came from a ~70-deg-below-horizontal approach that 55 deg rejects — so the sweep
+# needs to raise it to find where the arm actually reaches.
+GRASP_YUP_TOL_DEG = _envf('HAMS_GRASP_YUP_TOL_DEG', 55.0)
 # RViz viz of the KEPT (post-filter) grasps, published on 'graspgen_markers'
 # (latched — the topic and marker style the graspgen server used to draw its
 # full ranked pool; the sim.rviz display already listens there). Each kept grasp

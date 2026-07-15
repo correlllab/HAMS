@@ -31,8 +31,13 @@ GT_NAME="cheese"
 ARM="right"
 LAYOUT=1
 STYLE=1
+# Perception source: 'gemini' (detector) or 'gt' (crop the cloud around the
+# ground-truth centroid, no detector, zero API calls). Default 'gt' — it's
+# reproducible and keeps a matrix off the gemini free-tier quota; pass -b gemini
+# for an end-to-end run that includes detection.
+BOX_SOURCE="gt"
 
-while getopts "m:s:t:o:g:a:l:y:" opt; do
+while getopts "m:s:t:o:g:a:l:y:b:" opt; do
     case "$opt" in
         m) METHODS="$OPTARG" ;;
         s) SEEDS="$OPTARG" ;;
@@ -42,6 +47,7 @@ while getopts "m:s:t:o:g:a:l:y:" opt; do
         a) ARM="$OPTARG" ;;
         l) LAYOUT="$OPTARG" ;;
         y) STYLE="$OPTARG" ;;
+        b) BOX_SOURCE="$OPTARG" ;;
         *) exit 2 ;;
     esac
 done
@@ -172,7 +178,7 @@ for seed in $SEEDS; do
         # --- the episode -------------------------------------------------------
         if ! $IN_ROS "$SRC && ros2 run h12_skills grasp_benchmark \
                 --method $method --object '$OBJECT' --gt-name $GT_NAME \
-                --arm $ARM --out $out_json"; then
+                --arm $ARM --box-source $BOX_SOURCE --out $out_json"; then
             echo "episode $stamp FAILED (see container logs)" >&2
         fi
         # Salvage the bringup log BEFORE the containers go away: it holds the
