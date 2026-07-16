@@ -114,6 +114,28 @@ def main() -> None:
         # costs the 200 Hz control loop nothing. ROS sees it as /mjpc/plan.
         "--plan_topic", "rt/mjpc/plan",
         "--plan_hz", "20.0",
+        # ---- straighten (strat 25) bring-up + debug -------------------------
+        # Passed unconditionally with their defaults visible here (edit in place
+        # or override with -p). Unlike --arm_aware below, BOTH cores define all
+        # three, so no has_* guard is needed and mjpc_fullbody_core won't abort.
+        # Defaults reproduce the binary's own defaults exactly -> byte-identical
+        # to not passing them at all.
+        #
+        # straighten_start: hold the measured (slumped) pose, wait for ENTER on
+        # the core's STDIN, then hand authority to the planner (SETTLE->BLEND).
+        # Pair with strategy:=25. Needs a terminal -- do not launch detached.
+        ("--straighten_start" if bool(p("straighten_start", False).value)
+         else "--nostraighten_start"),
+        # frc_parity is a TRI-STATE INT, not a bool -- pass 1, never true:
+        #   -1 = task default -> the `deploy_frc_parity` model numeric, which is
+        #        ABSENT from Stabilize_H12_Magpie.xml, so -1 resolves to OFF.
+        #    0 = force OFF (legacy planner model, byte-identical) -- the A/B arm.
+        #    1 = force ON -> planner forceranges tightened to 0.9 x tau_estop (the
+        #        budget the node can actually emit; ankle 75 -> 48.6 Nm).
+        "--frc_parity", str(int(p("frc_parity", -1).value)),
+        # per-term cost breakdown to stderr once/sec (debug); the concise [node]
+        # status line is unaffected.
+        ("--cost" if bool(p("cost", False).value) else "--nocost"),
     ]
     iface = str(p("network_interface", "").value)
     if iface:
@@ -125,32 +147,6 @@ def main() -> None:
     if bool(p("has_arm_aware", True).value):
         args.append("--arm_aware" if bool(p("arm_aware", True).value)
                     else "--noarm_aware")
-
-    # ---- straighten (strat 25) bring-up + debug knobs -----------------------
-    # Unlike --arm_aware, BOTH cores define all three of these flags, so no
-    # has_* guard is needed: passing them to mjpc_fullbody_core is legal.
-    #
-    # straighten_start: hold the measured (slumped) pose, wait for ENTER on the
-    # core's stdin, then hand authority to the planner (SETTLE -> BLEND). Pair
-    # with strategy:=25. NOTE the core reads ENTER from stdin, so it must not be
-    # launched detached from a terminal if you intend to use this.
-    if bool(p("straighten_start", False).value):
-        args.append("--straighten_start")
-    # frc_parity is a TRI-STATE INT, not a bool:
-    #   -1 = task default -> the `deploy_frc_parity` model numeric, which is
-    #        ABSENT on Stabilize_H12_Magpie.xml, so -1 resolves to OFF there.
-    #    0 = force OFF (legacy planner model, byte-identical) -- the A/B arm.
-    #    1 = force ON  -> planner forceranges tightened to 0.9 x tau_estop (the
-    #        H2 clamp budget the node can actually emit; ankle 75 -> 48.6 Nm).
-    # Only forwarded when >= 0 so the unset default stays byte-identical to the
-    # binary's own default.
-    _frc = int(p("frc_parity", -1).value)
-    if _frc >= 0:
-        args += ["--frc_parity", str(_frc)]
-    # per-term cost breakdown to stderr once/sec (debug); the concise [node]
-    # status line is unaffected.
-    if bool(p("cost", False).value):
-        args.append("--cost")
 
     drop_band = bool(p("drop_band", True).value)
     band_after = float(p("band_drop_after_secs", 20.0).value)
