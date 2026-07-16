@@ -40,6 +40,12 @@ install(PROGRAMS ${PROJECT_NAME}/estimator_node.py
 install(PROGRAMS ${PROJECT_NAME}/controller_launcher.py
         DESTINATION lib/${PROJECT_NAME}
         RENAME mjpc_deploy_lowerbody_controller)
+# Debug-only: renders the measured robot + a blue ghost of the planner's current
+# best trajectory (rt/mjpc/plan) to an mp4. Same param-shell-around-a-fork-worker
+# arrangement as the estimator.
+install(PROGRAMS ${PROJECT_NAME}/debug_visualizer_node.py
+        DESTINATION lib/${PROJECT_NAME}
+        RENAME mjpc_debug_visualizer)
 
 # ---- shared resources ----
 install(DIRECTORY config DESTINATION share/${PROJECT_NAME})

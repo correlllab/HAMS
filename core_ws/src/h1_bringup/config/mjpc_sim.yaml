@@ -21,6 +21,58 @@ h12_deploy_mjpc_estimator:
     # REAL runs 1x, where wall == plant time; mjpc_real.yaml leaves this at 0.
     tick_dt: 0.005   # follows --sim-dt 0.005 (plant timestep parity, 2026-07-04)
 
+mjpc_debug_visualizer:
+  ros__parameters:
+    # DEBUG ONLY (use_mjpc_viz:=false to drop it). Renders the MEASURED robot in its
+    # normal colours + a semi-transparent BLUE GHOST at the planner's current best
+    # trajectory, and writes the mp4 when the node is signalled. Commands nothing;
+    # subscribes only to rt/lowstate, the estimator's rt/sportmodestate_est, and
+    # rt/mjpc/plan (the controller core publishes that from its planner thread --
+    # controller_launcher.py hardcodes --plan_topic, so this needs no arming here).
+    # MUST be a HOST-MOUNTED path. docker_run.sh runs the ros container with
+    # `compose run --rm`, so the container -- and everything in its /tmp -- is
+    # DESTROYED the moment `ros2 launch` exits. That is exactly when the mp4 is
+    # finalised, so a /tmp default writes a perfect video and then deletes it.
+    # core_ws is bind-mounted, and core_ws/.gitignore's `log/` has no leading slash
+    # so it matches at ANY depth -- this lands on the host at
+    # core_ws/src/h12_deploy_mjpc/log/mjpc_plan.mp4 and stays out of git.
+    out_path: /home/code/core_ws/src/h12_deploy_mjpc/log/mjpc_plan.mp4
+    # RENDER rate, decoupled from the 200 Hz lowstate and the ~20 Hz plan (the viewer
+    # draws from whatever it last cached, on its own clock). 10 because osmesa is a
+    # software rasteriser: ~96 ms/frame for this scene with shadows off (measured),
+    # i.e. ~10 fps, and the mp4's fps tag is fixed when the file opens -- so a target
+    # the loop cannot hit yields a video that PLAYS FAST and misrepresents the
+    # dynamics. The node reports the achieved rate on exit if it falls short.
+    fps: 10.0
+    width: 960
+    height: 720
+    # Guard an unattended sim from filling the disk. 0 = run until shutdown.
+    max_seconds: 0.0
+    # EXPECT the ghost's BASE to sit off the measured robot's: the plan carries the
+    # PLANNER's base belief, the measured robot the ESTIMATOR's. That gap is real
+    # signal (it is how you see the planner solving for a robot that isn't where it
+    # thinks it is), so align_ghost_base stays false. Set true ONLY to compare
+    # POSTURE in isolation.
+    align_ghost_base: false
+    # GHOST MOTION. sweep = the ghost's plan step cycles 0 -> end of horizon in real
+    # time (each ~1 s loop walks from "now" out to the full lookahead), alpha fading
+    # from ghost_rgba's alpha down to ghost_alpha_far so a single frame still shows how
+    # far ahead it is. Do NOT use ghost_mode: single with ghost_step: 0 -- plan row 0
+    # is the measured state BIT-FOR-BIT (trajectory.cc:130 seeds it from what the
+    # deploy core SetState'd), so that draws a ghost welded to the robot and shows
+    # nothing, even as it falls. That was this tool's original default and it made the
+    # viewer look broken.
+    ghost_mode: sweep
+    sweep_rate: 1.0
+    ghost_alpha_far: 0.15
+    # HOW TO READ IT: a near-1:1 ghost on a STABLE stand is CORRECT -- over the 1.0 s
+    # horizon the plan moves the base only ~1.8 cm and the 27 joints ~0.029 rad on
+    # average (measured off the live CEM planner), because a balancing robot's plan
+    # says "stay put". Judge the ghost DURING a fall, in the first few hundred ms:
+    # that is when the plan's intended recovery diverges from what the robot actually
+    # does, and that gap is the deploy gap (deploy_common.h:92-110).
+    plan_stale_sec: 1.0
+
 mjpc_deploy_lowerbody_controller:
   ros__parameters:
     task: "Stabilize H12 Magpie"

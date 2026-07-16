@@ -65,6 +65,10 @@ def generate_launch_description():
         DeclareLaunchArgument('use_sliders', default_value='true'),
         DeclareLaunchArgument('use_nav', default_value='true'),
         DeclareLaunchArgument('use_skills', default_value='true'),
+        # Debug-only: renders the measured robot + a blue ghost of the MJPC plan to an
+        # mp4 (written on shutdown). Reads rt/lowstate + the estimator + rt/mjpc/plan;
+        # commands nothing. use_mjpc_viz:=false for a clean bringup.
+        DeclareLaunchArgument('use_mjpc_viz', default_value='true'),
         DeclareLaunchArgument('model_logging', default_value='true'),
         DeclareLaunchArgument('model_visualization', default_value='true'),
         DeclareLaunchArgument('model_clear_logs', default_value='true'),
@@ -178,6 +182,29 @@ def generate_launch_description():
             # the model is null -> mj_makeData segfault on startup.
             additional_env={'MJPC_TASKS_DIR': '/home/code/mujoco_mpc/build/mjpc/tasks'},
             output='screen',
+        ),
+
+        # --- MJPC plan debug visualizer (measured robot + blue ghost of the plan) ---
+        # Subscribes only: rt/lowstate + rt/sportmodestate_est (the estimator above) +
+        # rt/mjpc/plan (published by the controller's planner thread). Writes an mp4 on
+        # shutdown. Nothing in the control path depends on it.
+        Node(
+            package='h12_deploy_mjpc',
+            executable='mjpc_debug_visualizer',
+            name='mjpc_debug_visualizer',   # MUST match the yaml key
+            parameters=[
+                sim_time_param,
+                os.path.join(get_package_share_directory('h1_bringup'),
+                            'config', 'mjpc_sim.yaml'),
+            ],
+            # MJPC_TASKS_DIR: the viewer loads the SAME staged task XML as the
+            # controller, so the plan's qpos rows line up with its model.
+            # MUJOCO_GL=osmesa: offscreen software GL -- needs no GPU, and unlike egl
+            # it works under both compose and `docker run --gpus all`.
+            additional_env={'MJPC_TASKS_DIR': '/home/code/mujoco_mpc/build/mjpc/tasks',
+                            'MUJOCO_GL': 'osmesa'},
+            output='screen',
+            condition=IfCondition(LaunchConfiguration('use_mjpc_viz')),
         ),
 
 

@@ -104,6 +104,16 @@ def main() -> None:
         # to before (real/twin run RTF~1); a below-realtime sim (RoboCasa) passes its
         # measured RTF so the predict-forward horizon stops over-leading by 1/RTF.
         "--latency_rtf", str(p("latency_rtf", 1.0).value),
+        # DEBUG plan publish for mjpc_debug_visualizer's blue ghost. Hardcoded, not a
+        # ROS param: there is exactly one right topic and the visualizer defaults to
+        # the same string, so a param could only ever be set WRONG (silently costing
+        # you the ghost). The core still defaults this OFF -- an empty --plan_topic --
+        # so the fork's binary, the full-body core and the upper-body core are all
+        # byte-unchanged; this launcher is the only thing that arms it.
+        # The publish happens on the PLANNER thread after PlanIteration returns, so it
+        # costs the 200 Hz control loop nothing. ROS sees it as /mjpc/plan.
+        "--plan_topic", "rt/mjpc/plan",
+        "--plan_hz", "20.0",
     ]
     iface = str(p("network_interface", "").value)
     if iface:
