@@ -82,8 +82,8 @@ def generate_launch_description():
         output='screen',
         parameters=[{
             'auto_detect_port': False,
-            # OpenRB-150 serial ...FF122F35 (was ttyACM1)
-            'port': '/dev/serial/by-id/usb-ROBOTIS_OpenRB-150_9F2640E15157375037202020FF122F35-if00',
+            # OpenRB-150 serial ...FF0F0E1C (replacement board, was ...FF122F35)
+            'port': '/dev/serial/by-id/usb-ROBOTIS_OpenRB-150_3EC94E825157375037202020FF0F0E1C-if00',
             'use_eflesh': False,
             # Finger angle limits (degrees), per-gripper calibration.
             'finger1theta_min': 86.51,
