@@ -21,6 +21,10 @@
        not rosdep) -->
   <exec_depend>rclpy</exec_depend>
   <exec_depend>std_srvs</exec_depend>
+  <exec_depend>std_msgs</exec_depend>
+  <!-- startup handshake: the split launcher watches the core's legs channel
+       (rt/safety/lowcmd_lower_in as a plain ROS subscription) for liveness -->
+  <exec_depend>unitree_hg</exec_depend>
   <exec_depend>python3-numpy</exec_depend>
   <!-- mujoco (python) is pip-installed in the image; no rosdep key.
        The debug visualizer also needs cv2 (mp4 writer) + an offscreen GL

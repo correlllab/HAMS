@@ -7,9 +7,12 @@
 
 h12_deploy_mjpc_estimator:
   ros__parameters:
-    # Debug mode has no sport service, so the estimator OWNS rt/sportmodestate
-    # (the native-B1 arrangement). Never run a second estimator instance.
-    out_topic: rt/sportmodestate
+    # Debug mode has no native sport service, so this estimator is the SOLE
+    # publisher of the base world pose; nothing else emits it. Published on
+    # rt/sportmodestate_est (not the bare rt/sportmodestate) for parity with sim
+    # and so the controller + plan visualizer read the same _est topic on sim and
+    # real. Never run a second estimator instance.
+    out_topic: rt/sportmodestate_est
     rate: 200.0
     filter: rw-ekf
     # iface: left empty on purpose -- the estimator auto-pins whichever NIC
@@ -19,13 +22,61 @@ h12_deploy_mjpc_estimator:
     # robot-subnet NICs; an unknown name warns and falls back to auto-detect.
     iface: ""
 
-mjpc_deploy_lowerbody_controller:
+mjpc_debug_visualizer:
   ros__parameters:
-    task: "Stabilize H12 Magpie"
-    strategy: 6                 # 6 = stand
+    # DEBUG ONLY (use_mjpc_viz:=false, or the default start_position_verified:=false,
+    # drops it). Renders the MEASURED robot in its normal colours + a semi-transparent
+    # BLUE GHOST at the planner's current best trajectory, and writes the mp4 when the
+    # node is signalled. Commands nothing; subscribes only to rt/lowstate, the
+    # estimator's sportstate estimate, and rt/mjpc/plan (the controller core publishes
+    # that from its planner thread -- controller_launcher.py hardcodes --plan_topic on
+    # real too, so this needs no arming here).
+    #
+    # ESTIMATOR OUTPUT the ghost reads for the measured base -- matches the
+    # estimator's out_topic (rt/sportmodestate_est) above, the same signal the
+    # controller balances on. Never point this at a bare/ground-truth topic.
+    sportstate_topic: rt/sportmodestate_est
+    # HOST-MOUNTED path (core_ws is bind-mounted; core_ws/.gitignore's `log/` keeps it
+    # out of git). A /tmp default is destroyed with the container on `compose run --rm`
+    # exit -- exactly when the mp4 is finalised -- so it must land under core_ws.
+    out_path: /home/code/core_ws/src/h12_deploy_mjpc/log/mjpc_plan.mp4
+    # RENDER rate, decoupled from the 200 Hz lowstate and ~20 Hz plan. 10 because osmesa
+    # is a software rasteriser (~96 ms/frame for this scene); the mp4's fps tag is fixed
+    # when the file opens, so a target the loop can't hit plays fast and misrepresents
+    # the dynamics. The node reports the achieved rate on exit if it falls short.
+    fps: 10.0
+    width: 960
+    height: 720
+    max_seconds: 0.0   # 0 = run until shutdown
+    # EXPECT the ghost's BASE to sit off the measured robot's: the plan carries the
+    # PLANNER's base belief, the measured robot the ESTIMATOR's. That gap is real signal,
+    # so align_ghost_base stays false. Set true ONLY to compare POSTURE in isolation.
+    align_ghost_base: false
+    # GHOST MOTION: sweep = the plan step cycles 0 -> end of horizon in real time, alpha
+    # fading to ghost_alpha_far. Do NOT use single/ghost_step 0 -- plan row 0 is the
+    # measured state bit-for-bit, so it welds the ghost to the robot and shows nothing.
+    ghost_mode: sweep
+    sweep_rate: 1.0
+    ghost_alpha_far: 0.15
+    plan_stale_sec: 1.0
+
+mjpc_deploy_splitbody_controller:
+  ros__parameters:
+    # Whole-body nu=27 SPLIT task (2026-07-17): the Magpie model + 15 inactive
+    # upper-joint eq locks. While frame_task owns the arms (pause toggle) the
+    # core engages the locks at the measured pose and plans legs-only; active
+    # = identical to "Lean H12 Magpie" (locks off).
+    task: "Lean H12 Magpie Split"
+    strategy: 6                 # 6 = stand (lean task: balance hold at home pose)
+    # Dynamic startup handshake (2026-07-17): frame_task (onboard PC, same DDS
+    # domain 0) initializes owning the arms; this launcher takes them via
+    # /frametaskserver/toggle_pause_upperbody once both sides are ready.
+    # handshake: false restores the static split (manual toggles).
+    handshake: true
+    default_upper_paused: true
     gravity_ff: 0.85            # real robot: validated value
     twin_dt: 0.001              # real lowstate ticks at 1 kHz
-    sportstate_topic: rt/sportmodestate
+    sportstate_topic: rt/sportmodestate_est   # matches the estimator's out_topic above
     # MEASURED mount calibration for THIS H1-2 (body truly vertical reads -1.6
     # deg on the IMU; +1.6 zeroes it). Validated on real hardware.
     imu_pitch_offset_deg: 1.6

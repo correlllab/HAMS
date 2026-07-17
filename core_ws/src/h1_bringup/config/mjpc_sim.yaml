@@ -73,10 +73,21 @@ mjpc_debug_visualizer:
     # does, and that gap is the deploy gap (deploy_common.h:92-110).
     plan_stale_sec: 1.0
 
-mjpc_deploy_lowerbody_controller:
+mjpc_deploy_splitbody_controller:
   ros__parameters:
-    task: "Stabilize H12 Magpie"
-    strategy: 6                 # 6 = stand (the stabilize task's only real slot)
+    # Whole-body nu=27 SPLIT task (2026-07-17): the Magpie model + 15 inactive
+    # upper-joint eq locks. While frame_task owns the arms (pause toggle) the
+    # core engages the locks at the measured pose and plans legs-only; active
+    # = identical to "Lean H12 Magpie" (locks off).
+    task: "Lean H12 Magpie Split"
+    strategy: 6                 # 6 = stand (lean task: balance hold at home pose)
+    # Dynamic startup handshake (2026-07-17, defaults shown for visibility):
+    # boot with frame_task owning the arms; once the core publishes legs and
+    # /frametaskserver/upper_body_paused reads false, the launcher calls
+    # /frametaskserver/toggle_pause_upperbody once and unpauses MJPC on the
+    # response. handshake: false restores the static split (manual toggles).
+    handshake: true
+    default_upper_paused: true
     # ★ RESTORED TO 12 (2026-07-06) = PARITY WITH REAL/TWIN/OWNSIM (all run 12). The
     # old drop to 3 "faked" the per-sim-second planner rate for RoboCasa's SLOW RTF
     # (0.25: 12 threads = 4x real iters/sim-s -> over-plan wobble; 3 = ~real). BUT

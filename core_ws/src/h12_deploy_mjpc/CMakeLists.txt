@@ -40,6 +40,13 @@ install(PROGRAMS ${PROJECT_NAME}/estimator_node.py
 install(PROGRAMS ${PROJECT_NAME}/controller_launcher.py
         DESTINATION lib/${PROJECT_NAME}
         RENAME mjpc_deploy_lowerbody_controller)
+# Same launcher as above but with the upper-body pause toggle
+# (mjpc_deploy/toggle_pause_upperbody Trigger service) and the dynamic startup
+# handshake with frame_task. Distinct node/executable so it can be selected in
+# place of the plain lower-body controller.
+install(PROGRAMS ${PROJECT_NAME}/split_body_controller.py
+        DESTINATION lib/${PROJECT_NAME}
+        RENAME mjpc_deploy_splitbody_controller)
 # Debug-only: renders the measured robot + a blue ghost of the planner's current
 # best trajectory (rt/mjpc/plan) to an mp4. Same param-shell-around-a-fork-worker
 # arrangement as the estimator.
@@ -159,7 +166,27 @@ if(H12_BUILD_CONTROLLER AND EXISTS "${MJPC_BUILD}" AND unitree_sdk2_FOUND)
     INSTALL_RPATH "/usr/local/lib;${MJPC_BUILD}/lib;${_dds_libdir}")
   install(TARGETS mjpc_fullbody_core DESTINATION lib/${PROJECT_NAME})
 
-  message(STATUS "h12_deploy_mjpc: mjpc_lowerbody_core + mjpc_fullbody_core ENABLED "
+  # SPLIT-BODY core (h12_split_controller.cc) -- the core the split-body launcher
+  # (mjpc_deploy_splitbody_controller / split_body_controller.py) starts. A copy
+  # of the lower-body core with the same deploy_common + link recipe; kept a
+  # distinct target/binary so split-specific C++ changes never touch the plain
+  # lower-body core. Publishes rt/safety/lowcmd_lower_in like the lower-body core.
+  add_executable(mjpc_split_core
+    "${MJPC_ROOT}/mjpc/deploy/h12_split_controller.cc"
+    "${MJPC_ROOT}/mjpc/deploy/deploy_common.cc")
+  target_include_directories(mjpc_split_core PRIVATE ${MJPC_INCLUDE_DIRS})
+  target_link_libraries(mjpc_split_core
+    -Wl,--start-group ${MJPC_LIBRARIES} -Wl,--end-group
+    "${MUJOCO_LIBRARY}" unitree_sdk2 Threads::Threads ${CMAKE_DL_LIBS})
+  if(EXISTS "/usr/bin/ld.lld-13")
+    target_link_options(mjpc_split_core PRIVATE -fuse-ld=/usr/bin/ld.lld-13)
+  endif()
+  set_target_properties(mjpc_split_core PROPERTIES
+    BUILD_RPATH "/usr/local/lib;${MJPC_BUILD}/lib;${_dds_libdir}"
+    INSTALL_RPATH "/usr/local/lib;${MJPC_BUILD}/lib;${_dds_libdir}")
+  install(TARGETS mjpc_split_core DESTINATION lib/${PROJECT_NAME})
+
+  message(STATUS "h12_deploy_mjpc: mjpc_lowerbody_core + mjpc_fullbody_core + mjpc_split_core ENABLED "
                  "(MJPC build tree ${MJPC_BUILD}; unitree_sdk2 dds at ${_dds_libdir})")
 else()
   message(STATUS "h12_deploy_mjpc: mjpc_lowerbody_core SKIPPED "

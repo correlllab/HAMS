@@ -115,7 +115,14 @@ def generate_launch_description():
             executable='frame_task_server',
             name='frame_task_server',
             arguments=['--config', 'sim_safety_split.yaml'],
-            parameters=[sim_time_param],
+            # Dynamic startup handshake (2026-07-17): frame_task initializes
+            # OWNING the arms (start_paused False -> its normal init/arm-homing
+            # runs on the real channel). The MJPC splitbody launcher watches
+            # /frametaskserver/upper_body_paused and, once both sides are
+            # ready, calls /frametaskserver/toggle_pause_upperbody ONCE to
+            # take the arms. Toggle either service by hand to move them later
+            # (pause the current owner FIRST).
+            parameters=[sim_time_param, {'start_paused': False}],
             output='screen',
         ),
 
@@ -168,11 +175,12 @@ def generate_launch_description():
             output='screen',
         ),
 
-        # --- MJPC lower-body balance controller (spawns mjpc_lowerbody_core) ---
+        # --- MJPC split-body controller (spawns mjpc_split_core; adds the
+        #     mjpc_deploy/toggle_pause_upperbody service + startup handshake) ---
         Node(
             package='h12_deploy_mjpc',
-            executable='mjpc_deploy_lowerbody_controller',
-            name='mjpc_deploy_lowerbody_controller',   # MUST match the yaml key
+            executable='mjpc_deploy_splitbody_controller',
+            name='mjpc_deploy_splitbody_controller',   # MUST match the yaml key
             parameters=[
                 sim_time_param,
                 os.path.join(get_package_share_directory('h1_bringup'),

@@ -7,7 +7,7 @@ from launch.actions import (
     TimerAction,
 )
 from launch.conditions import IfCondition
-from launch.substitutions import LaunchConfiguration
+from launch.substitutions import LaunchConfiguration, PythonExpression
 from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
 
@@ -81,28 +81,32 @@ def generate_launch_description():
         # (start_position_verified:=true). Defaults to false so a bare launch
         # never auto-commands the legs on the real robot.
         DeclareLaunchArgument('start_position_verified', default_value='false'),
+        # Debug-only MJPC plan visualizer (blue ghost of the plan -> mp4 on shutdown).
+        # Only comes up when start_position_verified:=true (it needs the estimator's
+        # sportstate + the controller's rt/mjpc/plan); use_mjpc_viz:=false forces it off.
+        DeclareLaunchArgument('use_mjpc_viz', default_value='true'),
         DeclareLaunchArgument('use_skills', default_value='true'),
         DeclareLaunchArgument('model_logging', default_value='true'),
         DeclareLaunchArgument('model_visualization', default_value='true'),
         DeclareLaunchArgument('model_clear_logs', default_value='true'),
 
         # vision foundation-model services (gemini + sam, served by model_server)
-        Node(
-            package='model_server',
-            executable='gemini_server',
-            name='gemini_server',
-            prefix=OTHER_CPUS,
-            parameters=[sim_time_param, model_log_params],
-            output='screen',
-        ),
-        Node(
-            package='model_server',
-            executable='sam_server',
-            name='sam_server',
-            prefix=OTHER_CPUS,
-            parameters=[sim_time_param, model_log_params],
-            output='screen',
-        ),
+        # Node(
+        #     package='model_server',
+        #     executable='gemini_server',
+        #     name='gemini_server',
+        #     prefix=OTHER_CPUS,
+        #     parameters=[sim_time_param, model_log_params],
+        #     output='screen',
+        # ),
+        # Node(
+        #     package='model_server',
+        #     executable='sam_server',
+        #     name='sam_server',
+        #     prefix=OTHER_CPUS,
+        #     parameters=[sim_time_param, model_log_params],
+        #     output='screen',
+        # ),
 
         # yolo_server: YOLO-World open-vocabulary detection publisher. Subscribes
         # to the head + both hand color cameras (its DEFAULT_IMAGE_TOPICS) and
@@ -112,14 +116,14 @@ def generate_launch_description():
         # BusBar, InteriorScrew, Nut, OrageCove, Screw, ScrewHole). The vocabulary
         # is read live from the `queries` param — retune at runtime, e.g.:
         #   ros2 param set /yolo_server queries "['Bolt','Nut','Screw']"
-        Node(
-            package='model_server',
-            executable='yolo_server',
-            name='yolo_server',
-            prefix=OTHER_CPUS,
-            parameters=[sim_time_param, model_log_params],
-            output='screen',
-        ),
+        # Node(
+        #     package='model_server',
+        #     executable='yolo_server',
+        #     name='yolo_server',
+        #     prefix=OTHER_CPUS,
+        #     parameters=[sim_time_param, model_log_params],
+        #     output='screen',
+        # ),
 
         # graspgen_server + h12_skills: the GraspGenX planning service and the
         # /skill/* action servers. The grasp skill chains gemini -> sam ->
@@ -127,24 +131,24 @@ def generate_launch_description():
         # both are gated on use_skills. The skills node waits ~10s each (non-
         # fatal) on gemini/sam/graspgen, the grippers, and frame_task — the
         # latter two arrive over DDS from the robot/driver bringup.
-        Node(
-            package='model_server',
-            executable='graspgen_server',
-            name='graspgen_server',
-            prefix=OTHER_CPUS,
-            parameters=[sim_time_param, model_log_params],
-            output='screen',
-            condition=IfCondition(LaunchConfiguration('use_skills')),
-        ),
-        Node(
-            package='h12_skills',
-            executable='skills',
-            name='h12_skills',
-            prefix=OTHER_CPUS,
-            parameters=[sim_time_param, model_log_params],
-            output='screen',
-            condition=IfCondition(LaunchConfiguration('use_skills')),
-        ),
+        # Node(
+        #     package='model_server',
+        #     executable='graspgen_server',
+        #     name='graspgen_server',
+        #     prefix=OTHER_CPUS,
+        #     parameters=[sim_time_param, model_log_params],
+        #     output='screen',
+        #     condition=IfCondition(LaunchConfiguration('use_skills')),
+        # ),
+        # Node(
+        #     package='h12_skills',
+        #     executable='skills',
+        #     name='h12_skills',
+        #     prefix=OTHER_CPUS,
+        #     parameters=[sim_time_param, model_log_params],
+        #     output='screen',
+        #     condition=IfCondition(LaunchConfiguration('use_skills')),
+        # ),
 
         # Switchable lower-body RL controller (walk / FAME stand-squat).
         # Auto-engages the FAME standing policy; switch via /lowerbody/start_walk
@@ -175,13 +179,14 @@ def generate_launch_description():
 
         ),
 
-        # --- MJPC lower-body balance controller (spawns mjpc_lowerbody_core) ---
+        # --- MJPC split-body controller (spawns mjpc_split_core; adds the
+        #     mjpc_deploy/toggle_pause_upperbody service + startup handshake) ---
         Node(
             package='h12_deploy_mjpc',
-            executable='mjpc_deploy_lowerbody_controller',
-            name='mjpc_deploy_lowerbody_controller',   # MUST match the yaml key
-            # taskset pins THIS launcher; the mjpc_lowerbody_core it Popens inherits
-            # the 0-11 affinity mask (see controller_launcher.py). plan_threads (yaml)
+            executable='mjpc_deploy_splitbody_controller',
+            name='mjpc_deploy_splitbody_controller',   # MUST match the yaml key
+            # taskset pins THIS launcher; the mjpc_split_core it Popens inherits
+            # the 0-11 affinity mask (see split_body_controller.py). plan_threads (yaml)
             # caps its planner threadpool to match.
             prefix=MJPC_CPUS,
             parameters=[
@@ -196,15 +201,46 @@ def generate_launch_description():
             condition=IfCondition(LaunchConfiguration('start_position_verified')),
         ),
 
+        # --- MJPC plan debug visualizer (measured robot + blue ghost of the plan) ---
+        # Subscribes only: rt/lowstate + the estimator's sportstate + rt/mjpc/plan
+        # (published by the controller's planner thread). Writes an mp4 on shutdown;
+        # nothing in the control path depends on it. Gated on start_position_verified
+        # (needs the estimator + controller above) AND use_mjpc_viz.
+        #
+        # Pinned to OTHER_CPUS (14-27), OFF the RT set (0-13): osmesa software rendering
+        # burns a core, so it must never contend with the 12 planner threads (0-11), the
+        # estimator core (12), or the NIC-IRQ core (13) mid-balance-loop.
         Node(
-            package='rviz2',
-            executable='rviz2',
-            name='rviz2_sim',
+            package='h12_deploy_mjpc',
+            executable='mjpc_debug_visualizer',
+            name='mjpc_debug_visualizer',   # MUST match the yaml key
             prefix=OTHER_CPUS,
-            arguments=['-d',default_rviz],
-            parameters=[sim_time_param],
+            parameters=[
+                sim_time_param,
+                os.path.join(get_package_share_directory('h1_bringup'),
+                            'config', 'mjpc_real.yaml'),
+            ],
+            # MJPC_TASKS_DIR: the viewer loads the SAME staged task XML as the controller,
+            # so the plan's qpos rows line up with its model.
+            # MUJOCO_GL=osmesa: offscreen software GL -- needs no GPU.
+            additional_env={'MJPC_TASKS_DIR': '/home/code/mujoco_mpc/build/mjpc/tasks',
+                            'MUJOCO_GL': 'osmesa'},
             output='screen',
+            condition=IfCondition(PythonExpression([
+                "'", LaunchConfiguration('start_position_verified'), "' == 'true' and '",
+                LaunchConfiguration('use_mjpc_viz'), "' == 'true'",
+            ])),
         ),
+
+        # Node(
+        #     package='rviz2',
+        #     executable='rviz2',
+        #     name='rviz2_sim',
+        #     prefix=OTHER_CPUS,
+        #     arguments=['-d',default_rviz],
+        #     parameters=[sim_time_param],
+        #     output='screen',
+        # ),
 
         # slider_debugger waits up to 5s on /left_ee_pose & /right_ee_pose,
         # which frame_task_server publishes only after its IK solver finishes

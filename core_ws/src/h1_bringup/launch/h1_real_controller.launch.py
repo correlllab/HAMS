@@ -63,7 +63,15 @@ def generate_launch_description():
                     executable='frame_task_server',
                     name='frame_task_server',
                     arguments=['--config', 'safety_split.yaml'],
-                    parameters=[sim_time_param],
+                    # Dynamic startup handshake (2026-07-17): frame_task
+                    # initializes OWNING the arms (its init/arm-homing drives
+                    # them). The MJPC splitbody launcher on the desktop (same
+                    # DDS domain 0) watches /frametaskserver/upper_body_paused
+                    # and takes the arms via
+                    # /frametaskserver/toggle_pause_upperbody once both sides
+                    # are ready. Toggle by hand to hand them back (pause MJPC
+                    # first: /mjpc_deploy/toggle_pause_upperbody).
+                    parameters=[sim_time_param, {'start_paused': False}],
                     output='screen',
                 ),
             ],
