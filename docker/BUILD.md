@@ -8,9 +8,13 @@ two independent build systems that meet at runtime:
 2. **colcon** builds the ROS 2 workspace(s) at *container start*, from
    bind-mounted source, into a host-persisted cache.
 
-A third, standalone **CMake** build (MuJoCo MPC) is layered on top of the `ros`
-image with a dev loop that lets you rebuild it in-container without rebuilding
-the image — see [MuJoCo MPC dev loop](#mujoco-mpc-mjpc-dev-loop).
+> **MJPC reintegration (branch `mjpc_reintegration`, 2026-07-16):** the fork-era
+> MJPC pipeline (baked `agent_server`, `/opt/mjpc-build-seed`, runtime hydration)
+> stays removed. In its place: the `mujoco_mpc` submodule (repinned to pristine
+> google-deepmind upstream + our `h12_lowerbody` task) is built **at runtime,
+> outside colcon**, into a host-persisted `container_cache/mjpc_build` tree via
+> the thin `docker/scripts/rebuild_mjpc.sh`; the image bakes only the toolchain.
+> `h12_deploy_mjpc` links that build tree directly. See §7.
 
 The guiding principle throughout: **bake stable/heavy things into the image; keep
 fast-moving source on the host and bind-mount it in.** Almost every dependency is
@@ -31,7 +35,7 @@ is required before anything builds.
 | `CL_Assets` | URDF meshes, MuJoCo XML, Isaac USD (Git-LFS) |
 | `CL_isaaclab_sim` | Isaac Sim task/runtime code |
 | `unitree_sdk2_python` | Unitree DDS SDK (Python) |
-| `mujoco_mpc` | MuJoCo MPC fork (`badinkajink @ extended_hw_patched`) — see §7 |
+| `mujoco_mpc` | MuJoCo MPC submodule — google-deepmind upstream + our tasks (branch `max_playground`); bind-mounted rw, built at runtime into `container_cache/mjpc_build` by `rebuild_mjpc.sh` — see §7 |
 
 **`core_ws/src` submodules:** `cl_realsense`, `custom_ros_messages`, `estop`,
 `h12_ros2_controller`, `h12_ros2_model`, `h12_safety_layer`, `livox_ros_driver2`,
@@ -128,7 +132,13 @@ iterating on volatile pins doesn't bust the heavy layers above. `FROM hams_base`
    too old for its PEP 621 metadata), install `--no-deps`, freeze the whole env as
    an *additive constraint*, then add deps + downgrade `huggingface-hub` for
    `diffusers`, and add `viser` — all pinned so nothing already-installed moves.
-9. **MuJoCo MPC** — see §7.
+9. **MuJoCo MPC toolchain** — clang-13/llvm-13/lld-13 + ninja + `patch` + GL/X11
+   dev headers (apt), then the `mujoco==3.2.3` pip ABI pin under the graspgenx
+   constraint freeze (+ explicit setuptools/wheel pins). Toolchain ONLY — mjpc
+   itself is never baked; it builds at runtime into `container_cache/mjpc_build`.
+   The mujoco pin moves in lockstep with mjpc's `MUJOCO_MPC_MUJOCO_GIT_TAG` and
+   intentionally downgrades base's mink-pulled mujoco (see the layer comment).
+   See §7.
 
 **Runtime build:** `launch_ros.sh` runs `colcon build --symlink-install` on
 `core_ws` **at container start** (see §8). The image bakes only the *toolchain* and
@@ -196,33 +206,74 @@ put on the global `LD_LIBRARY_PATH`; only Kit's own loader can load it correctly
 
 ## 7. MuJoCo MPC (MJPC) dev loop
 
-MJPC is a CMake/FetchContent project (it fetches and builds its own MuJoCo 3.2.3 +
-gRPC + abseil + glfw). It is **built standalone, outside colcon** — the thin ROS
-bridge `h12_deploy_mjpc` is the only mjpc-related colcon package.
+> **Status (branch `mjpc_reintegration`):** the fork-era pipeline (baked
+> `agent_server` + python `mujoco_mpc` install, `/opt/mjpc-build-seed`, runtime
+> hydrate + mtime back-dating, `unitree_sdk2` hydrate) stays removed. This
+> section describes the reintroduced, much thinner loop against **pristine
+> google-deepmind upstream** (+ our `h12_lowerbody` task on `max_playground`).
 
-**At image build** (`RosDockerfile` MJPC block): the `mujoco_mpc` submodule's
-pinned commit is cloned (step 2); then `agent_server` is compiled with
-clang-13/Ninja (step 4), the importable
-`mujoco_mpc` package is installed into `dist-packages` (the durable import target),
-the build's own `libmujoco.so` is staged into `/usr/local/lib`, and — instead of
-deleting `build/` — the whole warm build tree is stashed to `/opt/mjpc-build-seed`.
-The source clone is then removed (the submodule bind mount re-supplies it).
+MJPC is a CMake/FetchContent project (it fetches and builds its own pinned
+MuJoCo 3.2.3, abseil, glfw and gRPC). It is **built standalone, outside colcon**,
+entirely at container runtime — the `ros` image bakes only the toolchain
+(clang-13/llvm-13/lld-13, ninja, X11/GL dev headers, `patch`; mirrors the only
+Linux config upstream CI tests) plus the `mujoco==3.2.3` pip ABI pin.
 
-The three build fixes that used to be `sed`'d in at build time now live as **real
-commits on the fork's `extended_hw_patched` branch** (drop `ui_agent_server`,
-magpie `patch`→`copy`, case-insensitive `.STL` globs), so the baked build and the
-mounted source are byte-identical — a requirement for the warm cache below.
+The pieces:
 
-**At runtime:** `docker-compose` mounts the submodule source over
-`/home/code/mujoco_mpc` and a persistent build cache
-(`container_cache/mjpc_build`) at the exact in-tree build path. On first launch
-`launch_ros.sh` hydrates the cache from the seed and back-dates the source mtimes,
-so the first `docker exec … rebuild_mjpc.sh` is *incremental* (seconds–minutes),
-not a cold ~15 min rebuild. `rebuild_mjpc.sh` rebuilds `agent_server` and copies it
-into `dist-packages` (the path `from mujoco_mpc import agent` auto-spawns).
+- **Source** — the `mujoco_mpc` submodule, bind-mounted rw at
+  `/home/code/mujoco_mpc` (host-editable; never baked).
+- **Build tree** — `container_cache/mjpc_build`, bind-mounted at
+  `/home/code/mujoco_mpc/build` (the standard in-tree cmake build dir, covered
+  by the submodule's own `build/` gitignore rule). Same pattern as
+  `container_cache/msgs_ws`: host-persisted, so rebuilds are incremental across
+  `docker compose run --rm` cycles. Wipe the dir for a cold build (~15–25 min,
+  dominated by gRPC).
+- **Rebuild** — `docker/scripts/rebuild_mjpc.sh` (reachable in-container at
+  `/home/code/h12_sim_scripts/rebuild_mjpc.sh`): configures only when the tree
+  is cold (clang-13 + Ninja + Release + `MJPC_BUILD_GRPC_SERVICE=ON`, tests
+  off), then a single `cmake --build`. Warm loop: edit a task `.cc`, rerun —
+  seconds. Default targets: `mjpc agent_server testspeed`; pass others as args.
+- **Consumer** — `core_ws/src/h12_deploy_mjpc` links the build tree *directly*
+  (`libmjpc.a` + threadpool + abseil archives + the build's own `libmujoco.so`;
+  compiled with clang-13 and linked with `ld.lld-13` because upstream leaves
+  IPO/LTO on for Release, making the archives clang bitcode). Never compile
+  against pip mujoco headers — mjModel layouts skew. The package auto-skips its
+  C++ targets (warning only) while the mjpc artifacts are absent, so the
+  launch-time colcon build stays green on a fresh host — and it detects them
+  via `CONFIGURE_DEPENDS` globs, so the first colcon build after
+  `rebuild_mjpc.sh` reconfigures and picks the targets up automatically. (A
+  `core_ws/build/h12_deploy_mjpc` configured before the package's clang-13 pin
+  existed is stuck on gcc — the configure warning tells you to wipe that one
+  dir once.) `agent_server` keeps building so a later switch of the deploy
+  layer to the gRPC/python client is cheap.
+- **h12_lowerbody task assets** — `task.xml` lives in the submodule; the model
+  (`h1_2_magpie.xml`, its two magpie-gripper includes, and `meshes/`) is
+  bind-mounted into the task dir from `CL_Assets` (single source of truth; all
+  mountpoints gitignored by the task dir's `.gitignore`, pre-created by
+  `docker_run.sh`). Binaries resolve task XMLs from the *staged copy* in
+  `build/mjpc/tasks` (refreshed on every `rebuild_mjpc.sh` run); set
+  `MJPC_TASKS_DIR=/home/code/mujoco_mpc/mjpc/tasks` for zero-rebuild XML
+  iteration on h12_lowerbody (source-tree lookup only works for tasks whose
+  assets are fully in-tree — menagerie-based upstream tasks need the staged
+  copy).
 
-> The submodule gitlink and `MJPC_REF` are pinned to the **same** patched-fork SHA.
-> Bumping mjpc = rebase the patches, push, move both pins, rebuild the image.
+The dev loop, end to end (inside/against a running `hams_ros`):
+
+```bash
+# 1. (re)build mjpc — cold: ~15-25 min once per host; warm: seconds
+docker exec -it hams_ros /home/code/h12_sim_scripts/rebuild_mjpc.sh
+
+# 2. build + smoke-test the deploy link
+docker exec -it hams_ros bash -c 'source /opt/ros/humble/setup.bash \
+  && cd /home/code/core_ws \
+  && colcon build --symlink-install --packages-select h12_deploy_mjpc \
+  && ./install/h12_deploy_mjpc/lib/h12_deploy_mjpc/mjpc_smoketest'
+```
+
+> Submodule flow: mjpc changes are committed on `max_playground`, pushed to
+> origin (badinkajink), then the HAMS gitlink pin is bumped. Dep/tag bumps in
+> mjpc's `CMakeLists.txt` require wiping `container_cache/mjpc_build` first
+> (the cached tree pins FetchContent offline).
 
 ---
 
@@ -234,16 +285,19 @@ args). Builds `hams_base` first whenever `ros` or `robocasa` is selected, then
 
 **Run** — `docker/scripts/docker_run.sh <profile> [cmd…]`:
 - Sources `docker/.env` (`GEMINI_API_KEY`, `ROS_DOMAIN_ID`, …).
-- Pre-creates host bind sources (`container_cache/msgs_ws`,
-  `container_cache/mjpc_build`, the nested `mujoco_mpc/build`) so dockerd doesn't
-  create them root-owned.
+- Pre-creates the host bind mountpoints (`container_cache/msgs_ws`,
+  `container_cache/mjpc_build`, `mujoco_mpc/build`, and the h12_lowerbody
+  task-asset files/dir inside the submodule) so dockerd doesn't create them
+  root-owned. The `ros` profile hard-fails if the mujoco_mpc task dir or the
+  CL_Assets model XMLs are missing (uninitialized submodules) — otherwise
+  dockerd would root-create paths inside the submodule working trees.
 - Normalizes `ROS_DOMAIN_ID` (empty→1; `0` rejected for sims, confirmed for `ros`).
 - `xhost +local:docker`, stable container names (`hams_ros`, `hams_sim_*`), `--rm`.
 
 The Apple-Silicon port mirrors these as `docker/mac/scripts/docker_build_mac.sh` and
 `docker/mac/scripts/docker_run_mac.sh` (against `docker/mac/docker-compose.yml`):
 services `robocasa`/`ros` only (no `isaac`), base built from
-`mac/BaseDockerfile.arm64`, no `MJPC_REF`, no `xhost`. See the README macOS section.
+`mac/BaseDockerfile.arm64`, no `xhost`. See the README macOS section.
 
 **`docker-compose.yml`** defines three profiles (`isaac`, `robocasa`, `ros`), each
 with `runtime: nvidia`, `network_mode: host`, X11 passthrough, and the bind mounts.
@@ -256,7 +310,7 @@ bind-mounted at runtime, so only the few files a Dockerfile actually `COPY`s
 (~GB otherwise) and is why `mujoco_mpc` needs no `.dockerignore` entry.
 
 **Launchers:**
-- `launch_ros.sh` — sources ROS, hydrates the MJPC cache (§7), then `colcon build
+- `launch_ros.sh` — sources ROS, then `colcon build
   --symlink-install`s `core_ws` **only if needed** (no `install/`, or any
   `package.xml` newer than `install/setup.bash`), sources the overlay, drops to a
   shell. `livox_ros_driver2` is built via its own `build.sh` (patched idempotently
@@ -297,9 +351,10 @@ are near-instant; wipe the host dir for a clean rebuild.
   `distutils-precedence.pth`).
 - **CycloneDDS is pinned to 0.10.x from source** in every base/Isaac image (PyPI
   wheel needs the removed `q_radmin.h`).
-- **MuJoCo versions are pinned per image and must not drift:** `3.2.3` in `ros`
-  (matches the mjpc C++ server's ABI byte-for-byte), `3.3.1` in `robocasa` (matches
-  RoboCasa's pin).
+- **MuJoCo versions are pinned per image and must not drift:** `3.3.1` in
+  `robocasa` (matches RoboCasa's pin); `3.2.3` pip in `ros` (matches the MuJoCo
+  commit mjpc's CMake fetches, `mjVERSION 323` — the MJPC ABI pin). Bumping
+  mjpc's `MUJOCO_MPC_MUJOCO_GIT_TAG` means moving the `ros` pip pin with it.
 - **Layer-order discipline:** heavy/stable layers first; volatile pins appended
   last. New deps go at the *end* of a Dockerfile so they don't bust cached layers.
 - **CUDA wheel split:** `ros`/base use torch **cu130**; Isaac uses **cu128**;
@@ -328,7 +383,10 @@ docker/scripts/docker_run.sh isaac
 ros2 launch h1_bringup h1_sim_bringup.launch.py
 colcon build --symlink-install                   # force a rebuild
 
-# MJPC iteration (inside hams_ros)
-docker exec -it hams_ros /home/code/h12_sim_scripts/rebuild_mjpc.sh            # C++ edit
-docker exec -it hams_ros /home/code/h12_sim_scripts/rebuild_mjpc.sh --install  # + assets/proto
+# MJPC (see §7): standalone cmake build into container_cache/mjpc_build
+docker exec -it hams_ros /home/code/h12_sim_scripts/rebuild_mjpc.sh
+docker exec -it hams_ros bash -c 'source /opt/ros/humble/setup.bash \
+  && cd /home/code/core_ws \
+  && colcon build --symlink-install --packages-select h12_deploy_mjpc \
+  && ./install/h12_deploy_mjpc/lib/h12_deploy_mjpc/mjpc_smoketest'
 ```

@@ -23,13 +23,30 @@ if [ -f docker/.env ]; then
     set +a
 fi
 
-# Pre-create host-side bind sources so dockerd doesn't materialise them
-# root-owned on first run. The caches hold msgs_ws build/install/log and the MJPC
-# CMake build tree between container restarts (see docker-compose.yml). mjpc's
-# SOURCE is a git submodule (never mkdir it); we only pre-create the nested build/
-# mountpoint inside it (gitignored by the submodule's own /build/ rule).
+# Pre-create host-side bind mountpoints so dockerd doesn't materialise them
+# root-owned on first run. The caches hold msgs_ws build/install/log and the
+# MJPC CMake build tree between container restarts (see docker-compose.yml).
+# mjpc's SOURCE is a git submodule (never mkdir it); we only pre-create the
+# nested build/ mountpoint and the h12_lowerbody task-asset mountpoints inside
+# it (all gitignored by the submodule's own rules / the task dir's .gitignore).
+# The ros profile HARD-FAILS if the mount sources/parents are missing —
+# otherwise dockerd would root-create dirs/files inside the mujoco_mpc and
+# CL_Assets submodule working trees, which then blocks `git submodule update`.
 mkdir -p container_cache/msgs_ws container_cache/mjpc_build
-[ -d mujoco_mpc ] && mkdir -p mujoco_mpc/build
+if [ "$SIM" = "ros" ]; then
+    if [ ! -d mujoco_mpc/mjpc/tasks/h12_lowerbody ] || \
+       [ ! -f CL_Assets/mujoco_assets/h1_2_magpie.xml ]; then
+        echo "ERROR: mujoco_mpc/mjpc/tasks/h12_lowerbody/ and/or CL_Assets model XMLs are missing." >&2
+        echo "       The ros profile bind-mounts into both. Run:" >&2
+        echo "         git submodule update --init --recursive && git lfs pull" >&2
+        echo "       (the mujoco_mpc pin must include the h12_lowerbody task dir)." >&2
+        exit 1
+    fi
+    mkdir -p mujoco_mpc/build mujoco_mpc/mjpc/tasks/h12_lowerbody/meshes
+    touch mujoco_mpc/mjpc/tasks/h12_lowerbody/h1_2_magpie.xml \
+          mujoco_mpc/mjpc/tasks/h12_lowerbody/magpie_gripper_left.xml \
+          mujoco_mpc/mjpc/tasks/h12_lowerbody/magpie_gripper.xml
+fi
 
 # ROS_DOMAIN_ID handling. Domain 0 is the real robot's DDS command bus.
 #   - Sims (isaac/robocasa) must never run on it: reject an explicit 0 loudly.

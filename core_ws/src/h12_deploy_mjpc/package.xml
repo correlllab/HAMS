@@ -3,28 +3,18 @@
 <package format="3">
   <name>h12_deploy_mjpc</name>
   <version>0.0.0</version>
-  <description>MJPC lower-body balance controller for the Unitree H1-2: the
-    fork's own CLI controller (badinkajink/mujoco_mpc@extended_hw
-    mjpc/deploy/h12_lower_body_controller.cc + deploy_common.cc, compiled
-    straight from the submodule) driving the 12 leg joints through the safety
-    layer's split LOWER channel, run behind a rclpy param launcher (rclcpp and
-    unitree_sdk2 CycloneDDS builds must not share a process), plus the fork's
-    RW-EKF proprioceptive base estimator behind a rclpy param shell.</description>
+  <description>MJPC deploy layer for the Unitree H1-2, rebuilt against pristine
+    google-deepmind upstream mujoco_mpc (mjpc_reintegration branch). Links the
+    standalone mjpc CMake build tree (container_cache/mjpc_build, built by
+    docker/scripts/rebuild_mjpc.sh) directly — currently only the
+    mjpc_smoketest link/model-load check plus an empty python seam; the deploy
+    nodes (controller core, estimator) are reintegrated on top of this. The
+    C++ section auto-skips when the mjpc build tree is absent.</description>
   <maintainer email="maxlconway@gmail.com">maxconway</maintainer>
   <license>Apache-2.0</license>
 
   <buildtool_depend>ament_cmake</buildtool_depend>
   <buildtool_depend>ament_cmake_python</buildtool_depend>
-
-  <!-- Python param shells (controller core's DDS is raw unitree_sdk2 in its own
-       process; estimator's is unitree_sdk2py; both come from the image/mounts,
-       not rosdep) -->
-  <exec_depend>rclpy</exec_depend>
-  <exec_depend>std_srvs</exec_depend>
-  <exec_depend>python3-numpy</exec_depend>
-  <!-- mujoco (python) is pip-installed in the image; no rosdep key.
-       The debug visualizer also needs cv2 (mp4 writer) + an offscreen GL
-       (MUJOCO_GL=osmesa); both are already in the ros image, likewise no key. -->
 
   <export>
     <build_type>ament_cmake</build_type>

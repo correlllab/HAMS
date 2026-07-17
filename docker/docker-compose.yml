@@ -82,11 +82,6 @@ services:
     build:
       context: ..
       dockerfile: docker/RosDockerfile
-      # MJPC_REF is exported by docker_build.sh from the mujoco_mpc submodule
-      # pin (git rev-parse HEAD:mujoco_mpc); if unset, RosDockerfile's default
-      # applies. This keeps the baked MJPC in lockstep with the gitlink.
-      args:
-        - MJPC_REF
     image: hams_ros:latest
     runtime: nvidia
     privileged: true
@@ -134,31 +129,30 @@ services:
       - ../CL_Assets/graspgenx/assets/magpie:/opt/graspgenx/assets/x_grippers/magpie:ro
       - ../CL_Assets/graspgenx/assets/meshes/magpie:/opt/graspgenx/assets/x_grippers/meshes/magpie:ro
       - ./scripts:/home/code/h12_sim_scripts
-      # --- MuJoCo MPC (MJPC) dev mounts -------------------------------------
-      # rw SOURCE mount: the ../mujoco_mpc submodule fills the (build-time-removed)
-      # clone path so the C++ agent_server / task XMLs are host-editable. The
-      # importable package lives baked in dist-packages, so `import mujoco_mpc`
-      # works with zero rebuild; keep this checkout pinned at MJPC_REF.
+      # --- MuJoCo MPC (MJPC) source + build-cache mounts ---------------------
+      # rw SOURCE mount: the mujoco_mpc submodule (pinned to pristine
+      # google-deepmind upstream + our tasks) is bind-mounted host-editable.
+      # The image ships only the toolchain (see RosDockerfile) — nothing is
+      # compiled at launch; (re)build on demand with
+      # /home/code/h12_sim_scripts/rebuild_mjpc.sh.
       - ../mujoco_mpc:/home/code/mujoco_mpc:rw
-      # Persistent CMake build tree, nested INSIDE the source mount at the exact
-      # in-tree path the image seed was built at (/home/code/mujoco_mpc/build), so
-      # CMakeCache absolute paths match and setup.py's build_ext reuses it. Host
-      # bytes live in gitignored container_cache/mjpc_build; launch_ros.sh hydrates
-      # it from /opt/mjpc-build-seed on first launch (see msgs_ws pattern above).
+      # rw BUILD-CACHE mount (msgs_ws pattern): the CMake build tree persists on
+      # the host under container_cache/mjpc_build so rebuilds are incremental
+      # across container restarts. Nested INSIDE the source mount at build/ —
+      # the standard in-tree cmake build dir, ignored by the submodule's own
+      # `build/` gitignore rule. docker_run.sh pre-creates both mountpoints so
+      # dockerd doesn't materialise them root-owned.
       - ../container_cache/mjpc_build:/home/code/mujoco_mpc/build:rw
-      # unitree_sdk2 C++ SDK install (headers + PREBUILT libunitree_sdk2.a +
-      # CycloneDDS .so) for the h12_deploy_mjpc controller shim, which compiles
-      # the fork's deploy core (deploy_common.cc, raw unitree_sdk2 DDS) inside
-      # colcon. Hydrated by launch_ros.sh on first launch (clone + cmake
-      # --install, seconds — nothing compiles, the repo ships prebuilt libs);
-      # persisted here so `run --rm` containers keep it.
-      - ../container_cache/unitree_install:/opt/unitree_install:rw
-      # Submodule git metadata (ro): mujoco_mpc/.git is a FILE with
-      # `gitdir: ../.git/modules/mujoco_mpc`, so mounting that dir at the
-      # matching container path makes git work on the mounted source.
-      # launch_ros.sh's hydrate needs `git diff --name-only <seed-ref>` to
-      # un-backdate exactly the files that changed since the image's baked
-      # build seed (otherwise a submodule ahead of MJPC_REF hydrates into a
-      # silently STALE build tree).
-      - ../.git/modules/mujoco_mpc:/home/code/.git/modules/mujoco_mpc:ro
+      # --- h12_lowerbody task assets (kept in CL_Assets, never duplicated into
+      # the submodule; all four mountpoints are gitignored by the task dir's
+      # .gitignore). task.xml <include>s h1_2_magpie.xml, which itself
+      # <include>s the two magpie gripper files (MuJoCo resolves nested
+      # includes relative to the MAIN xml's directory, so they must be mounted
+      # as siblings of task.xml), and pulls meshes via a meshdir that task.xml
+      # re-points at the meshes/ mount below. If h1_2_magpie.xml ever grows a
+      # new <include>, mount that file here too.
+      - ../CL_Assets/mujoco_assets/h1_2_magpie.xml:/home/code/mujoco_mpc/mjpc/tasks/h12_lowerbody/h1_2_magpie.xml:ro
+      - ../CL_Assets/mujoco_assets/magpie_gripper_left.xml:/home/code/mujoco_mpc/mjpc/tasks/h12_lowerbody/magpie_gripper_left.xml:ro
+      - ../CL_Assets/mujoco_assets/magpie_gripper.xml:/home/code/mujoco_mpc/mjpc/tasks/h12_lowerbody/magpie_gripper.xml:ro
+      - ../CL_Assets/meshes:/home/code/mujoco_mpc/mjpc/tasks/h12_lowerbody/meshes:ro
     command: /home/code/h12_sim_scripts/launch_ros.sh

@@ -15,18 +15,6 @@
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 
-# Lock the ros image's MuJoCo-MPC build to the mujoco_mpc submodule's committed
-# SHA. RosDockerfile clones mujoco_mpc fresh over HTTPS at build time (no SSH
-# keys / no git context inside the build), so it can't read the gitlink itself
-# -- we read it here on the host and pass it in as the MJPC_REF build arg (see
-# docker-compose.yml ros.build.args). Without this a `git submodule` bump would
-# silently ship a stale MJPC. Empty (not a git checkout) -> Dockerfile default.
-MJPC_REF="$(git rev-parse HEAD:mujoco_mpc 2>/dev/null || true)"
-if [ -n "${MJPC_REF}" ]; then
-    export MJPC_REF
-    echo "MJPC_REF (from mujoco_mpc submodule pin): ${MJPC_REF}"
-fi
-
 VALID_PROFILES=(isaac robocasa ros)
 
 if [ "$#" -eq 0 ]; then

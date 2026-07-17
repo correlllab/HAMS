@@ -4,6 +4,19 @@ Everything below was verified against the code on 2026-07-12. Where older docs o
 script comments disagree with the code, the code wins (known stale spots are
 flagged inline).
 
+> **Branch note (`mjpc_reintegration`, 2026-07-16):** the MJPC *infrastructure*
+> is reintegrated against pristine google-deepmind upstream (`mujoco_mpc` branch
+> `max_playground` = upstream + our task work); the *controller behavior* is not
+> yet. Concretely: a skeleton `h12_lowerbody` mjpc task exists (model loads from
+> bind-mounted CL_Assets; residual/transition are empty stubs), mjpc builds at
+> runtime via `docker/scripts/rebuild_mjpc.sh` into a host-persisted
+> `container_cache/mjpc_build` tree (docker/BUILD.md §7), and `h12_deploy_mjpc`
+> direct-links that build tree (currently just a `mjpc_smoketest` link/load
+> check — no deploy nodes, so the bringup MJPC entries still dangle).
+> `import mujoco_mpc` (the python gRPC client) is still not installed. The old
+> fork-based deploy stack remains recoverable from git history
+> (`origin/extended_hw` in the submodule, pre-branch HAMS history).
+
 ## 1. Project overview
 
 HAMS (Humanoid Agent Modular Stack) is the software stack for a Unitree H1-2
@@ -24,7 +37,7 @@ robot, so code moves between them unchanged.
 | `h1_robocasa/` | RoboCasa/MuJoCo simulator entry point (`h12_mujoco.py`) and its ROS/DDS bridges |
 | `CL_isaaclab_sim/` | Isaac Lab simulator (`sim_main.py`, DDS bridges, tasks) |
 | `CL_Assets/` | URDF meshes, MuJoCo XML, Isaac USD (Git-LFS) |
-| `mujoco_mpc/` | MuJoCo-MPC fork submodule (built standalone, outside colcon — see §8) |
+| `mujoco_mpc/` | MuJoCo-MPC submodule — google-deepmind upstream + our tasks (branch `max_playground`, incl. the `h12_lowerbody` skeleton task); bind-mounted host-editable, built at runtime by `docker/scripts/rebuild_mjpc.sh` into `container_cache/mjpc_build` (docker/BUILD.md §7) |
 | `unitree_sdk2_python/` | vendored Unitree DDS SDK (Python) |
 | `tools/` | standalone debug tools (ROS MCP server for Claude Code) |
 | `docs/` | `NAVIGATION_DEMO.md` (mac SLAM/nav2/frontier demo), `ROS_MCP_DEBUG.md` |
@@ -43,7 +56,7 @@ They can be invoked from any directory.
 
 | Script | Verified arguments | Notes |
 |---|---|---|
-| `docker/scripts/docker_build.sh [profile ...]` | `isaac`, `robocasa`, `ros` (no args = all three) | `hams_base` is built first automatically for `robocasa`/`ros`; `isaac` is self-contained. Pins the MJPC build to the `mujoco_mpc` submodule SHA (`MJPC_REF`). |
+| `docker/scripts/docker_build.sh [profile ...]` | `isaac`, `robocasa`, `ros` (no args = all three) | `hams_base` is built first automatically for `robocasa`/`ros`; `isaac` is self-contained. (No longer pins an `MJPC_REF` — the `ros` image doesn't build mjpc during reintegration.) |
 | `docker/scripts/docker_run.sh <profile> [cmd...]` | `isaac`, `robocasa`, `ros`; then optionally `bash` (shell instead of default launcher) or any command; a leading `-flag` (e.g. `--headless`) is forwarded to the default launcher | Container names: `hams_ros`, `hams_sim_robocasa`, `hams_sim_isaac`. |
 
 Default launchers (compose `command`): `docker/scripts/launch_isaac.sh`,
@@ -81,7 +94,7 @@ package `fast_lio`; dir `unitree_ros2` is not itself a package (it nests
 |---|---|---|---|
 | `h1_bringup` | **bringup** | Launch-only package that starts the whole robot (sim or real). See §6. | 7 launch files, `config/*.yaml` |
 | `h12_ros2_controller` | controller (upper body) | Pinocchio-based arm IK: `/frame_task` + `/dual_arm` action servers, joint state publisher, hand controller | `frame_task_server`, `dual_arm_server`, `joint_state_publisher`, `hand_controller_node` |
-| `h12_deploy_mjpc` | controller (lower body, MPC) | MJPC balance/locomotion controller (C++ cores from the `mujoco_mpc` fork, run as separate processes) + RW-EKF base estimator | `mjpc_lowerbody_core`, `controller_launcher.py`, `estimator_node.py` |
+| `h12_deploy_mjpc` | controller (lower body, MPC) | **Reintegration seam** (branch note above): direct-links the standalone mjpc build tree (`container_cache/mjpc_build`, clang-13/lld — see docker/BUILD.md §7) and ships `mjpc_smoketest`, a link/model-load check for the `h12_lowerbody` task. The deploy nodes (controller core, estimator) are rebuilt on top of this; the fork's versions are in git history. C++ section auto-skips if mjpc isn't built yet. | `mjpc_smoketest` |
 | `h12_lowerbody_rl` | controller (lower body, RL) | TorchScript walking + FAME RMA stand/squat policies; switchable stand↔walk controller; consumes `/lowstate` + `/cmd_vel`, emits 12-joint PD setpoints | `walking_node`, `fame_node`, `lowerbody_controller_node` |
 | `h12_safety_layer` | safety | Merges upper/lower command channels into `/lowcmd` with limit checks (YAML-configured) | `safety_node` |
 | `h12_skills` | **skills** | Action servers for the 12 `/skill/*` atomic skills an LLM can call (frontier exploration lives here). See §7. | `skills` (SkillsNode) |
@@ -120,12 +133,12 @@ no `sim:=true` arg):
 
 | Launch file | Scenario |
 |---|---|
-| `h1_sim_bringup.launch.py` | **x86 sim** — full stack: nav (via include), robot/joint state publishers, `frame_task_server`, `safety_node`, gemini/sam servers, MJPC estimator + lowerbody controller, graspgen + skills (`use_skills`, default true), rviz (`use_rviz`) |
+| `h1_sim_bringup.launch.py` | **x86 sim** — full stack: nav (via include), robot/joint state publishers, `frame_task_server`, `safety_node`, gemini/sam servers, MJPC estimator + lowerbody controller *(currently dangling — `h12_deploy_mjpc` builds but ships only `mjpc_smoketest`; the estimator/controller executables these entries reference don't exist yet)*, graspgen + skills (`use_skills`, default true), rviz (`use_rviz`) |
 | `h1_sim_bringup_mac.launch.py` | **mac sim** — trimmed: state publishers, `frame_task_server`, `safety_node`; lower body/SLAM/nav2 gated by `HAMS_*` env vars, not launch args |
 | `h1_real_robot_bringup.launch.py` | **real robot, onboard PC** (native, `ROS_DOMAIN_ID=0`) — aggregates the three below-listed real files |
 | `h1_real_drivers.launch.py` | real: Livox MID360, RealSense cams, left+right `gripper_node` |
 | `h1_real_controller.launch.py` | real: estop, state publishers, staggered `safety_node` + `frame_task_server` |
-| `h1_real_desktop_bringup.launch.py` | real: companion x86 desktop — model servers, skills, MJPC controller. Leg control is interlocked behind `start_position_verified:=true` (default **false**) |
+| `h1_real_desktop_bringup.launch.py` | real: companion x86 desktop — model servers, skills, MJPC controller *(currently dangling — `h12_deploy_mjpc` ships only `mjpc_smoketest`, no controller executable yet)*. Leg control is interlocked behind `start_position_verified:=true` (default **false**) |
 | `h1_navigation.launch.py` | shared nav stack (FAST-LIO → pointcloud_to_laserscan → slam_toolbox → nav2); included by sim and real bringups |
 
 **Wiring a new package into bringup:** add it as `exec_depend` in
@@ -221,13 +234,17 @@ sim-to-real transfer.
 
 ### Other invariants
 
-- MuJoCo versions are pinned per image (`3.2.3` in `ros` to match the MJPC ABI,
-  `3.3.1` in `robocasa`) — never bump one without the other side of its pin.
+- MuJoCo versions are pinned per image — don't let them drift: `3.3.1` in
+  `robocasa` (RoboCasa's pin), pip `3.2.3` in `ros` (matches the MuJoCo commit
+  mjpc's CMake fetches — the MJPC ABI pin). Bumping mjpc's
+  `MUJOCO_MPC_MUJOCO_GIT_TAG` means moving the `ros` pip pin with it.
 - `numpy<2`, `setuptools==59.6.0`, `wheel<0.44` are deliberately re-clamped in
   the Dockerfiles; add new pip deps at the END of a Dockerfile (layer-order
   discipline). Details in `docker/BUILD.md`.
-- After bumping the `mujoco_mpc` submodule: rebuild the `ros` image at the
-  matching `MJPC_REF` and wipe stale `core_ws/build/h12_deploy_mjpc`.
+- The `ros` image bakes only mjpc's *toolchain* (clang-13/lld/ninja + GL/X11 dev
+  headers — the config upstream CI tests); mjpc itself is never baked. It builds
+  at runtime into the `container_cache/mjpc_build` mount via
+  `docker/scripts/rebuild_mjpc.sh` — keep it that way (docker/BUILD.md §7).
 
 ## 9. Running the robot — the standard three-terminal flow
 
@@ -303,8 +320,12 @@ pose — it gates leg commands).
 - Rebuild is incremental across container restarts (build/install are
   host-mounted); `colcon build --symlink-install` inside the container forces
   it; wipe `container_cache/msgs_ws/` for a clean message rebuild.
-- MJPC C++ iteration: `docker exec -it hams_ros /home/code/h12_sim_scripts/rebuild_mjpc.sh`
-  (`--install` to also refresh assets/proto) — not colcon.
+- MJPC is built **on demand**, not at launch:
+  `docker exec -it hams_ros /home/code/h12_sim_scripts/rebuild_mjpc.sh` (warm:
+  seconds; cold `container_cache/mjpc_build`: ~15-25 min), then
+  `colcon build --packages-select h12_deploy_mjpc` for the deploy link.
+  `import mujoco_mpc` (python gRPC client) is still not installed — only pip
+  `mujoco` 3.2.3 is.
 - 9 of the 12 `/skill/*` actions are stubs (§7) — a goal that immediately
   aborts with "not implemented" is expected, not a regression.
 - Talking to the sim from the host bypasses `docker/.env`; run

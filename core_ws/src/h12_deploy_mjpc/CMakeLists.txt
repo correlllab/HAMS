@@ -1,10 +1,39 @@
 cmake_minimum_required(VERSION 3.20)
 
-# The MJPC static libraries in the runtime build tree are clang-13 + LTO (LLVM
-# bitcode archives), which GNU ld cannot read ("file format not recognized").
-# When that build tree is present, compile + link this whole package with
-# clang-13 to match the mjpc toolchain. Must run BEFORE project() picks a compiler.
-if(NOT DEFINED CMAKE_CXX_COMPILER AND EXISTS "/home/code/mujoco_mpc/build")
+# MJPC deploy layer for the Unitree H1-2 (rebuilt on the mjpc_reintegration
+# branch against pristine google-deepmind upstream mjpc).
+#
+# Integration architecture: DIRECT C++ LINK. This package consumes the
+# standalone MJPC CMake build tree (built by docker/scripts/rebuild_mjpc.sh
+# into /home/code/mujoco_mpc/build, bind-mounted from
+# container_cache/mjpc_build) — libmjpc.a + threadpool + abseil archives + the
+# build's own libmujoco.so — so future deploy nodes can embed mjpc::Agent
+# in-process. The fork's deploy layer already proved the alternative (gRPC
+# agent_server + python client) starves the planner with per-tick round trips;
+# rebuild_mjpc.sh still builds agent_server, so switching to the gRPC client
+# later only means dropping this file's C++ section and talking to
+# build/bin/agent_server instead.
+#
+# When the mjpc build tree hasn't been built yet (fresh host, or an
+# interrupted rebuild_mjpc.sh) the C++ section skips itself with a warning so
+# the launch-time colcon build stays green. Detection uses CONFIGURE_DEPENDS
+# globs on the mjpc build artifacts, so once rebuild_mjpc.sh has run, the next
+# colcon build reconfigures this package automatically — no wipe needed.
+
+option(H12_BUILD_MJPC_CPP "Build the C++ targets that link the mjpc build tree" ON)
+set(MJPC_ROOT "/home/code/mujoco_mpc" CACHE PATH "mujoco_mpc submodule root (bind-mounted source)")
+set(MJPC_BUILD "${MJPC_ROOT}/build" CACHE PATH "MJPC CMake build tree (container_cache/mjpc_build mount)")
+
+# Upstream mjpc leaves CMAKE_INTERPROCEDURAL_OPTIMIZATION ON for Release, so
+# its static libs are clang-13 LTO bitcode that GNU ld/gcc cannot read. Pin the
+# whole package to clang-13 UNCONDITIONALLY (and before project()) — not just
+# when the mjpc tree already exists — so a package first configured on a fresh
+# host (mjpc not built yet) never caches gcc and then fails at link once the
+# tree appears. NOTE: CMake silently ignores a compiler change on an
+# already-configured build dir, so a core_ws/build/h12_deploy_mjpc that
+# predates this pin can be stuck on gcc — the compiler guard below detects
+# that and soft-skips with instructions.
+if(NOT DEFINED CMAKE_CXX_COMPILER)
   find_program(_H12_CLANGXX clang++-13)
   find_program(_H12_CLANG clang-13)
   if(_H12_CLANGXX AND _H12_CLANG)
@@ -15,158 +44,99 @@ endif()
 
 project(h12_deploy_mjpc)
 
-if(NOT CMAKE_CXX_STANDARD)
-  # Match the fork's toolchain (cmake/MpcOptions.cmake sets C++20): the
-  # controller compiles the fork's deploy_common.cc against mjpc headers.
-  set(CMAKE_CXX_STANDARD 20)
-endif()
-if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
-  add_compile_options(-Wall -Wextra)
-endif()
+set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 find_package(ament_cmake REQUIRED)
 find_package(ament_cmake_python REQUIRED)
 
-# ---- Python nodes: estimator shell + controller launcher ----
-# Both are rclpy PARAM SHELLS around fork cores. The controller core runs as a
-# SEPARATE process (see controller_launcher.py: rclcpp's rmw_cyclonedds and
-# unitree_sdk2's bundled CycloneDDS both export libddsc/libddscxx.so.0 -- one
-# process loading both corrupts the heap, so rclcpp never shares a process
-# with the raw-DDS control loop).
+# Empty Python package kept as the seam for the deploy nodes to come.
 ament_python_install_package(${PROJECT_NAME})
-install(PROGRAMS ${PROJECT_NAME}/estimator_node.py
-        DESTINATION lib/${PROJECT_NAME}
-        RENAME estimator_node)
-install(PROGRAMS ${PROJECT_NAME}/controller_launcher.py
-        DESTINATION lib/${PROJECT_NAME}
-        RENAME mjpc_deploy_lowerbody_controller)
-# Debug-only: renders the measured robot + a blue ghost of the planner's current
-# best trajectory (rt/mjpc/plan) to an mp4. Same param-shell-around-a-fork-worker
-# arrangement as the estimator.
-install(PROGRAMS ${PROJECT_NAME}/debug_visualizer_node.py
-        DESTINATION lib/${PROJECT_NAME}
-        RENAME mjpc_debug_visualizer)
 
-# ---- shared resources ----
-install(DIRECTORY config DESTINATION share/${PROJECT_NAME})
+# Detect the mjpc build by its ARTIFACTS (not its CMakeCache): a
+# half-configured or in-flight mjpc build stays in the soft-skip path instead
+# of a hard configure error. CONFIGURE_DEPENDS makes the generated build
+# system re-run cmake whenever these glob results change (libs appearing after
+# rebuild_mjpc.sh, or the archive set changing after a dep bump + cache wipe).
+file(GLOB _libmjpc CONFIGURE_DEPENDS "${MJPC_BUILD}/lib/libmjpc.a")
+file(GLOB _libmujoco CONFIGURE_DEPENDS "${MJPC_BUILD}/lib/libmujoco.so")
+file(GLOB _mjpc_support CONFIGURE_DEPENDS
+  "${MJPC_BUILD}/lib/libthreadpool.a"
+  "${MJPC_BUILD}/lib/liblodepng.a"
+  "${MJPC_BUILD}/lib/libglfw3.a")
+file(GLOB _mjpc_absl CONFIGURE_DEPENDS "${MJPC_BUILD}/lib/libabsl_*.a")
 
-# ---- C++ MJPC controller (embeds mjpc::Agent; auto-skipped where absent) ----
-# The controller links the fork's static libs + headers directly from the warm
-# build tree the deploy image keeps at runtime: docker-compose mounts
-# container_cache/mjpc_build -> /home/code/mujoco_mpc/build and launch_ros.sh
-# hydrates it from the baked /opt/mjpc-build-seed BEFORE colcon runs. So at build
-# time here MJPC_BUILD holds libmjpc/threadpool/absl *.a + the fetched mujoco/absl
-# headers under _deps. The SKIP guard keys off that build tree existing, so a dev
-# checkout (no hydrated build) still builds the estimator.
-option(H12_BUILD_CONTROLLER "Build the C++ MJPC controller (needs the mjpc build tree)" ON)
-set(MJPC_ROOT "/home/code/mujoco_mpc" CACHE PATH "mujoco_mpc fork root (bind-mounted source)")
-set(MJPC_BUILD "${MJPC_ROOT}/build" CACHE PATH "MJPC CMake build tree (hydrated at runtime)")
+set(_mjpc_ready FALSE)
+if(H12_BUILD_MJPC_CPP AND _libmjpc AND _libmujoco AND _mjpc_absl
+   AND EXISTS "${MJPC_BUILD}/_deps/mujoco-src/include/mujoco/mujoco.h")
+  set(_mjpc_ready TRUE)
+endif()
 
-# unitree_sdk2 C++ (raw-DDS ChannelFactory/Publisher/Subscriber used by the
-# fork's deploy core). /opt/unitree_install is the container_cache mount that
-# launch_ros.sh hydrates (prebuilt libs, SHA-pinned to the fork's host build).
-list(APPEND CMAKE_PREFIX_PATH "/opt/unitree_install" "$ENV{HOME}/unitree_install")
-find_package(unitree_sdk2 QUIET)
+if(_mjpc_ready AND NOT CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+  # Stale build dir from before the unconditional clang pin (or an image
+  # without clang-13): linking the LTO bitcode with ${CMAKE_CXX_COMPILER_ID}
+  # would die cryptically at link time. Skip, stay green, say how to fix.
+  message(WARNING
+    "h12_deploy_mjpc: mjpc build tree found, but this package's cached "
+    "compiler is ${CMAKE_CXX_COMPILER_ID} — the clang-13-LTO mjpc archives "
+    "need clang-13 + lld. C++ targets skipped. Fix (one-time):\n"
+    "  rm -rf /home/code/core_ws/build/h12_deploy_mjpc && "
+    "colcon build --packages-select h12_deploy_mjpc")
+  set(_mjpc_ready FALSE)
+endif()
 
-if(H12_BUILD_CONTROLLER AND EXISTS "${MJPC_BUILD}" AND unitree_sdk2_FOUND)
+if(_mjpc_ready)
   find_package(Threads REQUIRED)
 
-  # Includes: mjpc source headers, plus the fetched mujoco + absl headers.
-  # ABI CRITICAL (found 2026-07-07): the controller MUST compile against the
-  # SAME mujoco headers the build tree's libmujoco.so + libmjpc.a were built
-  # with -- the _deps/mujoco-src pinned commit. The pip package reports the
-  # same release (3.2.3) but its mjModel/mjData struct layout differs from the
-  # pinned commit (extra flex_*/eq_objtype/nC fields before the actuator
-  # section), so compiling THIS package's translation units against the pip
-  # headers while linking the build-tree libs skews every direct
-  # mjModel/mjData member access: PatchActuators wrote kp/kv into actuator_gear
-  # of the PLANNER model (gear 1 -> 200), the CEM optimum on a frozen stand
-  # state became the straight-knee jackknife (hipP +0.09 vs the agent server's
-  # -0.20 on a bit-identical state), and every DDS handoff fell 1-4 s after
-  # release. Prefer the _deps headers; the pip headers are only a FALLBACK for
-  # dev checkouts without a hydrated build tree.
-  set(MJPC_INCLUDE_DIRS "${MJPC_ROOT}")
-  file(GLOB _mj_dep "${MJPC_BUILD}/_deps/mujoco-src/include")
-  if(_mj_dep)
-    set(MUJOCO_INCLUDE_DIR ${_mj_dep})
-  else()
-    find_path(MUJOCO_INCLUDE_DIR mujoco/mujoco.h
-      PATHS /usr/local/lib/python3.10/dist-packages/mujoco/include NO_DEFAULT_PATH)
-  endif()
-  file(GLOB _absl_src "${MJPC_BUILD}/_deps/abseil-cpp-src")
-  file(GLOB _absl_bld "${MJPC_BUILD}/_deps/abseil-cpp-build")
-  list(APPEND MJPC_INCLUDE_DIRS ${MUJOCO_INCLUDE_DIR} ${_absl_src} ${_absl_bld})
-
-  # libmujoco.so (staged in /usr/local/lib by the image; also in the build tree).
-  find_library(MUJOCO_LIBRARY mujoco PATHS /usr/local/lib "${MJPC_BUILD}/lib")
-  if(NOT MUJOCO_LIBRARY)
-    message(FATAL_ERROR "h12_deploy_mjpc: libmujoco not found "
-                        "(set -DMUJOCO_LIBRARY=/path/to/libmujoco.so)")
+  # Headers: the mjpc source root plus the PINNED deps from the build tree.
+  # ABI-critical: mujoco headers MUST come from build/_deps/mujoco-src (the
+  # exact commit the libs were compiled from), never from the pip mujoco wheel
+  # — a different 3.2.3-era commit skews mjModel/mjData member offsets and
+  # silently corrupts field access (this bit the old deploy stack).
+  set(MJPC_INCLUDE_DIRS
+    "${MJPC_ROOT}"
+    "${MJPC_BUILD}/_deps/mujoco-src/include"
+    "${MJPC_BUILD}/_deps/abseil-cpp-src"
+    "${MJPC_BUILD}/_deps/abseil-cpp-build")
+  # nlohmann json is header-only and reachable through some task headers.
+  if(EXISTS "${MJPC_BUILD}/_deps/json-src/include")
+    list(APPEND MJPC_INCLUDE_DIRS "${MJPC_BUILD}/_deps/json-src/include")
   endif()
 
-  # Link the mjpc library + threadpool + abseil (the upstream deploy's set), found
-  # anywhere under the build tree, in --start-group so intra-mjpc / mjpc->absl
-  # cross-references resolve. Narrowed from "all *.a" so lld's LTO codegen doesn't
-  # drag in the grpc/protobuf/gtest bitcode the controller never references.
-  file(GLOB_RECURSE _mjpc_core "${MJPC_BUILD}/libmjpc.a" "${MJPC_BUILD}/libthreadpool.a")
-  file(GLOB_RECURSE _mjpc_absl "${MJPC_BUILD}/libabsl_*.a")
-  set(MJPC_LIBRARIES ${_mjpc_core} ${_mjpc_absl})
-
-  # The controller core = the fork's OWN CLI thin main + shared deploy core,
-  # compiled STRAIGHT FROM THE SUBMODULE (no copy; the fork stays the single
-  # source of truth for tables, flags, control loop, DDS I/O, safety behavior).
-  # Deliberately NOT an rclcpp target -- see the CycloneDDS soname-collision
-  # note above; the mjpc_deploy_lowerbody_controller entry point is the rclpy
-  # launcher installed above, which execs this binary.
-  add_executable(mjpc_lowerbody_core
-    "${MJPC_ROOT}/mjpc/deploy/h12_lower_body_controller.cc"
-    "${MJPC_ROOT}/mjpc/deploy/deploy_common.cc")
-  target_include_directories(mjpc_lowerbody_core PRIVATE ${MJPC_INCLUDE_DIRS})
-  target_link_libraries(mjpc_lowerbody_core
-    -Wl,--start-group ${MJPC_LIBRARIES} -Wl,--end-group
-    "${MUJOCO_LIBRARY}" unitree_sdk2 Threads::Threads ${CMAKE_DL_LIBS})
-  # lld (LTO-aware) is required to link the clang-13 bitcode archives above.
+  # Infrastructure smoke test: registry lookup + model load through libmjpc
+  # (see src/mjpc_smoketest.cc). Future deploy nodes reuse exactly this
+  # include/link recipe. Static archives are linked as one --start-group so
+  # cross-references resolve regardless of order; the set is deliberately
+  # narrowed (not lib*.a) so lld's LTO codegen never chews through the
+  # grpc/protobuf/gtest archives these targets don't need. The build's own
+  # libmujoco.so comes from the glob above — never from pip.
+  add_executable(mjpc_smoketest src/mjpc_smoketest.cc)
+  target_include_directories(mjpc_smoketest PRIVATE ${MJPC_INCLUDE_DIRS})
+  target_compile_definitions(mjpc_smoketest PRIVATE
+    MJSIMULATE_STATIC
+    H12_DEFAULT_MJPC_TASKS_DIR="${MJPC_BUILD}/mjpc/tasks")
+  target_link_libraries(mjpc_smoketest
+    -Wl,--start-group ${_libmjpc} ${_mjpc_support} ${_mjpc_absl} -Wl,--end-group
+    ${_libmujoco} Threads::Threads ${CMAKE_DL_LIBS})
+  # lld is required to link the LTO bitcode archives. --disable-new-dtags
+  # forces DT_RPATH (which beats LD_LIBRARY_PATH), so the pip mujoco wheel's
+  # same-soname, different-ABI libmujoco.so.3.2.3 can never be substituted at
+  # run time.
   if(EXISTS "/usr/bin/ld.lld-13")
-    target_link_options(mjpc_lowerbody_core PRIVATE -fuse-ld=/usr/bin/ld.lld-13)
+    target_link_options(mjpc_smoketest PRIVATE
+      -fuse-ld=/usr/bin/ld.lld-13 -Wl,--disable-new-dtags)
   endif()
-  # unitree_sdk2's bundled CycloneDDS .so lives next to the SDK; bake its dir
-  # into the rpath so libddsc/libddscxx resolve at runtime regardless of
-  # LD_LIBRARY_PATH (same arrangement as the fork's own deploy build).
-  get_target_property(_ddsc_loc ddsc IMPORTED_LOCATION)
-  get_filename_component(_dds_libdir "${_ddsc_loc}" DIRECTORY)
-  set_target_properties(mjpc_lowerbody_core PROPERTIES
-    BUILD_RPATH "/usr/local/lib;${MJPC_BUILD}/lib;${_dds_libdir}"
-    INSTALL_RPATH "/usr/local/lib;${MJPC_BUILD}/lib;${_dds_libdir}")
-  install(TARGETS mjpc_lowerbody_core DESTINATION lib/${PROJECT_NAME})
-
-  # FULL-BODY core (h12_control_node.cc, nu=27, Lean task) -- same deploy_common
-  # + link recipe as the lower-body core, just the other thin main. Lets the
-  # full-body controller run through the SAME in-container DDS/estimator path as
-  # the lower body (host-side chains hit host<->container DDS state-feed stalls).
-  # Publishes the FULL channel rt/safety/lowcmd_in -> needs safety in full mode.
-  add_executable(mjpc_fullbody_core
-    "${MJPC_ROOT}/mjpc/deploy/h12_control_node.cc"
-    "${MJPC_ROOT}/mjpc/deploy/deploy_common.cc")
-  target_include_directories(mjpc_fullbody_core PRIVATE ${MJPC_INCLUDE_DIRS})
-  target_link_libraries(mjpc_fullbody_core
-    -Wl,--start-group ${MJPC_LIBRARIES} -Wl,--end-group
-    "${MUJOCO_LIBRARY}" unitree_sdk2 Threads::Threads ${CMAKE_DL_LIBS})
-  if(EXISTS "/usr/bin/ld.lld-13")
-    target_link_options(mjpc_fullbody_core PRIVATE -fuse-ld=/usr/bin/ld.lld-13)
-  endif()
-  set_target_properties(mjpc_fullbody_core PROPERTIES
-    BUILD_RPATH "/usr/local/lib;${MJPC_BUILD}/lib;${_dds_libdir}"
-    INSTALL_RPATH "/usr/local/lib;${MJPC_BUILD}/lib;${_dds_libdir}")
-  install(TARGETS mjpc_fullbody_core DESTINATION lib/${PROJECT_NAME})
-
-  message(STATUS "h12_deploy_mjpc: mjpc_lowerbody_core + mjpc_fullbody_core ENABLED "
-                 "(MJPC build tree ${MJPC_BUILD}; unitree_sdk2 dds at ${_dds_libdir})")
+  set_target_properties(mjpc_smoketest PROPERTIES
+    BUILD_RPATH "${MJPC_BUILD}/lib"
+    INSTALL_RPATH "${MJPC_BUILD}/lib")
+  install(TARGETS mjpc_smoketest DESTINATION lib/${PROJECT_NAME})
 else()
-  message(STATUS "h12_deploy_mjpc: mjpc_lowerbody_core SKIPPED "
-                 "(needs the MJPC build tree at '${MJPC_BUILD}' AND unitree_sdk2 "
-                 "[found=${unitree_sdk2_FOUND}] -- run in the ros container after "
-                 "launch_ros.sh hydrates both, or pass -DH12_BUILD_CONTROLLER=OFF). "
-                 "Estimator + launcher still build.")
+  message(WARNING
+    "h12_deploy_mjpc: mjpc build artifacts not found under ${MJPC_BUILD}/lib — "
+    "C++ targets skipped (python package still installs). Run "
+    "/home/code/h12_sim_scripts/rebuild_mjpc.sh, then rebuild this package "
+    "(`colcon build --packages-select h12_deploy_mjpc` — it reconfigures "
+    "itself automatically once the artifacts exist).")
 endif()
 
 ament_package()
