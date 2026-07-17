@@ -60,6 +60,30 @@ mjpc_debug_visualizer:
     ghost_alpha_far: 0.15
     plan_stale_sec: 1.0
 
+# LEGACY legs-only chain (mjpc_deploy_lowerbody_controller, Stabilize task) --
+# unchanged values from before the split-body handover; the desktop bringup now
+# launches the splitbody node below, but this section keeps the legacy
+# executable configured for anyone still running it. NOTE it reads the bare
+# rt/sportmodestate, so pair it with an estimator whose out_topic matches (the
+# estimator above now publishes rt/sportmodestate_est for the split chain).
+mjpc_deploy_lowerbody_controller:
+  ros__parameters:
+    task: "Stabilize H12 Magpie"
+    strategy: 6                 # 6 = stand
+    gravity_ff: 0.85            # real robot: validated value
+    twin_dt: 0.001              # real lowstate ticks at 1 kHz
+    sportstate_topic: rt/sportmodestate
+    # MEASURED mount calibration for THIS H1-2 (body truly vertical reads -1.6
+    # deg on the IMU; +1.6 zeroes it). Validated on real hardware.
+    imu_pitch_offset_deg: 1.6
+    arm_aware: true
+    drop_band: false            # no elastic band outside sim
+    # Planner rollout threadpool size. Matches the 12 P-cores (0-11) the desktop
+    # bringup pins this controller to via taskset; default 0 would spawn one
+    # thread per hardware CPU (28) and oversubscribe the reserved 12. Drop to
+    # ~10 if the RW-EKF estimator (pinned to core 12) starves under load.
+    plan_threads: 12
+
 mjpc_deploy_splitbody_controller:
   ros__parameters:
     # Whole-body nu=27 SPLIT task (2026-07-17): the Magpie model + 15 inactive

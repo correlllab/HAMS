@@ -73,6 +73,25 @@ mjpc_debug_visualizer:
     # does, and that gap is the deploy gap (deploy_common.h:92-110).
     plan_stale_sec: 1.0
 
+# LEGACY legs-only chain (mjpc_deploy_lowerbody_controller, Stabilize task) --
+# unchanged values from before the split-body handover; the sim bringup now
+# launches the splitbody node below, but this section keeps the legacy
+# executable configured for anyone still running it. Tuning rationale for the
+# shared knobs lives in the splitbody section's comments.
+mjpc_deploy_lowerbody_controller:
+  ros__parameters:
+    task: "Stabilize H12 Magpie"
+    strategy: 6                 # 6 = stand (the stabilize task's only real slot)
+    plan_threads: 12
+    gravity_ff: 1.0
+    twin_dt: 0.005
+    sportstate_topic: rt/sportmodestate_est
+    imu_pitch_offset_deg: 0.0   # 1.6 is a REAL-robot IMU mount calibration; sim has none
+    arm_aware: true             # legs pre-compensate for measured arm/torso motion
+    stale_sec: 1.5
+    drop_band: false
+    band_drop_after_secs: 25.0
+
 mjpc_deploy_splitbody_controller:
   ros__parameters:
     # Whole-body nu=27 SPLIT task (2026-07-17): the Magpie model + 15 inactive

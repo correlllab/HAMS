@@ -91,22 +91,22 @@ def generate_launch_description():
         DeclareLaunchArgument('model_clear_logs', default_value='true'),
 
         # vision foundation-model services (gemini + sam, served by model_server)
-        # Node(
-        #     package='model_server',
-        #     executable='gemini_server',
-        #     name='gemini_server',
-        #     prefix=OTHER_CPUS,
-        #     parameters=[sim_time_param, model_log_params],
-        #     output='screen',
-        # ),
-        # Node(
-        #     package='model_server',
-        #     executable='sam_server',
-        #     name='sam_server',
-        #     prefix=OTHER_CPUS,
-        #     parameters=[sim_time_param, model_log_params],
-        #     output='screen',
-        # ),
+        Node(
+            package='model_server',
+            executable='gemini_server',
+            name='gemini_server',
+            prefix=OTHER_CPUS,
+            parameters=[sim_time_param, model_log_params],
+            output='screen',
+        ),
+        Node(
+            package='model_server',
+            executable='sam_server',
+            name='sam_server',
+            prefix=OTHER_CPUS,
+            parameters=[sim_time_param, model_log_params],
+            output='screen',
+        ),
 
         # yolo_server: YOLO-World open-vocabulary detection publisher. Subscribes
         # to the head + both hand color cameras (its DEFAULT_IMAGE_TOPICS) and
@@ -116,14 +116,14 @@ def generate_launch_description():
         # BusBar, InteriorScrew, Nut, OrageCove, Screw, ScrewHole). The vocabulary
         # is read live from the `queries` param — retune at runtime, e.g.:
         #   ros2 param set /yolo_server queries "['Bolt','Nut','Screw']"
-        # Node(
-        #     package='model_server',
-        #     executable='yolo_server',
-        #     name='yolo_server',
-        #     prefix=OTHER_CPUS,
-        #     parameters=[sim_time_param, model_log_params],
-        #     output='screen',
-        # ),
+        Node(
+            package='model_server',
+            executable='yolo_server',
+            name='yolo_server',
+            prefix=OTHER_CPUS,
+            parameters=[sim_time_param, model_log_params],
+            output='screen',
+        ),
 
         # graspgen_server + h12_skills: the GraspGenX planning service and the
         # /skill/* action servers. The grasp skill chains gemini -> sam ->
@@ -131,24 +131,24 @@ def generate_launch_description():
         # both are gated on use_skills. The skills node waits ~10s each (non-
         # fatal) on gemini/sam/graspgen, the grippers, and frame_task — the
         # latter two arrive over DDS from the robot/driver bringup.
-        # Node(
-        #     package='model_server',
-        #     executable='graspgen_server',
-        #     name='graspgen_server',
-        #     prefix=OTHER_CPUS,
-        #     parameters=[sim_time_param, model_log_params],
-        #     output='screen',
-        #     condition=IfCondition(LaunchConfiguration('use_skills')),
-        # ),
-        # Node(
-        #     package='h12_skills',
-        #     executable='skills',
-        #     name='h12_skills',
-        #     prefix=OTHER_CPUS,
-        #     parameters=[sim_time_param, model_log_params],
-        #     output='screen',
-        #     condition=IfCondition(LaunchConfiguration('use_skills')),
-        # ),
+        Node(
+            package='model_server',
+            executable='graspgen_server',
+            name='graspgen_server',
+            prefix=OTHER_CPUS,
+            parameters=[sim_time_param, model_log_params],
+            output='screen',
+            condition=IfCondition(LaunchConfiguration('use_skills')),
+        ),
+        Node(
+            package='h12_skills',
+            executable='skills',
+            name='h12_skills',
+            prefix=OTHER_CPUS,
+            parameters=[sim_time_param, model_log_params],
+            output='screen',
+            condition=IfCondition(LaunchConfiguration('use_skills')),
+        ),
 
         # Switchable lower-body RL controller (walk / FAME stand-squat).
         # Auto-engages the FAME standing policy; switch via /lowerbody/start_walk
@@ -232,15 +232,15 @@ def generate_launch_description():
             ])),
         ),
 
-        # Node(
-        #     package='rviz2',
-        #     executable='rviz2',
-        #     name='rviz2_sim',
-        #     prefix=OTHER_CPUS,
-        #     arguments=['-d',default_rviz],
-        #     parameters=[sim_time_param],
-        #     output='screen',
-        # ),
+        Node(
+            package='rviz2',
+            executable='rviz2',
+            name='rviz2_sim',
+            prefix=OTHER_CPUS,
+            arguments=['-d',default_rviz],
+            parameters=[sim_time_param],
+            output='screen',
+        ),
 
         # slider_debugger waits up to 5s on /left_ee_pose & /right_ee_pose,
         # which frame_task_server publishes only after its IK solver finishes
