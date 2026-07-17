@@ -202,13 +202,15 @@ class _StartupHandshake:
                else "not seen yet (still homing / not up?)"))
 
     def _on_core_lower(self, _msg) -> None:
+        # One-shot gate. The subscription is deliberately KEPT afterwards (a
+        # cheap no-op at 200 Hz): destroying a subscription from inside its
+        # own callback is an rclpy hazard that can take down the executor
+        # thread -- and with it the toggle service, keep-alive, and handshake.
         if not self._core_ready:
             self._core_ready = True
             self._node.get_logger().info(
                 "split core is publishing the legs channel -- ready to take "
                 "the arms once frame_task reports ready")
-            # one-shot gate; drop the 200 Hz subscription
-            self._node.destroy_subscription(self._lower_sub)
 
     def _on_frametask_status(self, msg: Bool) -> None:
         frametask_paused = bool(msg.data)
