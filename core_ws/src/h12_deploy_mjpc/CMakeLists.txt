@@ -130,7 +130,12 @@ if(H12_BUILD_CONTROLLER AND EXISTS "${MJPC_BUILD}" AND unitree_sdk2_FOUND)
   # is required to link the clang-13 bitcode archives.
   # NOTE: when stage 3 splits deploy_common.cc, extend THIS list (and the fork's
   # H12_DEPLOY_COMMON_SRCS) -- the deploy source list lives in exactly 2 places.
-  set(H12_DEPLOY_COMMON_SRCS "${MJPC_ROOT}/mjpc/deploy/deploy_common.cc")
+  set(H12_DEPLOY_COMMON_SRCS
+    "${MJPC_ROOT}/mjpc/deploy/deploy_common.cc"
+    "${MJPC_ROOT}/mjpc/deploy/deploy_model.cc"
+    "${MJPC_ROOT}/mjpc/deploy/deploy_net.cc"
+    "${MJPC_ROOT}/mjpc/deploy/deploy_state.cc"
+    "${MJPC_ROOT}/mjpc/deploy/deploy_telemetry.cc")
   function(add_mjpc_core TARGET MAIN_CC)
     add_executable(${TARGET}
       "${MJPC_ROOT}/mjpc/deploy/${MAIN_CC}" ${H12_DEPLOY_COMMON_SRCS})
