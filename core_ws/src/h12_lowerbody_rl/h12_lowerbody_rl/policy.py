@@ -257,12 +257,26 @@ class AlmiPolicy(Policy):
     Gait clock quirk (as trained): when ``||cmd|| < STAND_CMD_EPS`` both phase
     observations are forced to 0 and the policy balances in place — it does not
     march at zero command the way WalkPolicy does.
+
+    Stand->walk onset resets the LSTM (verified in RoboCasa 2026-07-19): the
+    policy only enters locomotion if the command is already present when its
+    recurrent state starts — in the upstream rollouts every episode begins with
+    the command applied from tick 0, so "quiet stand, then a command appears"
+    is out-of-distribution and the hidden state stays latched on standing
+    (commands up to (0.9, 0.4) produced no stepping). Re-seeding the memory at
+    onset reproduces the trained episode-start condition and the gait engages;
+    walk->stand needs no reset (stopping tracks naturally). ONSET_RISE matches
+    the trained stand threshold; ONSET_FALL adds hysteresis so a ramping
+    commander (e.g. nav2's velocity smoother) can't re-trigger resets around
+    the boundary and stutter the gait.
     """
 
     name = "almi"
     GAIT_PERIOD = 0.8
     PHASE_OFFSET = 0.5       # right foot leads the left by half a period
     STAND_CMD_EPS = 0.1      # ||cmd|| below this = stand (phase forced to 0)
+    ONSET_RISE = 0.1         # ||cmd|| rising through this resets the LSTM (gait start)
+    ONSET_FALL = 0.05        # ||cmd|| must drop below this to re-arm the onset reset
 
     #: /lowstate (27) -> ALMI 21-DoF order: legs + torso + shoulder p/r/y +
     #: elbow per arm. The six wrist joints (17-19, 24-26) are unobserved.
@@ -298,15 +312,23 @@ class AlmiPolicy(Policy):
         self._action = np.zeros(self._num_actions, dtype=np.float32)
         self._obs = np.zeros(self._num_obs, dtype=np.float32)
         self._t_start: float | None = None
+        self._walking = False
 
     def reset(self, state: RobotState) -> None:
         self._action[:] = 0.0
         self._t_start = state.t
         self._policy.reset_memory()
+        self._walking = bool(np.linalg.norm(state.cmd) >= self.ONSET_RISE)
 
     def compute(self, state: RobotState) -> LegCommand:
         if self._t_start is None:
             self._t_start = state.t
+
+        cmd_norm = float(np.linalg.norm(state.cmd))
+        if not self._walking and cmd_norm >= self.ONSET_RISE:
+            self.reset(state)   # episode-start condition: memory zeroed, cmd present
+        elif self._walking and cmd_norm < self.ONSET_FALL:
+            self._walking = False
 
         q21 = state.q[self.OBS_JOINT_IDX]
         dq21 = state.dq[self.OBS_JOINT_IDX]
