@@ -4,8 +4,13 @@ Flow
 ----
 1. The robot starts held by the elastic band, **idle** (no policy drives the legs).
 2. At startup the ``active_policy`` (default ``fame``) is auto-activated: the node
-   pre-poses the legs, releases the elastic band (gated on frame_task being ready,
-   /left_ee_pose), and engages FAME (standing).
+   pre-poses the legs (ramping the target from the measured pose to the policy's
+   nominal crouch over ``prepose_ramp_s`` — never a step at full gains), releases
+   the elastic band (gated on frame_task being ready, /left_ee_pose), and engages
+   FAME (standing). With ``engage_wait_for_confirm``
+   (the default) the node HOLDS at the pre-pose crouch and only engages the policy
+   after the operator calls the /lowerbody/confirm_engage Trigger service — the
+   real-robot arming step. The sim bringup disables it for unattended runs.
 3. From then on the policy is chosen **automatically from /cmd_vel** (auto_switch,
    on by default): ||[vx, vy, wz]|| above ``auto_switch_rise_norm`` -> walk
    (locomote); below ``auto_switch_fall_norm`` -> FAME (stand still). The two
@@ -30,6 +35,8 @@ sub  /lowerbody/squat_cmd      (std_msgs/Float32)      base-height / squat (FAME
 sub  /left_ee_pose             (geometry_msgs/PoseStamped)  frame_task-ready signal
 pub  /safety/lowcmd_lower_in   (unitree_hg/LowCmd)     12-joint leg setpoints
 pub  /lowerbody/active_policy  (std_msgs/String, latched)  active policy ("idle" when none)
+srv  /lowerbody/confirm_engage (std_srvs/Trigger)      operator go-ahead: engage the
+                                                       pre-posed policy (see Flow #2)
 """
 
 import os
@@ -70,9 +77,15 @@ ALMI = "almi"   # ALMI LSTM policy (stands at cmd=0 AND follows /cmd_vel).
 # up from its trained default pose; released from the straight-leg spawn it can't
 # recover the transition before the band drops. Only once the legs reach nominal do
 # we commit the policy (and, later, release the band).
+#
+# The pre-pose target is RAMPED (cosine blend over ``prepose_ramp_s``) from the
+# measured leg pose captured at the first pre-pose tick to nominal. Stepping
+# straight to nominal at full kp jerked the real robot's hanging legs hard enough
+# (0.24 rad hip-yaw error x kp 200 -> 4.7 rad/s) to trip the safety layer's dq
+# estop (hip yaw limit 0.2 x 23 = 4.6 rad/s) the moment the relay opened.
 PREPOSE_TOL = 0.15          # rad; max |q - nominal| across the 12 legs to count as posed
 PREPOSE_SETTLE_TICKS = 10   # consecutive in-tolerance ticks required (~0.2s @ 50Hz)
-PREPOSE_MAX_TICKS = 400     # ~8s @ 50Hz; commit anyway if the legs never settle (safety)
+PREPOSE_MAX_TICKS = 400     # ~8s @ 50Hz after the ramp; commit anyway if never settled (safety)
 
 
 def _share(*parts: str) -> str:
@@ -100,6 +113,18 @@ class LowerBodyControllerNode(Node):
         self.declare_parameter("auto_switch", True)
         self.declare_parameter("auto_switch_rise_norm", 0.10)
         self.declare_parameter("auto_switch_fall_norm", 0.05)
+        # Seconds to ramp the pre-pose target from the measured leg pose to the
+        # policy's nominal (cosine blend; see the PREPOSE block above). Starting
+        # at the measured pose means zero initial PD error, so full gains apply
+        # no step torque. 0 disables the ramp (old step behavior).
+        self.declare_parameter("prepose_ramp_s", 2.0)
+        # Hold at the pre-pose crouch until an operator confirms engagement via
+        # the /lowerbody/confirm_engage Trigger service. Default TRUE — on the
+        # real robot the engage is the moment the policy takes authority, so it
+        # must be an explicit operator action. The sim bringup passes false to
+        # keep unattended runs auto-engaging (the old behavior). While waiting,
+        # the pre-pose timeout never auto-commits.
+        self.declare_parameter("engage_wait_for_confirm", True)
         self.declare_parameter("disable_elastic_band", True)
         # Release the band only after frame_task_server has finished its open-loop
         # startup (it publishes /left_ee_pose only then); earlier release crashes
@@ -117,6 +142,10 @@ class LowerBodyControllerNode(Node):
         self._auto_switch = bool(self.get_parameter("auto_switch").value)
         self._auto_rise = float(self.get_parameter("auto_switch_rise_norm").value)
         self._auto_fall = float(self.get_parameter("auto_switch_fall_norm").value)
+        self._confirm_wait = bool(self.get_parameter("engage_wait_for_confirm").value)
+        self._engage_confirmed = False
+        self._prepose_ramp_ticks = max(1, int(round(
+            float(self.get_parameter("prepose_ramp_s").value) * control_hz)))
 
         self.get_logger().info("loading lower-body policies...")
         policies = {
@@ -143,7 +172,8 @@ class LowerBodyControllerNode(Node):
         self._awaiting_band_release = False  # policy committed, band not yet released
         self._request_time: float | None = None  # when the pending activation was asked
         self._prepose_pass = 0   # consecutive ticks the legs have held at nominal (pre-engage)
-        self._prepose_ticks = 0  # total pre-pose ticks so far (for the settle timeout)
+        self._prepose_ticks = 0  # total pre-pose ticks so far (ramp phase + settle timeout)
+        self._prepose_start_q: np.ndarray | None = None  # measured legs at first pre-pose tick
 
         lowstate_qos = QoSProfile(reliability=ReliabilityPolicy.BEST_EFFORT,
                                   history=HistoryPolicy.KEEP_LAST, depth=1)
@@ -158,6 +188,8 @@ class LowerBodyControllerNode(Node):
             self._on_frame_task_ready, 10)
         self._cmd_pub = self.create_publisher(LowCmd, "/safety/lowcmd_lower_in", 10)
         self._active_pub = self.create_publisher(String, "/lowerbody/active_policy", latched)
+        self._confirm_srv = self.create_service(
+            Trigger, "/lowerbody/confirm_engage", self._on_confirm_engage)
         self._publish_active()
 
         self.create_timer(1.0 / control_hz, self._tick)
@@ -198,6 +230,19 @@ class LowerBodyControllerNode(Node):
 
     def _on_frame_task_ready(self, _msg: PoseStamped) -> None:
         self._frame_task_ready = True
+
+    def _on_confirm_engage(self, _req, resp):
+        pending = self._manager.desired_name if self._manager.is_pending() else None
+        if self._engage_confirmed:
+            resp.success = True
+            resp.message = "already confirmed"
+            return resp
+        self._engage_confirmed = True
+        resp.success = True
+        resp.message = (f"confirmed — engaging {pending!r} once the pre-pose settles"
+                        if pending else "confirmed (no activation pending)")
+        self.get_logger().info(f"operator confirm: {resp.message}")
+        return resp
 
     # -- helpers -------------------------------------------------------------
     def _publish_active(self) -> None:
@@ -270,14 +315,32 @@ class LowerBodyControllerNode(Node):
                 pending = self._manager.desired_policy()
                 if pending is None:
                     return
-                self._publish_leg(pending.nominal_command())
+                cmd = pending.nominal_command()
+                if self._prepose_start_q is None:
+                    self._prepose_start_q = state.q[:NUM_LEG_JOINTS].copy()
+                if self._prepose_ticks < self._prepose_ramp_ticks:
+                    frac = self._prepose_ticks / self._prepose_ramp_ticks
+                    alpha = 0.5 * (1.0 - np.cos(np.pi * frac))
+                    cmd.target_q = (1.0 - alpha) * self._prepose_start_q + alpha * cmd.target_q
+                self._publish_leg(cmd)
                 err = float(np.max(np.abs(state.q[:NUM_LEG_JOINTS] - pending.nominal_lower)))
                 self._prepose_ticks += 1
                 self._prepose_pass = self._prepose_pass + 1 if err < PREPOSE_TOL else 0
                 settled = self._prepose_pass >= PREPOSE_SETTLE_TICKS
-                timed_out = self._prepose_ticks >= PREPOSE_MAX_TICKS
+                timed_out = self._prepose_ticks >= self._prepose_ramp_ticks + PREPOSE_MAX_TICKS
                 if not settled and not timed_out:
                     return  # keep posing; don't engage the policy or drop the band yet
+                if self._confirm_wait and not self._engage_confirmed:
+                    # ARMING GATE: hold the legs at the pre-pose crouch until the
+                    # operator explicitly confirms. Applies to the timeout path
+                    # too — an unsettled pre-pose must never auto-engage on real.
+                    self.get_logger().info(
+                        f"legs pre-posed ({'settled' if settled else 'NOT SETTLED (timeout)'}, "
+                        f"err={err:.3f} rad) — holding; to engage "
+                        f"{self._manager.desired_name!r} run: ros2 service call "
+                        "/lowerbody/confirm_engage std_srvs/srv/Trigger",
+                        throttle_duration_sec=5.0)
+                    return
                 self.get_logger().info(
                     f"legs pre-posed to nominal ({'settled' if settled else 'timeout'}, "
                     f"err={err:.3f} rad) — engaging {self._manager.desired_name!r}")

@@ -163,7 +163,11 @@ def generate_launch_description():
             executable='lowerbody_controller_node',
             name='lowerbody_controller_node',
             parameters=[sim_time_param,
-                        {'active_policy': LaunchConfiguration('lowerbody')}],
+                        {'active_policy': LaunchConfiguration('lowerbody'),
+                         # Sim auto-engages after the pre-pose settles (unattended
+                         # runs); the operator-confirm arming gate is a REAL-robot
+                         # step (see h1_real_desktop_bringup.launch.py).
+                         'engage_wait_for_confirm': False}],
             output='screen',
             condition=LaunchConfigurationNotEquals('lowerbody', 'mjpc'),
         ),
