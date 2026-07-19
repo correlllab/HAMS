@@ -35,5 +35,13 @@ dof_vel_scale: 0.05
 action_scale: 0.25
 cmd_scale: [2.0, 2.0, 0.25]
 
+# Deployment-side command gain [vx, vy, wz], applied before clipping to +/-1
+# (so the policy obs never leaves the trained command range). The checkpoint
+# undertracks its command — yaw worst (~0.2x actual/commanded), vx ~0.5x —
+# which starves nav2's pure-pursuit curvature. Tuned in RoboCasa 2026-07-19.
+cmd_gain: [1.5, 1.0, 2.0]
+# See policy.py: smooths sign-flipping follower corrections (1.0 = off).
+cmd_smooth_alpha: 0.15
+
 num_actions: 12
 num_obs: 65

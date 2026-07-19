@@ -297,6 +297,20 @@ class AlmiPolicy(Policy):
         self._dof_vel_scale = float(cfg["dof_vel_scale"])
         self._action_scale = float(cfg["action_scale"])
         self._cmd_scale = np.asarray(cfg["cmd_scale"], dtype=np.float32)
+        # Deployment-side command gain (default identity), applied to the
+        # incoming [vx, vy, wz] and re-clipped to +/-1 BEFORE the trained
+        # cmd_scale — so the observation stays inside the trained range. The
+        # checkpoint undertracks its command (yaw badly: ~0.2x), which starves
+        # trajectory followers like nav2's pure pursuit; the gain trades
+        # command fidelity for closed-loop authority.
+        self._cmd_gain = np.asarray(cfg.get("cmd_gain", [1.0, 1.0, 1.0]), dtype=np.float32)
+        # First-order smoothing on the effective command (1.0 = off). A path
+        # follower correcting heading at 20 Hz flips the yaw command's sign
+        # faster than the gait can respond; the LSTM answers the thrash with
+        # an unstable in-place wobble. ~0.15 at 50 Hz (~0.13 s time constant)
+        # passes nav2's ramps but averages out the sign-flipping.
+        self._cmd_alpha = float(cfg.get("cmd_smooth_alpha", 1.0))
+        self._cmd_filt = np.zeros(3, dtype=np.float32)
         self._num_actions = int(cfg["num_actions"])                          # 12
         self._num_obs = int(cfg["num_obs"])                                  # 65
         self._lower_limit, self._upper_limit = _load_leg_position_limits(cfg)
@@ -314,17 +328,28 @@ class AlmiPolicy(Policy):
         self._t_start: float | None = None
         self._walking = False
 
+    def _effective_cmd(self, cmd: np.ndarray) -> np.ndarray:
+        raw = np.clip(cmd * self._cmd_gain, -1.0, 1.0)
+        if self._cmd_alpha >= 1.0:
+            return raw
+        self._cmd_filt += self._cmd_alpha * (raw - self._cmd_filt)
+        return self._cmd_filt.copy()
+
     def reset(self, state: RobotState) -> None:
         self._action[:] = 0.0
         self._t_start = state.t
         self._policy.reset_memory()
-        self._walking = bool(np.linalg.norm(state.cmd) >= self.ONSET_RISE)
+        # Seed the filter with the raw command so an onset reset doesn't have
+        # to fight its own smoother's zero history.
+        self._cmd_filt = np.clip(state.cmd * self._cmd_gain, -1.0, 1.0).astype(np.float32)
+        self._walking = bool(np.linalg.norm(self._cmd_filt) >= self.ONSET_RISE)
 
     def compute(self, state: RobotState) -> LegCommand:
         if self._t_start is None:
             self._t_start = state.t
 
-        cmd_norm = float(np.linalg.norm(state.cmd))
+        cmd = self._effective_cmd(state.cmd)
+        cmd_norm = float(np.linalg.norm(cmd))
         if not self._walking and cmd_norm >= self.ONSET_RISE:
             self.reset(state)   # episode-start condition: memory zeroed, cmd present
         elif self._walking and cmd_norm < self.ONSET_FALL:
@@ -337,7 +362,7 @@ class AlmiPolicy(Policy):
         gravity = gravity_from_quat_walk(state.quat)
         omega = state.gyro * self._ang_vel_scale
 
-        if np.linalg.norm(state.cmd) < self.STAND_CMD_EPS:
+        if cmd_norm < self.STAND_CMD_EPS:
             left_sin_phase = right_sin_phase = 0.0
         else:
             phase = ((state.t - self._t_start) % self.GAIT_PERIOD) / self.GAIT_PERIOD
@@ -346,7 +371,7 @@ class AlmiPolicy(Policy):
 
         self._obs[0:3] = omega
         self._obs[3:6] = gravity
-        self._obs[6:9] = state.cmd * self._cmd_scale
+        self._obs[6:9] = cmd * self._cmd_scale
         self._obs[9:30] = qj
         self._obs[30:51] = dqj
         self._obs[51:63] = self._action
