@@ -18,6 +18,10 @@ There are no per-policy start services — drive /cmd_vel (e.g. from nav2) and t
 controller stands or walks to match. Set ``auto_switch:=false`` to pin the robot to
 ``active_policy`` (pure stand or pure walk).
 
+A third, experimental policy ``almi`` (ALMI-Open LSTM) both stands at cmd=0 and
+locomotes, so it needs no switching: ``active_policy:=almi`` pins it regardless
+of ``auto_switch`` (the auto-switch only ever toggles fame<->walk).
+
 Interfaces
 ----------
 sub  /lowstate                 (unitree_hg/LowState)   robot state
@@ -44,6 +48,7 @@ from unitree_hg.msg import LowCmd, LowState
 from h12_lowerbody_rl.policy import (
     NUM_LEG_JOINTS,
     NUM_POLICY_JOINTS,
+    AlmiPolicy,
     FamePolicy,
     LegCommand,
     RobotState,
@@ -56,6 +61,9 @@ MOTOR_MODE_PR = 1
 # Policy registry keys (see LowerBodyControllerNode.__init__).
 FAME = "fame"   # RMA balance/stand policy (does not locomote)
 WALK = "walk"   # TorchScript walk policy (follows /cmd_vel)
+ALMI = "almi"   # ALMI LSTM policy (stands at cmd=0 AND follows /cmd_vel).
+                # Experimental: auto_switch only toggles fame<->walk, so an
+                # active "almi" is naturally pinned — it never auto-switches.
 
 # Pre-pose: before engaging the policy, PD-drive the legs to the incoming policy's
 # nominal crouch (band-held) and wait until they settle there. The RMA policy warms
@@ -83,6 +91,7 @@ class LowerBodyControllerNode(Node):
         self.declare_parameter("active_policy", "fame")
         self.declare_parameter("walk_config", _share("policies", "walk", "walk.yaml"))
         self.declare_parameter("fame_config", _share("policies", "fame", "fame.yaml"))
+        self.declare_parameter("almi_config", _share("policies", "almi", "almi.yaml"))
         self.declare_parameter("default_height_cmd", 1.0)
         # Auto-switch stand<->walk from ||[vx, vy, wz]|| with hysteresis (rise > fall):
         # engage walk above rise, fall back to FAME below fall. auto_switch:=false
@@ -103,6 +112,7 @@ class LowerBodyControllerNode(Node):
         startup_policy = str(self.get_parameter("active_policy").value).strip().lower()
         walk_cfg = self.get_parameter("walk_config").value
         fame_cfg = self.get_parameter("fame_config").value
+        almi_cfg = self.get_parameter("almi_config").value
         self._height_cmd = float(self.get_parameter("default_height_cmd").value)
         self._auto_switch = bool(self.get_parameter("auto_switch").value)
         self._auto_rise = float(self.get_parameter("auto_switch_rise_norm").value)
@@ -112,6 +122,7 @@ class LowerBodyControllerNode(Node):
         policies = {
             "walk": WalkPolicy(walk_cfg),
             "fame": FamePolicy(fame_cfg),
+            "almi": AlmiPolicy(almi_cfg),
         }
         if not policies["fame"].has_encoder:
             self.get_logger().warn(

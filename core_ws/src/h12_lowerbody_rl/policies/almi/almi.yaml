@@ -1,0 +1,39 @@
+# ALMI adversarial lower-body locomotion policy for the Unitree H1-2.
+#
+# Weights + constants come from TeleHuman/ALMI-Open (BSD-3-Clause); see
+# README.md in this directory for provenance. Scales/gains/defaults are
+# transcribed from that repo's Data_Collection/mujoco/configs/h1_2_21dof.yaml
+# (the config its rollout script drives policy_lstm_12800.pt with), trimmed to
+# the entries AlmiPolicy actually reads.
+policy_path: "policy_lstm_12800.pt"
+
+# 12 leg PD gains (identical to walk.yaml's).
+kps: [200, 200, 200, 300, 40, 40, 200, 200, 200, 300, 40, 40]
+kds: [2.5, 2.5, 2.5, 4, 2, 2, 2.5, 2.5, 2.5, 4, 2, 2]
+
+# Joint position clipping for the 12 commanded leg motors (H1-2 hardware
+# limits, same values as walk.yaml — not part of the ALMI config).
+legs_motor_pos_lower_limit_list: [-0.37, -3.13, -0.42, -0.11, -0.887334, -0.181799,
+                                  -0.37, -3.13, -3.13, -0.11, -0.887334, -0.181799]
+legs_motor_pos_upper_limit_list: [0.37, 2.49, 3.13, 2.18, 0.513599, 0.181799,
+                                  0.37, 2.49, 0.42, 2.18, 0.513599, 0.181799]
+
+# 21-DoF trained defaults, ALMI joint order = /lowstate order minus the six
+# wrist joints: legs (12), torso, shoulder pitch/roll/yaw + elbow per arm.
+# Note the leg nominal is a much deeper crouch (hip -0.4 / knee 0.8) than
+# walk.yaml's -0.16 / 0.36 — the controller's pre-pose drives the legs here
+# before the policy engages.
+default_angles: [0.0, -0.4, 0.0, 0.8, -0.4, 0.0,
+                 0.0, -0.4, 0.0, 0.8, -0.4, 0.0,
+                 0.0,
+                 0.4, 0.2, 0.0, 0.3,
+                 0.4, -0.2, 0.0, 0.3]
+
+ang_vel_scale: 0.25
+dof_pos_scale: 1.0
+dof_vel_scale: 0.05
+action_scale: 0.25
+cmd_scale: [2.0, 2.0, 0.25]
+
+num_actions: 12
+num_obs: 65

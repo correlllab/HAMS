@@ -8,9 +8,9 @@ from launch.actions import (
     SetEnvironmentVariable,
     TimerAction,
 )
-from launch.conditions import IfCondition
+from launch.conditions import IfCondition, LaunchConfigurationEquals, LaunchConfigurationNotEquals
 from launch.launch_description_sources import PythonLaunchDescriptionSource
-from launch.substitutions import LaunchConfiguration
+from launch.substitutions import AndSubstitution, LaunchConfiguration, PythonExpression
 from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
 
@@ -69,6 +69,15 @@ def generate_launch_description():
         # mp4 (written on shutdown). Reads rt/lowstate + the estimator + rt/mjpc/plan;
         # commands nothing. use_mjpc_viz:=false for a clean bringup.
         DeclareLaunchArgument('use_mjpc_viz', default_value='true'),
+        # Which controller drives the legs. 'mjpc' (default) = the MJPC
+        # lower-body controller below, unchanged behavior. Any other value
+        # ('almi' | 'fame' | 'walk') swaps in the switchable RL controller
+        # (h12_lowerbody_rl lowerbody_controller_node) pinned to that policy
+        # and gates the MJPC controller + viz off — only one lower-body
+        # controller may feed /safety/lowcmd_lower_in. The MJPC base
+        # estimator stays up either way (read-only, publishes
+        # rt/sportmodestate_est).
+        DeclareLaunchArgument('lowerbody', default_value='mjpc'),
         DeclareLaunchArgument('model_logging', default_value='true'),
         DeclareLaunchArgument('model_visualization', default_value='true'),
         DeclareLaunchArgument('model_clear_logs', default_value='true'),
@@ -144,16 +153,20 @@ def generate_launch_description():
             output='screen',
         ),
 
-        # Switchable lower-body RL controller (walk / FAME stand-squat).
-        # Auto-engages the FAME standing policy; switch via /lowerbody/start_walk
-        # or /lowerbody/set_policy (waits for a safe handover before committing).
-        # Node(
-        #     package='h12_lowerbody_rl',
-        #     executable='lowerbody_controller_node',
-        #     name='lowerbody_controller_node',
-        #     parameters=[sim_time_param, {'active_policy': 'fame'}],
-        #     output='screen',
-        # ),
+        # Switchable lower-body RL controller (almi / fame / walk) — launched
+        # only when lowerbody:= names an RL policy; the MJPC controller below
+        # is gated off in that case. The chosen policy is pinned as
+        # active_policy (fame/walk still auto-switch between themselves on
+        # /cmd_vel; almi never auto-switches — it stands AND walks itself).
+        Node(
+            package='h12_lowerbody_rl',
+            executable='lowerbody_controller_node',
+            name='lowerbody_controller_node',
+            parameters=[sim_time_param,
+                        {'active_policy': LaunchConfiguration('lowerbody')}],
+            output='screen',
+            condition=LaunchConfigurationNotEquals('lowerbody', 'mjpc'),
+        ),
 
         # --- MJPC lower-body base estimator (RW-EKF) -> rt/sportmodestate_est ---
         Node(
@@ -182,6 +195,7 @@ def generate_launch_description():
             # the model is null -> mj_makeData segfault on startup.
             additional_env={'MJPC_TASKS_DIR': '/home/code/mujoco_mpc/build/mjpc/tasks'},
             output='screen',
+            condition=LaunchConfigurationEquals('lowerbody', 'mjpc'),
         ),
 
         # --- MJPC plan debug visualizer (measured robot + blue ghost of the plan) ---
@@ -204,7 +218,13 @@ def generate_launch_description():
             additional_env={'MJPC_TASKS_DIR': '/home/code/mujoco_mpc/build/mjpc/tasks',
                             'MUJOCO_GL': 'osmesa'},
             output='screen',
-            condition=IfCondition(LaunchConfiguration('use_mjpc_viz')),
+            # Viz reads rt/mjpc/plan, which only exists when the MJPC
+            # controller is the active lower body.
+            condition=IfCondition(AndSubstitution(
+                LaunchConfiguration('use_mjpc_viz'),
+                PythonExpression(
+                    ["'", LaunchConfiguration('lowerbody'), "' == 'mjpc'"]),
+            )),
         ),
 
 

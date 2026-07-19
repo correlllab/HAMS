@@ -18,6 +18,8 @@ setup(
             glob('policies/walk/*')),
         (os.path.join('share', package_name, 'policies', 'fame'),
             glob('policies/fame/*')),
+        (os.path.join('share', package_name, 'policies', 'almi'),
+            glob('policies/almi/*')),
     ],
     package_data={'': ['py.typed']},
     install_requires=['setuptools'],
