@@ -413,7 +413,36 @@ def main() -> None:
             break
 
     node.get_logger().info("launching " + " ".join(args))
-    child = subprocess.Popen(args, env=env)  # stdout/stderr inherit -> visible in launch log
+    # stdin=PIPE keeps the core's stdin OPEN under ros2 launch (a plain inherit
+    # gives the core launch's non-tty stdin -> its live-switch thread EOFs and
+    # dies right after printing "live switch ready"). The pipe both keeps that
+    # thread alive and gives the switch_strategy topic below somewhere to write.
+    child = subprocess.Popen(args, env=env, stdin=subprocess.PIPE)
+
+    # Live strategy switch (2026-07-18): publish std_msgs/Int32 on
+    # mjpc_deploy/switch_strategy (e.g. `ros2 topic pub --once
+    # /mjpc_deploy/switch_strategy std_msgs/msg/Int32 "{data: 23}"`) and the
+    # number is written to the core's stdin -- the same live-switch path the
+    # operator would use in a tty (settle+blend choreography, range-checked by
+    # the task). Also accepts the align/straighten ENTER gate: data < 0 sends a
+    # bare newline ("go").
+    from std_msgs.msg import Int32
+
+    def _switch_strategy(msg: Int32) -> None:
+        if child.poll() is not None or child.stdin is None:
+            node.get_logger().warning("switch_strategy: core not running")
+            return
+        line = "\n" if msg.data < 0 else f"{msg.data}\n"
+        try:
+            child.stdin.write(line.encode())
+            child.stdin.flush()
+            node.get_logger().info(
+                f"switch_strategy -> {'ENTER' if msg.data < 0 else msg.data}")
+        except (BrokenPipeError, OSError) as e:
+            node.get_logger().warning(f"switch_strategy write failed: {e}")
+
+    node.create_subscription(Int32, "mjpc_deploy/switch_strategy",
+                             _switch_strategy, 1)
 
     # ros2 launch signals THIS process; hand the signal to the core so its
     # damping safe-hold + exit summary run, then exit with its code.

@@ -116,74 +116,46 @@ if(H12_BUILD_CONTROLLER AND EXISTS "${MJPC_BUILD}" AND unitree_sdk2_FOUND)
   file(GLOB_RECURSE _mjpc_absl "${MJPC_BUILD}/libabsl_*.a")
   set(MJPC_LIBRARIES ${_mjpc_core} ${_mjpc_absl})
 
-  # The controller core = the fork's OWN CLI thin main + shared deploy core,
-  # compiled STRAIGHT FROM THE SUBMODULE (no copy; the fork stays the single
-  # source of truth for tables, flags, control loop, DDS I/O, safety behavior).
-  # Deliberately NOT an rclcpp target -- see the CycloneDDS soname-collision
-  # note above; the mjpc_deploy_lowerbody_controller entry point is the rclpy
-  # launcher installed above, which execs this binary.
-  add_executable(mjpc_lowerbody_core
-    "${MJPC_ROOT}/mjpc/deploy/h12_lower_body_controller.cc"
-    "${MJPC_ROOT}/mjpc/deploy/deploy_common.cc")
-  target_include_directories(mjpc_lowerbody_core PRIVATE ${MJPC_INCLUDE_DIRS})
-  target_link_libraries(mjpc_lowerbody_core
-    -Wl,--start-group ${MJPC_LIBRARIES} -Wl,--end-group
-    "${MUJOCO_LIBRARY}" unitree_sdk2 Threads::Threads ${CMAKE_DL_LIBS})
-  # lld (LTO-aware) is required to link the clang-13 bitcode archives above.
-  if(EXISTS "/usr/bin/ld.lld-13")
-    target_link_options(mjpc_lowerbody_core PRIVATE -fuse-ld=/usr/bin/ld.lld-13)
-  endif()
   # unitree_sdk2's bundled CycloneDDS .so lives next to the SDK; bake its dir
   # into the rpath so libddsc/libddscxx resolve at runtime regardless of
   # LD_LIBRARY_PATH (same arrangement as the fork's own deploy build).
   get_target_property(_ddsc_loc ddsc IMPORTED_LOCATION)
   get_filename_component(_dds_libdir "${_ddsc_loc}" DIRECTORY)
-  set_target_properties(mjpc_lowerbody_core PROPERTIES
-    BUILD_RPATH "/usr/local/lib;${MJPC_BUILD}/lib;${_dds_libdir}"
-    INSTALL_RPATH "/usr/local/lib;${MJPC_BUILD}/lib;${_dds_libdir}")
-  install(TARGETS mjpc_lowerbody_core DESTINATION lib/${PROJECT_NAME})
 
-  # FULL-BODY core (h12_control_node.cc, nu=27, Lean task) -- same deploy_common
-  # + link recipe as the lower-body core, just the other thin main. Lets the
-  # full-body controller run through the SAME in-container DDS/estimator path as
-  # the lower body (host-side chains hit host<->container DDS state-feed stalls).
-  # Publishes the FULL channel rt/safety/lowcmd_in -> needs safety in full mode.
-  add_executable(mjpc_fullbody_core
-    "${MJPC_ROOT}/mjpc/deploy/h12_control_node.cc"
-    "${MJPC_ROOT}/mjpc/deploy/deploy_common.cc")
-  target_include_directories(mjpc_fullbody_core PRIVATE ${MJPC_INCLUDE_DIRS})
-  target_link_libraries(mjpc_fullbody_core
-    -Wl,--start-group ${MJPC_LIBRARIES} -Wl,--end-group
-    "${MUJOCO_LIBRARY}" unitree_sdk2 Threads::Threads ${CMAKE_DL_LIBS})
-  if(EXISTS "/usr/bin/ld.lld-13")
-    target_link_options(mjpc_fullbody_core PRIVATE -fuse-ld=/usr/bin/ld.lld-13)
-  endif()
-  set_target_properties(mjpc_fullbody_core PROPERTIES
-    BUILD_RPATH "/usr/local/lib;${MJPC_BUILD}/lib;${_dds_libdir}"
-    INSTALL_RPATH "/usr/local/lib;${MJPC_BUILD}/lib;${_dds_libdir}")
-  install(TARGETS mjpc_fullbody_core DESTINATION lib/${PROJECT_NAME})
+  # One core = the fork's OWN CLI thin main + shared deploy sources, compiled
+  # STRAIGHT FROM THE SUBMODULE (no copy; the fork stays the single source of
+  # truth for tables, flags, control loop, DDS I/O, safety behavior).
+  # Deliberately NOT rclcpp targets -- see the CycloneDDS soname-collision note
+  # above; the installed rclpy launchers exec these binaries. lld (LTO-aware)
+  # is required to link the clang-13 bitcode archives.
+  # NOTE: when stage 3 splits deploy_common.cc, extend THIS list (and the fork's
+  # H12_DEPLOY_COMMON_SRCS) -- the deploy source list lives in exactly 2 places.
+  set(H12_DEPLOY_COMMON_SRCS "${MJPC_ROOT}/mjpc/deploy/deploy_common.cc")
+  function(add_mjpc_core TARGET MAIN_CC)
+    add_executable(${TARGET}
+      "${MJPC_ROOT}/mjpc/deploy/${MAIN_CC}" ${H12_DEPLOY_COMMON_SRCS})
+    target_include_directories(${TARGET} PRIVATE ${MJPC_INCLUDE_DIRS})
+    target_link_libraries(${TARGET}
+      -Wl,--start-group ${MJPC_LIBRARIES} -Wl,--end-group
+      "${MUJOCO_LIBRARY}" unitree_sdk2 Threads::Threads ${CMAKE_DL_LIBS})
+    if(EXISTS "/usr/bin/ld.lld-13")
+      target_link_options(${TARGET} PRIVATE -fuse-ld=/usr/bin/ld.lld-13)
+    endif()
+    set_target_properties(${TARGET} PROPERTIES
+      BUILD_RPATH "/usr/local/lib;${MJPC_BUILD}/lib;${_dds_libdir}"
+      INSTALL_RPATH "/usr/local/lib;${MJPC_BUILD}/lib;${_dds_libdir}")
+    install(TARGETS ${TARGET} DESTINATION lib/${PROJECT_NAME})
+  endfunction()
 
-  # SPLIT-BODY core (h12_split_controller.cc) -- the core the split-body launcher
-  # (mjpc_deploy_splitbody_controller / split_body_controller.py) starts. Thin-main
-  # scaffolding copied from the lower-body core (same deploy_common + link recipe),
-  # but a WHOLE-BODY nu=27 controller (default task "Lean H12 Magpie Split") that
-  # publishes BOTH split safety channels: legs on rt/safety/lowcmd_lower_in, arms
-  # on rt/safety/lowcmd_upper_in. Kept a distinct target/binary so split-specific
-  # C++ changes never touch the plain lower-body core.
-  add_executable(mjpc_split_core
-    "${MJPC_ROOT}/mjpc/deploy/h12_split_controller.cc"
-    "${MJPC_ROOT}/mjpc/deploy/deploy_common.cc")
-  target_include_directories(mjpc_split_core PRIVATE ${MJPC_INCLUDE_DIRS})
-  target_link_libraries(mjpc_split_core
-    -Wl,--start-group ${MJPC_LIBRARIES} -Wl,--end-group
-    "${MUJOCO_LIBRARY}" unitree_sdk2 Threads::Threads ${CMAKE_DL_LIBS})
-  if(EXISTS "/usr/bin/ld.lld-13")
-    target_link_options(mjpc_split_core PRIVATE -fuse-ld=/usr/bin/ld.lld-13)
-  endif()
-  set_target_properties(mjpc_split_core PROPERTIES
-    BUILD_RPATH "/usr/local/lib;${MJPC_BUILD}/lib;${_dds_libdir}"
-    INSTALL_RPATH "/usr/local/lib;${MJPC_BUILD}/lib;${_dds_libdir}")
-  install(TARGETS mjpc_split_core DESTINATION lib/${PROJECT_NAME})
+  # LEGACY legs-only core (nu=12, Stabilize task, LOWER channel only).
+  add_mjpc_core(mjpc_lowerbody_core h12_lower_body_controller.cc)
+  # FULL-BODY core (nu=27, Lean task, FULL channel rt/safety/lowcmd_in ->
+  # needs safety in full mode). Bench path.
+  add_mjpc_core(mjpc_fullbody_core h12_control_node.cc)
+  # SPLIT-BODY core -- what bringup runs (mjpc_deploy_splitbody_controller):
+  # WHOLE-BODY nu=27, default task "Lean H12 Magpie Split", publishes BOTH
+  # split safety channels (legs lower_in + pause-gated arms upper_in).
+  add_mjpc_core(mjpc_split_core h12_split_controller.cc)
 
   message(STATUS "h12_deploy_mjpc: mjpc_lowerbody_core + mjpc_fullbody_core + mjpc_split_core ENABLED "
                  "(MJPC build tree ${MJPC_BUILD}; unitree_sdk2 dds at ${_dds_libdir})")
