@@ -50,7 +50,7 @@ def generate_launch_description():
                     executable='safety_node',
                     name='safety_node',
                     parameters=[sim_time_param],
-                    arguments=['--config', 'default_safety_split.yaml'],
+                    arguments=['--config', 'relax_safety_split.yaml'],
                     output='screen',
                 ),
             ],
