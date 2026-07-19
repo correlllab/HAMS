@@ -58,12 +58,18 @@ BIN="$MJPC_BUILD/bin/agent_server"
 [ -x "$BIN" ] || BIN="$(find "$MJPC_BUILD" -name agent_server -type f -perm -u+x -print -quit)"
 [ -n "$BIN" ] && [ -x "$BIN" ] || { echo "[rebuild_mjpc] ERROR: agent_server binary not found after build" >&2; exit 1; }
 
-# 3. ALWAYS refresh the binary the bridge spawns: `from mujoco_mpc import agent`
-#    auto-runs <pkg>/mjpc/agent_server, so a C++ edit only takes effect once this
-#    exe is copied over. (Without this, a default rebuild is a no-op for the ROS
-#    bridge / h12_deploy_mjpc.)
-cp -a "$BIN" "$PKG/mjpc/agent_server"
-echo "[rebuild_mjpc] refreshed $PKG/mjpc/agent_server  (from $BIN)"
+# 3. Refresh the binary python consumers spawn: `from mujoco_mpc import
+#    agent` auto-runs <pkg>/mjpc/agent_server, so for THOSE a C++ edit only takes
+#    effect once this exe is copied over. (h12_deploy_mjpc does not use this copy:
+#    step 2 already refreshed libmjpc.a in the build tree, which colcon relinks
+#    its cores against.) Skip when the python package isn't installed in this
+#    image — must not abort launch_ros.sh's set -e flow over a python-only consumer.
+if [ -d "$PKG/mjpc" ]; then
+    cp -a "$BIN" "$PKG/mjpc/agent_server"
+    echo "[rebuild_mjpc] refreshed $PKG/mjpc/agent_server  (from $BIN)"
+else
+    echo "[rebuild_mjpc] NOTE: $PKG/mjpc not present (no python mujoco_mpc pkg in this image) — skipping agent_server copy"
+fi
 
 # 4. Optional full reinstall: refreshes task XML/mesh assets + regenerated proto
 #    (needed when assets or the python API changed — NOT for a pure C++ edit).

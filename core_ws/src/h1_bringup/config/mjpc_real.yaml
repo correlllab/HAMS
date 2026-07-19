@@ -3,7 +3,8 @@
 # Differences vs mjpc_sim.yaml: twin_dt matches the real 1 kHz lowstate tick,
 # the measured IMU pitch mount calibration is applied, and there is no elastic
 # band. See the submodule's mjpc/deploy/deploy_common.h for the compiled-in
-# settled values and Command_Sheet_h12.html for the native-h12 equivalents.
+# settled values and Command_Sheet_h12.html (a historical pre-HAMS runbook)
+# for the native-h12 equivalents.
 
 h12_deploy_mjpc_estimator:
   ros__parameters:
@@ -29,8 +30,8 @@ mjpc_debug_visualizer:
     # BLUE GHOST at the planner's current best trajectory, and writes the mp4 when the
     # node is signalled. Commands nothing; subscribes only to rt/lowstate, the
     # estimator's sportstate estimate, and rt/mjpc/plan (the controller core publishes
-    # that from its planner thread -- controller_launcher.py hardcodes --plan_topic on
-    # real too, so this needs no arming here).
+    # that from its planner thread -- split_body_controller.py hardcodes --plan_topic
+    # on real too, so this needs no arming here).
     #
     # ESTIMATOR OUTPUT the ghost reads for the measured base -- matches the
     # estimator's out_topic (rt/sportmodestate_est) above, the same signal the

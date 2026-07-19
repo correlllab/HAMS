@@ -54,9 +54,6 @@ install(PROGRAMS ${PROJECT_NAME}/debug_visualizer_node.py
         DESTINATION lib/${PROJECT_NAME}
         RENAME mjpc_debug_visualizer)
 
-# ---- shared resources ----
-install(DIRECTORY config DESTINATION share/${PROJECT_NAME})
-
 # ---- C++ MJPC controller (embeds mjpc::Agent; auto-skipped where absent) ----
 # The controller links the fork's static libs + headers directly from the warm
 # build tree the deploy image keeps at runtime: docker-compose mounts
@@ -167,10 +164,12 @@ if(H12_BUILD_CONTROLLER AND EXISTS "${MJPC_BUILD}" AND unitree_sdk2_FOUND)
   install(TARGETS mjpc_fullbody_core DESTINATION lib/${PROJECT_NAME})
 
   # SPLIT-BODY core (h12_split_controller.cc) -- the core the split-body launcher
-  # (mjpc_deploy_splitbody_controller / split_body_controller.py) starts. A copy
-  # of the lower-body core with the same deploy_common + link recipe; kept a
-  # distinct target/binary so split-specific C++ changes never touch the plain
-  # lower-body core. Publishes rt/safety/lowcmd_lower_in like the lower-body core.
+  # (mjpc_deploy_splitbody_controller / split_body_controller.py) starts. Thin-main
+  # scaffolding copied from the lower-body core (same deploy_common + link recipe),
+  # but a WHOLE-BODY nu=27 controller (default task "Lean H12 Magpie Split") that
+  # publishes BOTH split safety channels: legs on rt/safety/lowcmd_lower_in, arms
+  # on rt/safety/lowcmd_upper_in. Kept a distinct target/binary so split-specific
+  # C++ changes never touch the plain lower-body core.
   add_executable(mjpc_split_core
     "${MJPC_ROOT}/mjpc/deploy/h12_split_controller.cc"
     "${MJPC_ROOT}/mjpc/deploy/deploy_common.cc")

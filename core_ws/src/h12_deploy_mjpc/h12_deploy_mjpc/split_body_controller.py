@@ -319,10 +319,11 @@ def main() -> None:
                   "frametaskserver/toggle_pause_upperbody").value),
             str(p("core_lower_topic", "safety/lowcmd_lower_in").value))
     # controller_exe selects which compiled core to run. This launcher defaults to
-    # mjpc_split_core (the split-body core, h12_split_controller.cc -- a copy of the
-    # legs-only Stabilize lower-body core). Other options: mjpc_lowerbody_core,
-    # mjpc_fullbody_core (whole-body Lean). controller_binary (an absolute path)
-    # still overrides if set.
+    # mjpc_split_core (h12_split_controller.cc): a WHOLE-BODY nu=27 core, default
+    # task "Lean H12 Magpie Split", publishing legs on rt/safety/lowcmd_lower_in
+    # and arms on rt/safety/lowcmd_upper_in. The other cores lack the
+    # --pause_upper_* flags this launcher always passes, so selecting them aborts
+    # at flag parse. controller_binary (an absolute path) still overrides if set.
     exe = p("controller_exe", "mjpc_split_core").value
     binary = p("controller_binary", os.path.join(_libdir, exe)).value
     # Same knob set + semantics as the fork's CLI (see mjpc/deploy/
@@ -359,9 +360,8 @@ def main() -> None:
         # DEBUG plan publish for mjpc_debug_visualizer's blue ghost. Hardcoded, not a
         # ROS param: there is exactly one right topic and the visualizer defaults to
         # the same string, so a param could only ever be set WRONG (silently costing
-        # you the ghost). The core still defaults this OFF -- an empty --plan_topic --
-        # so the fork's binary, the full-body core and the upper-body core are all
-        # byte-unchanged; this launcher is the only thing that arms it.
+        # you the ghost). The split + lower-body cores default this OFF (an empty
+        # --plan_topic); this launcher is the only thing that arms it.
         # The publish happens on the PLANNER thread after PlanIteration returns, so it
         # costs the 200 Hz control loop nothing. ROS sees it as /mjpc/plan.
         "--plan_topic", "rt/mjpc/plan",
@@ -376,7 +376,6 @@ def main() -> None:
         # subscriber can deliver, so it agrees with the bridge state above
         # even if the first keep-alive sample is dropped or late.
         "--pause_upper_init" if default_paused else "--nopause_upper_init",
-        #"--straighten_start", "true",
         "--frc_parity", "1"
     ]
     iface = str(p("network_interface", "").value)

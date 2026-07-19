@@ -34,7 +34,7 @@ def generate_launch_description():
     sim_time_param = {'use_sim_time': False}
 
     # --- CPU affinity (soft pin, i7-14700F hybrid: 0-15 P-cores, 16-27 E-cores) ---
-    # Give MJPC's lowerbody controller (and the mjpc_lowerbody_core planner it
+    # Give MJPC's splitbody controller (and the mjpc_split_core planner it
     # Popens, which inherits this mask) the 12 fast P-core threads 0-11 to itself,
     # sized to plan_threads: 12 in config/mjpc_real.yaml so the planner threadpool
     # fills exactly those cores and nothing else contends.
@@ -56,7 +56,7 @@ def generate_launch_description():
     # steal a P-core mid-balance-loop or the network core. SOFT reservation: taskset
     # pins these processes but host/kernel threads can still float onto 0-13 (add
     # isolcpus=0-13 to the kernel cmdline for a hard reservation).
-    MJPC_CPUS = 'taskset -c 0-11'       # lowerbody controller + planner (plan_threads=12)
+    MJPC_CPUS = 'taskset -c 0-11'       # splitbody controller + planner (plan_threads=12)
     ESTIMATOR_CPUS = 'taskset -c 12'    # dedicated core for the 200Hz base estimator
     OTHER_CPUS = 'taskset -c 14-27'     # vision servers, rviz, everything else (13 = NIC IRQ)
 

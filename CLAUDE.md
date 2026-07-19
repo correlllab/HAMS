@@ -81,7 +81,7 @@ package `fast_lio`; dir `unitree_ros2` is not itself a package (it nests
 |---|---|---|---|
 | `h1_bringup` | **bringup** | Launch-only package that starts the whole robot (sim or real). See §6. | 7 launch files, `config/*.yaml` |
 | `h12_ros2_controller` | controller (upper body) | Pinocchio-based arm IK: `/frame_task` + `/dual_arm` action servers, joint state publisher, hand controller | `frame_task_server`, `dual_arm_server`, `joint_state_publisher`, `hand_controller_node` |
-| `h12_deploy_mjpc` | controller (lower body, MPC) | MJPC balance/locomotion controller (C++ cores from the `mujoco_mpc` fork, run as separate processes) + RW-EKF base estimator | `mjpc_lowerbody_core`, `controller_launcher.py`, `estimator_node.py` |
+| `h12_deploy_mjpc` | controller (lower body, MPC) | MJPC balance/locomotion controller (C++ cores from the `mujoco_mpc` fork, run as separate processes) + RW-EKF base estimator | `mjpc_split_core` (via `split_body_controller.py`), `estimator_node.py`; legacy `mjpc_lowerbody_core` + `controller_launcher.py` |
 | `h12_lowerbody_rl` | controller (lower body, RL) | TorchScript walking + FAME RMA stand/squat policies; switchable stand↔walk controller; consumes `/lowstate` + `/cmd_vel`, emits 12-joint PD setpoints | `walking_node`, `fame_node`, `lowerbody_controller_node` |
 | `h12_safety_layer` | safety | Merges upper/lower command channels into `/lowcmd` with limit checks (YAML-configured) | `safety_node` |
 | `h12_skills` | **skills** | Action servers for the 12 `/skill/*` atomic skills an LLM can call (frontier exploration lives here). See §7. | `skills` (SkillsNode) |

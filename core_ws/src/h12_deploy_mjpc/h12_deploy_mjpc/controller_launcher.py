@@ -72,9 +72,11 @@ def main() -> None:
                            "lib", "h12_deploy_mjpc")
 
     p = node.declare_parameter
-    # controller_exe selects which compiled core to run (mjpc_lowerbody_core =
-    # legs-only Stabilize; mjpc_fullbody_core = whole-body Lean). controller_binary
-    # (an absolute path) still overrides if set.
+    # controller_exe selects which compiled core to run. Only mjpc_lowerbody_core
+    # (legs-only Stabilize) actually runs from THIS launcher: it passes
+    # --plan_topic unconditionally below, and mjpc_fullbody_core
+    # (h12_control_node.cc) defines no such flag, so selecting it aborts at flag
+    # parse. controller_binary (an absolute path) still overrides if set.
     exe = p("controller_exe", "mjpc_lowerbody_core").value
     binary = p("controller_binary", os.path.join(_libdir, exe)).value
     # Same knob set + semantics as the fork's CLI (see mjpc/deploy/
@@ -107,9 +109,10 @@ def main() -> None:
         # DEBUG plan publish for mjpc_debug_visualizer's blue ghost. Hardcoded, not a
         # ROS param: there is exactly one right topic and the visualizer defaults to
         # the same string, so a param could only ever be set WRONG (silently costing
-        # you the ghost). The core still defaults this OFF -- an empty --plan_topic --
-        # so the fork's binary, the full-body core and the upper-body core are all
-        # byte-unchanged; this launcher is the only thing that arms it.
+        # you the ghost). The lower-body + split cores default this OFF (an empty
+        # --plan_topic); this launcher is the only thing that arms it. The full-body
+        # and upper-body cores define NO such flag, so this unconditional pass makes
+        # them abort at flag parse (see the controller_exe note above).
         # The publish happens on the PLANNER thread after PlanIteration returns, so it
         # costs the 200 Hz control loop nothing. ROS sees it as /mjpc/plan.
         "--plan_topic", "rt/mjpc/plan",

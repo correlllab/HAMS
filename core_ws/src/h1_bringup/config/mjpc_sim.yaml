@@ -3,7 +3,7 @@
 # and RW-EKF base estimator behind the h12_deploy_mjpc shims; these params
 # mirror the fork's surviving CLI flags 1:1. Everything settled (ctrl 200 Hz,
 # twin-time clocking, latency comp, ramp/hold/blend timings, torque-budget
-# clamp, watchdog) is compiled into the core — see the submodule's
+# monitor, watchdog) is compiled into the core — see the submodule's
 # mjpc/deploy/deploy_common.h.
 
 h12_deploy_mjpc_estimator:
@@ -19,7 +19,7 @@ h12_deploy_mjpc_estimator:
     # drifted ~4x the robot's true motion, feeding the planner an inconsistent
     # (pos, vel) pair -> lateral divergence within seconds of policy authority.
     # REAL runs 1x, where wall == plant time; mjpc_real.yaml leaves this at 0.
-    tick_dt: 0.005   # follows --sim-dt 0.005 (plant timestep parity, 2026-07-04)
+    tick_dt: 0.005   # MUST equal RoboCasa's model.opt.timestep (plant tick parity)
 
 mjpc_debug_visualizer:
   ros__parameters:
@@ -28,7 +28,7 @@ mjpc_debug_visualizer:
     # trajectory, and writes the mp4 when the node is signalled. Commands nothing;
     # subscribes only to rt/lowstate, the estimator's rt/sportmodestate_est, and
     # rt/mjpc/plan (the controller core publishes that from its planner thread --
-    # controller_launcher.py hardcodes --plan_topic, so this needs no arming here).
+    # split_body_controller.py hardcodes --plan_topic, so this needs no arming here).
     # MUST be a HOST-MOUNTED path. docker_run.sh runs the ros container with
     # `compose run --rm`, so the container -- and everything in its /tmp -- is
     # DESTROYED the moment `ros2 launch` exits. That is exactly when the mp4 is
@@ -81,7 +81,7 @@ mjpc_debug_visualizer:
 mjpc_deploy_lowerbody_controller:
   ros__parameters:
     task: "Stabilize H12 Magpie"
-    strategy: 6                 # 6 = stand (the stabilize task's only real slot)
+    strategy: 6                 # 6 = stand; slots 20/22/23/24/25/26 also real (CLI-only)
     plan_threads: 12
     gravity_ff: 1.0
     twin_dt: 0.005
@@ -118,67 +118,23 @@ mjpc_deploy_splitbody_controller:
     # AND latency over-lead only 1.18x. Do NOT slow down; slowmo breaks BOTH. If 12
     # threads oversubscribe the laptop and TANK RTF (check /clock hz), drop to ~10.
     plan_threads: 12
-    # PLANNER-RATE PARITY (2026-07-04, wobble root cause R1): the CEM planner
-    # free-runs on wall time (~55 iters/s at 12 threads); at RoboCasa's ~0.25x
-    # RTF that is ~4x more iterations per PLANT-second than twin/real -- the
-    # elite-variance sampler collapses to its 0.01 rad floor on the near-static
-    # state and can't see recovery candidates until the tilt re-spreads the
-    # elites = the measured 5-7 plant-s wobble limit cycle. 3 threads ~= 14
-    # iters/s wall ~= the twin's iterations-per-plant-second. RoboCasa BENCH
-    # yamls only; twin/real chains keep --plan_threads 12.
-    # BENCHED 2026-07-03 (A/B on the band-drop stand test): 0 collapses into a
-    # knee-pegged crouch (z 0.64->0.51, legs under-driven -- unlike our twin,
-    # this plant has NO leg gravcomp; only the two hands); 0.85 holds height
-    # (z 0.91-0.99) all the way to the drop. Keep 0.85 here.
+    # SIM keeps FULL grav-comp: the deciding A/B (rigid feet + ballast mass
+    # matched to the planner model) showed 1.0 holds height where 0.85 sinks.
+    # REAL keeps the validated 0.85 (mjpc_real.yaml).
+    # (history: see mujoco_mpc/mjpc/deploy/HISTORY.md)
     gravity_ff: 1.0
-    # gravity_ff A/B, WITH the 0.67 kg back_equipment ballast added AND rigid feet
-    # (--rigid-feet, default ON in h12_mujoco.py): rigid feet ELIMINATED the topple
-    # (foot-slip was the dominant driver). Residual then = a vertical SINK; take 12
-    # showed gff 1.0 holds height (z~0.92 for 40s) vs gff 0.85 sinking to z 0.64.
-    # So 1.0 here (full grav-comp) with the feet planted + mass matched. Remaining
-    # 5-12deg tilt wobble is NOT a stand yet -- next parity lever is the global
-    # integrator (RoboCasa Euler vs planner/twin implicitfast; the task XML warns
-    # Euler diverges on biped balance). REAL keeps 0.85 (mjpc_real.yaml).
-    # gravity_ff A/B, WITH the 0.67 kg back_equipment ballast added (takes 9-10,
-    # 2026-07-03): neither 0.85 (fwd+lat fold) nor 0 (stronger LATERAL fold +
-    # knee collapse) stands. The ballast is a correct parity fix but NOT the
-    # dominant gap -- the fold is a lateral foot-slip, root-caused (opt dump of
-    # the assembled robosuite model) to the CONTACT/INTEGRATOR mismatch:
-    # RoboCasa runs impratio=20 / integrator=Euler / cone=elliptic vs the twin+
-    # planner's 100 / implicitfast / pyramidal. gravity_ff is a minor amplifier;
-    # keep 0.85 (matches real) until the contact model is addressed.
-    # gravity_ff A/B (harness takes, 2026-07-03): 0 = knee-pegged collapse;
-    # 0.85 = slow policy-commanded knee fold once the blend starts (z 1.03->0.87,
-    # low knee torque -- the fold is planned, not saturated); 1.0 = height holds
-    # better (z~0.97) but the tilt fight is WORSE (posture assist 80-100 Nm).
-    # Neither frees the stand: the divergence starts at blend onset (twin ~5.2s)
-    # in every take = the documented post-parity twin structural free-stand gap,
-    # faithfully reproduced on this plant. Keep the validated 0.85.
     # MUST equal RoboCasa's model.opt.timestep: the sim publishes rt/lowstate
     # from a RecurrentThread at exactly that interval, and the core's planner
-    # clock is lowstate tick * twin_dt.
-    # 0.005 (2026-07-04, T2-vs-T3b): the balance bench now runs the plant at
-    # the TWIN's dt via --sim-dt 0.005 -- the deploy-chain stand is
-    # dt-sensitive (twin@0.002 hangs, twin@0.005 stands even at RTF 0.5).
+    # clock is lowstate tick * twin_dt. No sim CLI knob sets the plant dt (it
+    # comes from the assembled RoboCasa model) -- verify against the model.
+    # (history: see mujoco_mpc/mjpc/deploy/HISTORY.md)
     twin_dt: 0.005
-    # ★ TWIN-PARITY A/B RESULT (2026-07-06): tested rt/sportmodestate (GROUND TRUTH,
-    # plant --truth-sportstate, VERIFIED 191 Hz + controller reading it) -> did NOT
-    # stop the fall. The LATERAL fold became a SAGITTAL forward->backward divergence
-    # (plane-floor had already fixed lateral). So the ESTIMATOR was NOT the killer.
-    # REVERTED to rt/sportmodestate_est = real-parity + the 30 ms LPF that damps the
-    # raw-truth base velocity the planner over-reacts to. Re-flip to rt/sportmodestate
-    # (+ plant --truth-sportstate) only to A/B raw truth again.
+    # REAL-PARITY STATE SOURCE: read the RW-EKF estimate on
+    # rt/sportmodestate_est -- the SAME signal path the real robot uses (the
+    # bringup launches the estimator; nothing else publishes sportstate in
+    # sim). Its ~30 ms LPF damps the raw base velocity the planner over-reacts
+    # to. (history: see mujoco_mpc/mjpc/deploy/HISTORY.md)
     sportstate_topic: rt/sportmodestate_est
-    # REAL-PARITY STATE SOURCE (2026-07-05): read the RW-EKF estimate on
-    # rt/sportmodestate_est — the SAME signal path the real robot uses (the
-    # bringup already launches the estimator). Twin A/B at AngMom 5 showed the
-    # EKF-filtered velocity gives a QUIETER stand (tilt 3-5° steady vs 5-6°
-    # then fall) than raw truth: the earlier --truth-sportstate override was a
-    # self-inflicted parity gap (truth = full-bandwidth velocity the planner
-    # over-reacts to; the 30 ms LPF matches real). The EKF's leg-odometry xy
-    # wanders ~0.3 m under sim foot micro-slip, but for STANDING xy position is
-    # irrelevant (balance = orientation + base velocity + CoM). Set this back to
-    # rt/sportmodestate (+ sim --truth-sportstate) only to A/B raw truth again.
     imu_pitch_offset_deg: 0.0   # 1.6 is a REAL-robot IMU mount calibration; sim has none
     arm_aware: true             # legs pre-compensate for measured arm/torso motion
     # With the FULL sensor set on, each 10 Hz(sim) lidar+camera cycle holds
@@ -193,13 +149,11 @@ mjpc_deploy_splitbody_controller:
     # plant-clocked, so it pauses during each freeze rather than racing ahead.
     # REAL stays at the compiled 0.05 (mjpc_real.yaml doesn't set this).
     stale_sec: 1.5
-    # Band release is owned by the SIM's slack-triggered auto-release
-    # (h12_mujoco --band-auto-release: |band force| <= 30 N sustained 2 sim-s,
-    # the twin harness "handoff-timing" doctrine -- a self-supporting robot
-    # leaves the band slack). Keep the launcher's TIMER release OFF: the
-    # /elastic_band/toggle service is a stateful TOGGLE, so firing it after
-    # the sim already auto-released would turn the band back ON. (Timer
-    # releases were also benched dishonest: they fire mid-sway and dump the
-    # robot from whatever posture the tether wound it into.)
+    # The sim has NO band auto-release; drop the band manually once the stand
+    # is stable:
+    #   ros2 service call /elastic_band/toggle std_srvs/srv/Trigger {}
+    # (a stateful TOGGLE -- calling it again re-enables the band). Keep the
+    # launcher's TIMER release OFF: it fires mid-sway and dumps the robot from
+    # whatever posture the tether wound it into.
     drop_band: false
     band_drop_after_secs: 25.0

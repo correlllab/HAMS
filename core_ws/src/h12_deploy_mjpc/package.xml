@@ -3,13 +3,17 @@
 <package format="3">
   <name>h12_deploy_mjpc</name>
   <version>0.0.0</version>
-  <description>MJPC lower-body balance controller for the Unitree H1-2: the
-    fork's own CLI controller (badinkajink/mujoco_mpc@extended_hw
-    mjpc/deploy/h12_lower_body_controller.cc + deploy_common.cc, compiled
-    straight from the submodule) driving the 12 leg joints through the safety
-    layer's split LOWER channel, run behind a rclpy param launcher (rclcpp and
-    unitree_sdk2 CycloneDDS builds must not share a process), plus the fork's
-    RW-EKF proprioceptive base estimator behind a rclpy param shell.</description>
+  <description>MJPC balance control for the Unitree H1-2: the fork's own CLI
+    cores (badinkajink/mujoco_mpc@extended_hw mjpc/deploy/*.cc +
+    deploy_common.cc, compiled straight from the submodule) run behind rclpy
+    param launchers (rclcpp and unitree_sdk2 CycloneDDS builds must not share
+    a process). Primary chain: the whole-body nu=27 split controller
+    (mjpc_split_core via split_body_controller.py -- legs on the safety
+    layer's split LOWER channel, arms on the UPPER channel with the
+    frame_task pause handshake), plus the fork's RW-EKF proprioceptive base
+    estimator and a debug plan visualizer behind rclpy param shells. The
+    legacy legs-only chain (mjpc_lowerbody_core via controller_launcher.py)
+    is retained.</description>
   <maintainer email="maxlconway@gmail.com">maxconway</maintainer>
   <license>Apache-2.0</license>
 
