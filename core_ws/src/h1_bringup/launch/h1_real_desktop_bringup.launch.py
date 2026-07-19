@@ -7,7 +7,7 @@ from launch.actions import (
     TimerAction,
 )
 from launch.conditions import IfCondition
-from launch.substitutions import LaunchConfiguration
+from launch.substitutions import AndSubstitution, LaunchConfiguration, PythonExpression
 from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
 
@@ -81,6 +81,14 @@ def generate_launch_description():
         # (start_position_verified:=true). Defaults to false so a bare launch
         # never auto-commands the legs on the real robot.
         DeclareLaunchArgument('start_position_verified', default_value='false'),
+        # Which controller drives the legs once start_position_verified:=true.
+        # 'mjpc' (default) = the MJPC balance controller below, unchanged
+        # behavior. Any other value ('almi' | 'fame' | 'walk') swaps in the
+        # switchable RL controller pinned to that policy and gates the MJPC
+        # controller off — only one lower-body controller may feed
+        # /safety/lowcmd_lower_in. Every leg path stays behind the
+        # start_position_verified interlock.
+        DeclareLaunchArgument('lowerbody', default_value='mjpc'),
         DeclareLaunchArgument('use_skills', default_value='true'),
         DeclareLaunchArgument('model_logging', default_value='true'),
         DeclareLaunchArgument('model_visualization', default_value='true'),
@@ -146,18 +154,27 @@ def generate_launch_description():
             condition=IfCondition(LaunchConfiguration('use_skills')),
         ),
 
-        # Switchable lower-body RL controller (walk / FAME stand-squat).
-        # Auto-engages the FAME standing policy; switch via /lowerbody/start_walk
-        # or /lowerbody/set_policy (waits for a safe handover before committing).
-        # Only launched once the start position has been verified.
-        # Node(
-        #     package='h12_lowerbody_rl',
-        #     executable='lowerbody_controller_node',
-        #     name='lowerbody_controller_node',
-        #     parameters=[sim_time_param, {'active_policy': 'fame'}],
-        #     output='screen',
-        #     condition=IfCondition(LaunchConfiguration('start_position_verified')),
-        # ),
+        # Switchable lower-body RL controller (almi / fame / walk) — launched
+        # only when lowerbody:= names an RL policy AND the operator has verified
+        # the start position; the MJPC controller below is gated off in that
+        # case. The chosen policy is pinned as active_policy (fame/walk still
+        # auto-switch between themselves on /cmd_vel; almi never auto-switches —
+        # it stands AND walks itself). Runs on the MJPC P-core set, which is
+        # free whenever this node is selected instead of MJPC.
+        Node(
+            package='h12_lowerbody_rl',
+            executable='lowerbody_controller_node',
+            name='lowerbody_controller_node',
+            prefix=MJPC_CPUS,
+            parameters=[sim_time_param,
+                        {'active_policy': LaunchConfiguration('lowerbody')}],
+            output='screen',
+            condition=IfCondition(AndSubstitution(
+                LaunchConfiguration('start_position_verified'),
+                PythonExpression(
+                    ["'", LaunchConfiguration('lowerbody'), "' != 'mjpc'"]),
+            )),
+        ),
 
 
         Node(
@@ -193,7 +210,11 @@ def generate_launch_description():
             # the model is null -> mj_makeData segfault on startup.
             additional_env={'MJPC_TASKS_DIR': '/home/code/mujoco_mpc/build/mjpc/tasks'},
             output='screen',
-            condition=IfCondition(LaunchConfiguration('start_position_verified')),
+            condition=IfCondition(AndSubstitution(
+                LaunchConfiguration('start_position_verified'),
+                PythonExpression(
+                    ["'", LaunchConfiguration('lowerbody'), "' == 'mjpc'"]),
+            )),
         ),
 
         Node(
