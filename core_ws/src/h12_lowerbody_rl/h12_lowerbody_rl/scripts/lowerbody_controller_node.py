@@ -46,6 +46,7 @@ import numpy as np
 import rclpy
 from ament_index_python.packages import get_package_share_directory
 from geometry_msgs.msg import PoseStamped, Twist
+from rcl_interfaces.msg import FloatingPointRange, ParameterDescriptor, SetParametersResult
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy
 from std_msgs.msg import Float32, String
@@ -60,7 +61,16 @@ from h12_lowerbody_rl.policy import (
     LegCommand,
     RobotState,
     WalkPolicy,
+    apply_imu_offset,
+    imu_offset_quat,
 )
+
+# Live-tunable IMU trim parameters (degrees). Declared with a range so
+# rqt_reconfigure renders them as sliders; updates apply on the next control
+# tick. Only orientation axes exist — no policy observes base position, so
+# there is nothing an x/y/z offset could feed into.
+IMU_OFFSET_PARAMS = ("imu_offset_roll_deg", "imu_offset_pitch_deg", "imu_offset_yaw_deg")
+IMU_OFFSET_RANGE_DEG = 15.0
 from h12_lowerbody_rl.policy_manager import GateConfig, PolicyManager
 
 MOTOR_MODE_PR = 1
@@ -105,6 +115,19 @@ class LowerBodyControllerNode(Node):
         self.declare_parameter("walk_config", _share("policies", "walk", "walk.yaml"))
         self.declare_parameter("fame_config", _share("policies", "fame", "fame.yaml"))
         self.declare_parameter("almi_config", _share("policies", "almi", "almi.yaml"))
+        # IMU mounting/calibration trim (deg): what the raw quaternion reads
+        # when the torso is known to be level (e.g. measured hanging plumb).
+        # Positive pitch = reads tilted forward, positive roll = tilted right.
+        # Applied once in _state_from_lowstate so every policy's gravity obs
+        # sees the corrected orientation. DYNAMIC — adjust live during a run
+        # via rqt_reconfigure sliders or `ros2 param set` (see the parameter
+        # callback below); launch files seed the startup values.
+        for pname in IMU_OFFSET_PARAMS:
+            self.declare_parameter(pname, 0.0, ParameterDescriptor(
+                description="live IMU orientation trim, degrees (raw reading at true level)",
+                floating_point_range=[FloatingPointRange(
+                    from_value=-IMU_OFFSET_RANGE_DEG, to_value=IMU_OFFSET_RANGE_DEG,
+                    step=0.0)]))
         self.declare_parameter("default_height_cmd", 1.0)
         # Auto-switch stand<->walk from ||[vx, vy, wz]|| with hysteresis (rise > fall):
         # engage walk above rise, fall back to FAME below fall. auto_switch:=false
@@ -138,6 +161,8 @@ class LowerBodyControllerNode(Node):
         walk_cfg = self.get_parameter("walk_config").value
         fame_cfg = self.get_parameter("fame_config").value
         almi_cfg = self.get_parameter("almi_config").value
+        self._imu_corr = self._build_imu_corr()
+        self.add_on_set_parameters_callback(self._on_set_parameters)
         self._height_cmd = float(self.get_parameter("default_height_cmd").value)
         self._auto_switch = bool(self.get_parameter("auto_switch").value)
         self._auto_rise = float(self.get_parameter("auto_switch_rise_norm").value)
@@ -244,6 +269,30 @@ class LowerBodyControllerNode(Node):
         self.get_logger().info(f"operator confirm: {resp.message}")
         return resp
 
+    # -- IMU trim ------------------------------------------------------------
+    def _build_imu_corr(self):
+        r, p, y = (float(self.get_parameter(n).value) for n in IMU_OFFSET_PARAMS)
+        return imu_offset_quat(np.radians(r), np.radians(p), np.radians(y))
+
+    def _on_set_parameters(self, params) -> SetParametersResult:
+        # Runs on the same single-threaded executor as _tick, so swapping the
+        # cached correction here is race-free. Values outside the declared
+        # range are already rejected by rclpy before this callback fires.
+        touched = [p for p in params if p.name in IMU_OFFSET_PARAMS]
+        if touched:
+            if any(not np.isfinite(p.value) for p in touched):
+                return SetParametersResult(
+                    successful=False, reason="IMU trim must be finite")
+            # Parameters in `params` are not stored yet — merge them with the
+            # current values instead of reading back via get_parameter.
+            vals = {n: float(self.get_parameter(n).value) for n in IMU_OFFSET_PARAMS}
+            vals.update({p.name: float(p.value) for p in touched})
+            self._imu_corr = imu_offset_quat(*(np.radians(vals[n]) for n in IMU_OFFSET_PARAMS))
+            self.get_logger().info(
+                "IMU trim -> roll %+.3f pitch %+.3f yaw %+.3f deg"
+                % tuple(vals[n] for n in IMU_OFFSET_PARAMS))
+        return SetParametersResult(successful=True)
+
     # -- helpers -------------------------------------------------------------
     def _publish_active(self) -> None:
         self._active_pub.publish(String(data=self._manager.active_name or "idle"))
@@ -278,7 +327,8 @@ class LowerBodyControllerNode(Node):
     def _state_from_lowstate(self, msg: LowState) -> RobotState:
         q = np.array([msg.motor_state[i].q for i in range(NUM_POLICY_JOINTS)], dtype=np.float32)
         dq = np.array([msg.motor_state[i].dq for i in range(NUM_POLICY_JOINTS)], dtype=np.float32)
-        quat = np.asarray(msg.imu_state.quaternion, dtype=np.float32)
+        quat = apply_imu_offset(
+            np.asarray(msg.imu_state.quaternion, dtype=np.float32), self._imu_corr)
         gyro = np.asarray(msg.imu_state.gyroscope, dtype=np.float32)
         t = self.get_clock().now().nanoseconds * 1e-9
         return RobotState(q=q, dq=dq, quat=quat, gyro=gyro,

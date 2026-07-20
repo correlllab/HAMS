@@ -103,6 +103,49 @@ def gravity_from_quat_fame(quat: np.ndarray) -> np.ndarray:
     return quat_rotate_inverse(quat, np.array([0.0, 0.0, -1.0], dtype=np.float32))
 
 
+def quat_mul(q1: np.ndarray, q2: np.ndarray) -> np.ndarray:
+    """Hamilton product q1 ⊗ q2, [w, x, y, z] convention."""
+    w1, x1, y1, z1 = q1
+    w2, x2, y2, z2 = q2
+    return np.array(
+        [
+            w1 * w2 - x1 * x2 - y1 * y2 - z1 * z2,
+            w1 * x2 + x1 * w2 + y1 * z2 - z1 * y2,
+            w1 * y2 - x1 * z2 + y1 * w2 + z1 * x2,
+            w1 * z2 + x1 * y2 - y1 * x2 + z1 * w2,
+        ],
+        dtype=np.float32,
+    )
+
+
+def imu_offset_quat(roll_rad: float, pitch_rad: float, yaw_rad: float) -> np.ndarray | None:
+    """Correction quaternion for a fixed IMU mounting/calibration bias, or None
+    when all three angles are zero (the no-op fast path).
+
+    The angles are what the raw IMU *reads* when the torso is actually level
+    (e.g. measured hanging plumb): positive pitch = reads tilted forward,
+    positive roll = reads tilted right. The bias is modeled as a body-frame
+    mounting rotation Rz(yaw)·Ry(pitch)·Rx(roll); right-multiplying the raw
+    quaternion by the returned conjugate cancels it, so the corrected
+    orientation (and the gravity vector derived from it) reads level.
+    """
+    if roll_rad == 0.0 and pitch_rad == 0.0 and yaw_rad == 0.0:
+        return None
+    hr, hp, hy = 0.5 * roll_rad, 0.5 * pitch_rad, 0.5 * yaw_rad
+    qx = np.array([np.cos(hr), np.sin(hr), 0.0, 0.0], dtype=np.float32)
+    qy = np.array([np.cos(hp), 0.0, np.sin(hp), 0.0], dtype=np.float32)
+    qz = np.array([np.cos(hy), 0.0, 0.0, np.sin(hy)], dtype=np.float32)
+    q_off = quat_mul(quat_mul(qz, qy), qx)
+    return np.array([q_off[0], -q_off[1], -q_off[2], -q_off[3]], dtype=np.float32)
+
+
+def apply_imu_offset(quat: np.ndarray, corr: np.ndarray | None) -> np.ndarray:
+    """Apply a correction from ``imu_offset_quat`` to a raw IMU quaternion."""
+    if corr is None:
+        return quat
+    return quat_mul(quat, corr)
+
+
 def _load_yaml(config_path: str) -> dict:
     with open(config_path, "r") as f:
         return yaml.safe_load(f)

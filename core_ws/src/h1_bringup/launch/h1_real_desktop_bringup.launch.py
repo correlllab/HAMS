@@ -141,7 +141,33 @@ def generate_launch_description():
                          # engage tick (first policy command then computed from
                          # 1 s-stale state) plus a redundant second LSTM reset.
                          # The operator lowers the gantry instead.
-                         'disable_elastic_band': False}],
+                         'disable_elastic_band': False,
+                         # Startup seed for the LIVE IMU trim (adjust during a
+                         # run with rqt_reconfigure sliders or ros2 param set).
+                         # Negative pitch = anti-lean bias (policy believes it
+                         # pitches further forward and fights harder); the
+                         # hanging-plumb static calibration would be +0.264.
+                         'imu_offset_roll_deg': 2.0,
+                         'imu_offset_pitch_deg': -2.5,
+                         'imu_offset_yaw_deg': 0.0}],
+            output='screen',
+            condition=IfCondition(AndSubstitution(
+                LaunchConfiguration('start_position_verified'),
+                PythonExpression(
+                    ["'", LaunchConfiguration('lowerbody'), "' != 'mjpc'"]),
+            )),
+        ),
+
+        # Read-only sim-vs-real gap diagnostic for the RL controller above --
+        # watches /safety/lowcmd_lower_in, /lowstate, /lowcmd for control-loop
+        # timing gaps, safety-layer clamp deltas, and tracking error. Waits
+        # for the operator's /lowerbody/confirm_engage arming step itself
+        # (see sim2real_gap_monitor's docstring), so it's safe to bring up
+        # alongside the controller rather than after it's armed.
+        Node(
+            package='h12_lowerbody_rl',
+            executable='sim2real_gap_monitor',
+            name='sim2real_gap_monitor',
             output='screen',
             condition=IfCondition(AndSubstitution(
                 LaunchConfiguration('start_position_verified'),

@@ -39,6 +39,8 @@ setup(
             'fame_node = h12_lowerbody_rl.scripts.fame_node:main',
             'lowerbody_controller_node = '
             'h12_lowerbody_rl.scripts.lowerbody_controller_node:main',
+            'sim2real_gap_monitor = '
+            'h12_lowerbody_rl.scripts.sim2real_gap_monitor:main',
         ],
     },
 )

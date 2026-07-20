@@ -167,7 +167,12 @@ def generate_launch_description():
                          # Sim auto-engages after the pre-pose settles (unattended
                          # runs); the operator-confirm arming gate is a REAL-robot
                          # step (see h1_real_desktop_bringup.launch.py).
-                         'engage_wait_for_confirm': False}],
+                         'engage_wait_for_confirm': False,
+                         # Sim's IMU has no mounting bias to correct (the live
+                         # trim sliders still work for experiments).
+                         'imu_offset_roll_deg': 0.0,
+                         'imu_offset_pitch_deg': 0.0,
+                         'imu_offset_yaw_deg': 0.0}],
             output='screen',
             condition=LaunchConfigurationNotEquals('lowerbody', 'mjpc'),
         ),
