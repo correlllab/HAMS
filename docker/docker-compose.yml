@@ -64,6 +64,24 @@ services:
       # host (or pass --headless to launch_robocasa.sh) for offscreen rendering.
       - MUJOCO_GL=${MUJOCO_GL:-glfw}
       - ROS_DOMAIN_ID=${ROS_DOMAIN_ID:-1}
+      # Rigid arm-only body freeze for the grasp-comparison runs (default 0 = off,
+      # shipped elastic-band behavior). h12_mujoco.py reads HAMS_FREEZE_BODY.
+      - HAMS_FREEZE_BODY=${HAMS_FREEZE_BODY:-0}
+      # Nudge the frozen robot this many metres toward the fixture so a static
+      # arm can reach it (fridge handle sits just beyond the collision-free spawn).
+      - HAMS_SPAWN_FORWARD=${HAMS_SPAWN_FORWARD:-0}
+      # Ignore arm/gripper geoms when backing off the fixture at spawn, so the
+      # robot parks close enough for a static arm to reach it. Default 0 = off.
+      - HAMS_SPAWN_ARMS_CLEAR=${HAMS_SPAWN_ARMS_CLEAR:-0}
+      # One-shot ground-truth reach dump at spawn (handle/shoulder/EE world pos).
+      - HAMS_DUMP_REACH=${HAMS_DUMP_REACH:-0}
+      # Slide the spawn along the robot's left(+)/right(-) so the grasp shoulder
+      # lines up with the target, removing the cross-body reach. 0 = centred.
+      - HAMS_SPAWN_LATERAL=${HAMS_SPAWN_LATERAL:-0}
+      # 'almi' = spawn legs at the ALMI policy's nominal crouch (in-place engage).
+      - HAMS_STANCE=${HAMS_STANCE:-}
+      # ground-truth odom -> pelvis TF (sim stand-in for FAST-LIO odometry)
+      - HAMS_SIM_ODOM=${HAMS_SIM_ODOM:-0}
     volumes:
       - /tmp/.X11-unix:/tmp/.X11-unix:rw
       - ${XAUTHORITY:-$HOME/.Xauthority}:/root/.Xauthority:ro

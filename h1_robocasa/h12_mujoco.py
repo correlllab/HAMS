@@ -40,10 +40,26 @@ NUM_MOTORS = 27
 # gravity; MuJoCo clamps the result to each actuator's ctrlrange anyway.
 LEG_HOLD_KP = 300.0
 LEG_HOLD_KD = 10.0
+# Stance: the shipped near-straight STANDING stance (user requirement: the robot
+# stands upright — no lean, no squat). The handle sits ~0.23 m below the shoulders;
+# grasps must therefore approach HORIZONTALLY (a vertical handle allows it, and a
+# flat approach needs no downward wrist pitch), with the spawn laterally aligned so
+# the reach isn't cross-body.
 INIT_LEG_POS = np.array([
     0.0, -0.16, 0.0, 0.36, -0.2, 0.0,
     0.0, -0.16, 0.0, 0.36, -0.2, 0.0,
 ], dtype=float)
+# HAMS_STANCE=almi: spawn with the legs ALREADY at the ALMI policy's trained
+# nominal crouch (hip -0.4 / knee 0.8 / ankle -0.4, matching policies/almi/
+# almi.yaml default_angles). Engaging the policy from its own nominal removes the
+# pre-pose transition that otherwise makes it take a backward settle-walk right
+# after the elastic band releases — the robot starts AT the grasp station and
+# stays there. Default unset = the standing stance above.
+if os.environ.get('HAMS_STANCE', '').strip().lower() == 'almi':
+    INIT_LEG_POS = np.array([
+        0.0, -0.4, 0.0, 0.8, -0.4, 0.0,
+        0.0, -0.4, 0.0, 0.8, -0.4, 0.0,
+    ], dtype=float)
 INIT_ARM_POS = np.array([
     0.0,
     0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
@@ -57,6 +73,60 @@ def _initial_motor_qpos():
     if qpos.shape != (NUM_MOTORS,):
         raise ValueError(f"initial motor pose must contain {NUM_MOTORS} entries")
     return qpos
+
+
+def _dump_reach_geometry(env, model, data, tag=""):
+    """One-shot ground-truth reach geometry for the grasp-comparison setup: print
+    the robot's arm/base anchors and every candidate fixture handle/door geom in
+    world coords, so the static-arm spawn standoff is set from real numbers rather
+    than guesses. Diagnostic only — no side effects. Gated by HAMS_DUMP_REACH."""
+    if os.environ.get('HAMS_DUMP_REACH', '0').strip().lower() in ('0', 'off', 'false', 'no', ''):
+        return
+    try:
+        pfx = env.robots[0].robot_model.naming_prefix
+        def _bpos(name):
+            bid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, name)
+            return None if bid < 0 else data.xpos[bid].copy()
+        base = _bpos(f"{pfx}pelvis")
+        fwd = np.zeros(3)
+        bid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, f"{pfx}pelvis")
+        if bid >= 0:
+            mujoco.mju_rotVecQuat(fwd, np.array([1.0, 0.0, 0.0]), data.xquat[bid])
+        print(f"[reach-geom]{tag} facing +x(world)={fwd.round(3)} === robot anchors (world xyz) ===")
+        for nm in ("pelvis", "torso_link",
+                   "right_shoulder_pitch_link", "left_shoulder_pitch_link",
+                   "right_elbow_link", "left_elbow_link",
+                   "right_wrist_yaw_link", "left_wrist_yaw_link"):
+            p = _bpos(f"{pfx}{nm}")
+            if p is not None:
+                fp = float((p - base).dot(fwd)) if base is not None else 0.0
+                print(f"[reach-geom]  {nm:28s} {p.round(3)}  fproj={fp:+.3f}")
+        # graspgenx TCP frames (sites), if present
+        for snm in (f"{pfx}right_graspgenx_frame", f"{pfx}left_graspgenx_frame",
+                    "right_graspgenx_frame", "left_graspgenx_frame"):
+            sid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_SITE, snm)
+            if sid >= 0:
+                sp = data.site_xpos[sid].copy()
+                fp = float((sp - base).dot(fwd)) if base is not None else 0.0
+                print(f"[reach-geom]  site {snm:28s} {sp.round(3)}  fproj={fp:+.3f}")
+        kws = ("handle", "door", "fridge", "refriger", "drawer")
+        cands = []
+        for gid in range(model.ngeom):
+            nm = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_GEOM, gid) or ""
+            low = nm.lower()
+            if not any(k in low for k in kws) or nm.startswith(pfx):
+                continue
+            gp = data.geom_xpos[gid].copy()
+            fproj = float((gp - base).dot(fwd)) if base is not None else 0.0
+            cands.append((fproj, nm, gp))
+        cands.sort(key=lambda t: (-t[0], t[1]))
+        print(f"[reach-geom]{tag} === {len(cands)} fixture handle/door/fridge geoms (nearest-front first) ===")
+        for fproj, nm, gp in cands:
+            z = float(gp[2])
+            flag = "  <== IN FRONT @ grasp height" if 0.1 < fproj and 0.6 < z < 1.7 else ""
+            print(f"[reach-geom]  fproj={fproj:+.3f} z={z:.3f}  {nm:40s} {gp.round(3)}{flag}")
+    except Exception as e:
+        print(f"[reach-geom] dump skipped: {e}")
 
 
 def _frame_viewer_on_robot(handle, data, body_id):
@@ -201,14 +271,54 @@ def sim_loop(task, viewer=True, layout=None, style=None, seed=None, record_video
         # floor (default 0 = at the counter for manipulation). Set ~1.0 for nav2,
         # which needs the robot's start cell to be free to plan.
         _spawn_backoff = float(os.environ.get("HAMS_SPAWN_BACKOFF", "0") or 0)
+        # HAMS_SPAWN_ARMS_CLEAR: ignore the arm/gripper geoms when backing the
+        # robot off the fixture at spawn, so it parks as close as its TORSO/legs
+        # allow (the zero-pose hands jut ~0.31 m and otherwise shove it out of
+        # arm reach). The arms are homed by bringup right after, so their spawn
+        # overlap is transient. Default off preserves the shipped spawn distance.
+        _arms_clear = os.environ.get('HAMS_SPAWN_ARMS_CLEAR', '0').strip().lower() \
+            not in ('0', 'off', 'false', 'no', '')
+        # HAMS_SPAWN_FORWARD: start the spawn this many metres closer to the fixture
+        # (along the robot's facing) so a STATIC arm can reach it. This is
+        # COLLISION-AWARE — place_robot_collision_free then backs the torso off
+        # again if it would actually overlap the fixture/door, so it can't clip
+        # through anything; it just removes the mobile-robot approach gap.
+        _base_pos = np.array(env.init_robot_base_pos, dtype=float)
+        _base_quat = h1_2_robosuite._euler_to_wxyz(getattr(env, "init_robot_base_ori", None))
+        _spawn_fwd = float(os.environ.get('HAMS_SPAWN_FORWARD', '0') or 0)
+        if _spawn_fwd:
+            _fwd = -h1_2_robosuite._backward_dir(_base_quat)   # world forward, toward the fixture
+            _base_pos[:2] += _spawn_fwd * _fwd[:2]
+            print(f"[h12_mujoco] HAMS_SPAWN_FORWARD={_spawn_fwd}m: starting spawn "
+                  f"{_spawn_fwd}m closer to the fixture (torso back-off still applies)")
+        # HAMS_SPAWN_LATERAL: slide the spawn this many metres along the robot's
+        # LEFT (+) / right (-) so the grasp arm's shoulder lines up with the target,
+        # removing the cross-body reach that the wrist can't fold into. Collision-
+        # aware back-off still applies afterwards.
+        _spawn_lat = float(os.environ.get('HAMS_SPAWN_LATERAL', '0') or 0)
+        if _spawn_lat:
+            _fwd = -h1_2_robosuite._backward_dir(_base_quat)
+            _left = np.cross(np.array([0.0, 0.0, 1.0]), _fwd)  # world robot-left
+            _n = np.linalg.norm(_left[:2])
+            if _n > 1e-9:
+                _base_pos[:2] += _spawn_lat * (_left[:2] / _n)
+                print(f"[h12_mujoco] HAMS_SPAWN_LATERAL={_spawn_lat}m: sliding spawn "
+                      f"{_spawn_lat}m to the robot's {'left' if _spawn_lat > 0 else 'right'}")
         h1_2_robosuite.place_robot_collision_free(
-            env, env.init_robot_base_pos,
-            h1_2_robosuite._euler_to_wxyz(getattr(env, "init_robot_base_ori", None)),
+            env, _base_pos, _base_quat,
             extra_backoff=_spawn_backoff,
+            ignore_arm_geoms=_arms_clear,
         )
+        if _arms_clear:
+            print("[h12_mujoco] HAMS_SPAWN_ARMS_CLEAR=1: spawned close to the fixture "
+                  "(arm/gripper spawn overlap ignored; torso/legs kept clear)")
         print("[h12_mujoco] initial stance from baked-in sim defaults")
     except Exception as e:
         print(f"[h12_mujoco] clean reset skipped: {e}")
+
+    # One-shot ground-truth reach dump (HAMS_DUMP_REACH=1) for setting the static
+    # arm's spawn standoff from real handle/shoulder positions.
+    _dump_reach_geometry(env, model, data, tag=" spawn")
 
     # Elastic-band balance tether on the torso: holds the free-floating biped
     # upright until the ROS walking policy takes over. Anchor a fixed point above
@@ -276,6 +386,60 @@ def sim_loop(task, viewer=True, layout=None, style=None, seed=None, record_video
         print(f"[h12_mujoco] holding {NUM_LEG_JOINTS} leg joints at the spawn "
               f"stance (kp={LEG_HOLD_KP}, kd={LEG_HOLD_KD}) while nothing commands them")
 
+    # Optional RIGID body freeze for arm-only experiments (the grasp comparison).
+    # The elastic band is a soft spring, so the whole robot still sways. When
+    # HAMS_FREEZE_BODY=1, kinematically pin the pelvis free joint + the 12 leg
+    # joints + the torso joint to their spawn pose every sim step (velocities
+    # zeroed), so ONLY the 14 arm joints move. Default OFF preserves the sim's
+    # shipped elastic-band behavior; this is opt-in and gated like HAMS_SIM_ODOM.
+    _freeze_body = os.environ.get('HAMS_FREEZE_BODY', '0').strip().lower() \
+        not in ('0', 'off', 'false', 'no', '')
+    _frz_base_qadr = _frz_base_dof = -1
+    _frz_base_qpos = _frz_lower_qidx = _frz_lower_vidx = _frz_lower_qpos = None
+    try:
+        # Resolve the pin indices UNCONDITIONALLY so the freeze can also be
+        # toggled at runtime (/hams/freeze_body) even when it starts off.
+        _frzfj = mujoco.mj_name2id(
+            model, mujoco.mjtObj.mjOBJ_JOINT,
+            f"{pfx}{h1_2_robosuite.FREE_JOINT_NAME}")
+        _frz_base_qadr = int(model.jnt_qposadr[_frzfj])
+        _frz_base_dof = int(model.jnt_dofadr[_frzfj])
+        _frz_base_qpos = data.qpos[_frz_base_qadr:_frz_base_qadr + 7].copy()
+        # legs (0..11) + torso (12) — everything except the 14 arm motors (13..26)
+        _frz_lower_qidx = np.asarray(resolver.motor_qpos[:NUM_LEG_JOINTS + 1])
+        _frz_lower_vidx = np.asarray(resolver.motor_qvel[:NUM_LEG_JOINTS + 1])
+        _frz_lower_qpos = data.qpos[_frz_lower_qidx].copy()
+        if _freeze_body:
+            if band is not None:
+                band.enabled = False   # the rigid pin replaces the soft tether
+            print("[h12_mujoco] HAMS_FREEZE_BODY=1: pelvis + legs + torso pinned "
+                  "rigidly every step; elastic band disabled — ONLY the arms move")
+    except Exception as e:
+        print(f"[h12_mujoco] freeze setup failed, staying dynamic: {e}")
+        _freeze_body = False
+
+    # Reliable between-trial ARM RESET for the grasp sweep. The upper-body
+    # differential-IK controller can leave the arm in a raised config it cannot
+    # recover from (named_config 'home' then fails), so consecutive trials start
+    # from a bad pose and stop reaching. On a /hams/reset_arm message we pin the 14
+    # arm joints (+ their PD targets) to the spawn/home pose for HAMS_ARM_RESET_HOLD
+    # seconds, which deterministically returns the arm home regardless of a stuck
+    # controller setpoint. Opt-in; harmless when unused.
+    _arm_qidx = np.asarray(resolver.motor_qpos[NUM_LEG_JOINTS + 1:])   # 14 arm motors
+    _arm_vidx = np.asarray(resolver.motor_qvel[NUM_LEG_JOINTS + 1:])
+    _arm_cidx = np.asarray(resolver.motor_ctrl[NUM_LEG_JOINTS + 1:])
+    _arm_home_q = np.asarray(INIT_ARM_POS[1:], dtype=float)           # skip torso[0]
+    _arm_reset_hold = float(os.environ.get('HAMS_ARM_RESET_HOLD', '2.5') or 2.5)
+    _arm_reset = {'until': -1.0}
+    # Runtime freeze toggle (/hams/freeze_body, std_msgs/Bool). Enables the
+    # freeze-hold handover protocol for standing-policy experiments: hold the
+    # robot rigidly pinned through setup (cannot fall or sway, unlike the elastic
+    # band), engage the policy while pinned, then release the pin and the policy
+    # is already in control. Re-freezing captures the CURRENT pose as the new pin.
+    # 'req' carries the requested state; the main loop applies it (capturing the
+    # pin pose under the sim step, race-free). Initialized from HAMS_FREEZE_BODY.
+    _frz_toggle = {'req': None, 'on': _freeze_body}
+
     init_ros()
 
     # Sensor bridge: /clock, RGBD cameras (head + both hands), livox lidar + IMU.
@@ -336,11 +500,26 @@ def sim_loop(task, viewer=True, layout=None, style=None, seed=None, record_video
     measurement = MeasurementBridge(env, elastic_band=band, task_name=task)
     print(f"[h12_mujoco] task goal: {measurement.publish_goal()!r}")
 
+    # /hams/reset_arm listener (see the arm-reset block above). A tiny node so the
+    # subscription rides the background executor; it only stamps a deadline that the
+    # main loop enforces under sim_lock.
+    from std_msgs.msg import Empty as _EmptyMsg
+    from std_msgs.msg import Bool as _BoolMsg
+    reset_node = rclpy.create_node('hams_arm_reset')
+    reset_node.create_subscription(
+        _EmptyMsg, '/hams/reset_arm',
+        lambda _m: _arm_reset.__setitem__('until', float(data.time) + _arm_reset_hold), 10)
+    # Runtime body-freeze toggle: True = pin (re-capturing the CURRENT pose as
+    # the pin), False = release. Applied by the main loop (race-free).
+    reset_node.create_subscription(
+        _BoolMsg, '/hams/freeze_body',
+        lambda m: _frz_toggle.__setitem__('req', bool(m.data)), 10)
+
     # Background executor serves the gripper services/timers/action + the band
     # toggle service. ros_bridge.tick() is driven from the main loop instead (its
     # MuJoCo renderer context is thread-affine), so it is NOT added here.
     executor = rclpy.executors.MultiThreadedExecutor()
-    for node in (measurement, hand_right, hand_left):
+    for node in (measurement, hand_right, hand_left, reset_node):
         executor.add_node(node)
     executor_thread = threading.Thread(target=executor.spin, daemon=True, name="ros_bridge_exec")
     executor_thread.start()
@@ -417,6 +596,42 @@ def sim_loop(task, viewer=True, layout=None, style=None, seed=None, record_video
                     # /lowcmd, which held a stale-damping torque and toppled FAME.
                     sim_interface.write_ctrl()
                 mujoco.mj_step(model, data)
+                # Runtime freeze toggle request (from /hams/freeze_body).
+                # Re-freezing captures the CURRENT pose as the new pin.
+                if _frz_toggle['req'] is not None and _frz_base_qadr >= 0:
+                    _rq = _frz_toggle['req']
+                    _frz_toggle['req'] = None
+                    if _rq and not _frz_toggle['on']:
+                        _frz_base_qpos = data.qpos[_frz_base_qadr:_frz_base_qadr + 7].copy()
+                        _frz_lower_qpos = data.qpos[_frz_lower_qidx].copy()
+                        if band is not None:
+                            band.enabled = False
+                        print(f"[h12_mujoco] body FROZEN at t={data.time:.2f}s "
+                              "(runtime toggle)", flush=True)
+                    elif not _rq and _frz_toggle['on']:
+                        print(f"[h12_mujoco] body RELEASED at t={data.time:.2f}s "
+                              "(runtime toggle)", flush=True)
+                    _frz_toggle['on'] = _rq
+                # Between-trial arm reset window (works FROZEN OR NOT): pin the 14
+                # arm joints to home and overwrite their PD setpoint, so a stuck
+                # controller command can't drag the arm back off home while the
+                # window is open. Unfrozen, the lower body keeps its own dynamics.
+                _arm_pinned = float(data.time) < _arm_reset['until']
+                if _arm_pinned:
+                    data.qpos[_arm_qidx] = _arm_home_q
+                    data.qvel[_arm_vidx] = 0.0
+                    data.ctrl[_arm_cidx] = _arm_home_q
+                if _frz_toggle['on']:
+                    # Re-pin the pelvis + legs + torso to the pin pose after the
+                    # step so the body is perfectly static; only the arm DOFs
+                    # (and scene objects) evolve. mj_forward refreshes xpos/sensors
+                    # for the viewer + bridges to match the pinned pose.
+                    data.qpos[_frz_base_qadr:_frz_base_qadr + 7] = _frz_base_qpos
+                    data.qvel[_frz_base_dof:_frz_base_dof + 6] = 0.0
+                    data.qpos[_frz_lower_qidx] = _frz_lower_qpos
+                    data.qvel[_frz_lower_vidx] = 0.0
+                if _frz_toggle['on'] or _arm_pinned:
+                    mujoco.mj_forward(model, data)
                 # --- fall logger ---
                 if band is not None and _band_prev_on and not band.enabled:
                     _band_release_t = float(data.time)

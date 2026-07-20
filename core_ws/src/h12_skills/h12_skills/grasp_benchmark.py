@@ -39,6 +39,7 @@ Example (inside the hams_ros container, bringup already running):
 
 import argparse
 import json
+import os
 import threading
 import time
 
@@ -53,10 +54,11 @@ from rclpy.time import Time
 
 from geometry_msgs.msg import Pose
 from sensor_msgs.msg import CameraInfo, CompressedImage
-from std_msgs.msg import Bool, String
+from std_msgs.msg import Bool, Empty, String
 from tf2_ros import TransformException
 
 from custom_ros_messages.action import NamedConfig, SkillGrasp
+from magpie_msgs.msg import GripperState
 
 from .base import SkillsBase, GRASP_FRAMES, MIN_GRASP_POINTS
 from .perception_utils import (
@@ -85,6 +87,25 @@ SETTLE_SEC = 0.5           # let the arm come to rest before closing the fingers
 LIFT_SEC = 4.0
 HOLD_SEC = 2.0             # post-lift hold before judging success
 LIFT_DIST_M = 0.15
+
+# --success-mode contact (fixed targets like the fridge handle, which never lift):
+# success = the grasp executed AND the fingers came to rest ON the target rather than
+# shutting on air or never closing. We score the FINAL settled aperture (grip_final),
+# NOT a running minimum: the running min is polluted by the gripper's start state
+# (which, between trials, can be the previous grasp's closed jaw), whereas the final
+# aperture reflects only where the fingers ended up. Calibrated on live handle grasps:
+# a firm hold settles ~54 mm (the handle's width), an empty close bottoms out ~5 mm,
+# and a jaw that never closed stays ~100 mm. So a hold sits in (MIN, MAX).
+CONTACT_MIN_HOLD_MM = 20.0   # at/below this = fingers shut on ~nothing (empty air)
+CONTACT_MAX_HOLD_MM = 85.0   # at/above this = the jaw never actually closed on the target
+# Geometric target check: the aperture band alone cannot tell the ~54 mm handle
+# bar from the ~34 mm door EDGE (audit caught edge-clamps graded as successes).
+# Success additionally requires the fingertip to end within TIP_TO_HANDLE_MAX_MM
+# of a real handle-bar axis (world frame, via the sim's __pelvis__ ground truth).
+# OpenFridge seed-42 scene: two vertical bars, z-span 0.92-1.55 m.
+HANDLE_BARS_WORLD = (((3.537, -2.842), (0.92, 1.55)),   # left door bar
+                     ((3.536, -2.936), (0.92, 1.55)))   # right door bar
+TIP_TO_HANDLE_MAX_MM = 60.0
 SCAN_HEIGHT_M = 0.35       # wrist-camera standoff above the object for the scan
 TOP_LAYER_M = 0.025        # top-layer slab thickness for antipodal/PCA analysis
 FINGER_SINK_M = 0.02       # fingertip depth below the object's top surface
@@ -242,6 +263,10 @@ class GraspBenchmark(SkillsBase):
         self._finger_sink = FINGER_SINK_M
         self.named_config_cli = ActionClient(
             self, NamedConfig, '/named_config', callback_group=self._cb_group)
+        # Sim-side arm reset (h12_mujoco.py): pins the arm to home for a short
+        # window, deterministically recovering it when the controller's diff-IK
+        # leaves it in an unrecoverable raised pose between trials.
+        self._reset_arm_pub = self.create_publisher(Empty, '/hams/reset_arm', 10)
 
         wrist_ns = f'/realsense/{arm}_hand'
         self._wrist_color = None
@@ -265,6 +290,32 @@ class GraspBenchmark(SkillsBase):
         self.create_subscription(
             Bool, '/robocasa/success',
             lambda m: setattr(self, '_task_success', bool(m.data)), 10)
+
+        # Gripper feedback for --success-mode contact. Track the MIN opening and
+        # MAX force+contact seen since the last reset, so a firm close is captured
+        # even if the arm relaxes afterwards.
+        self._grip_last = {}
+        self._grip_min = {}
+        self._grip_maxf = {}
+        self._grip_contact = {}
+        for _a in ('left', 'right'):
+            self.create_subscription(
+                GripperState, f'/{_a}/gripper/state',
+                lambda m, aa=_a: self._on_grip(aa, m), qos_profile_sensor_data)
+
+    def _on_grip(self, arm, m):
+        p, f, c = float(m.position), float(m.force), bool(m.contact_detected)
+        self._grip_last[arm] = (round(p, 1), round(f, 1), c)
+        if arm not in self._grip_min or p < self._grip_min[arm]:
+            self._grip_min[arm] = round(p, 1)
+        if arm not in self._grip_maxf or f > self._grip_maxf[arm]:
+            self._grip_maxf[arm] = round(f, 1)
+        self._grip_contact[arm] = self._grip_contact.get(arm, False) or c
+
+    def reset_grip_track(self, arm):
+        self._grip_min.pop(arm, None)
+        self._grip_maxf.pop(arm, None)
+        self._grip_contact[arm] = False
 
     def _on_obj_poses(self, msg):
         try:
@@ -297,15 +348,24 @@ class GraspBenchmark(SkillsBase):
         return R.T @ (obj - p)
 
     # ------------------------------------------------------------------- homing
-    def go_home(self, duration_sec=8.0):
+    def go_home(self, duration_sec=6.0):
+        # Pin the arm home IN-SIM first (recovers a stuck raised pose the upper-body
+        # diff-IK cannot), then run named_config home while the pin holds: with qpos
+        # already home it converges immediately and latches the home JOINT target,
+        # so the controller setpoint stays home after the sim reset window closes
+        # (otherwise the arm drifts back to the stuck pose and the next grasp fails).
+        self._reset_arm_pub.publish(Empty())
+        time.sleep(0.4)
         goal = NamedConfig.Goal()
         goal.config_name = 'home'
         goal.duration.sec = int(duration_sec)
+        self._reset_arm_pub.publish(Empty())   # keep the pin open across the call
         resp = self._send_action(self.named_config_cli, goal,
                                  result_timeout=duration_sec + 15.0)
         ok = resp is not None and resp.result.success
         if not ok:
-            self.get_logger().warn('named_config home did not report success')
+            self.get_logger().warn('named_config home did not report success '
+                                   '(arm was pinned home in-sim regardless)')
         return ok
 
     # ------------------------------------------------------ wrist-camera cloud
@@ -411,7 +471,15 @@ class GraspBenchmark(SkillsBase):
                       else 106.0, 106.0)
         if not self.set_gripper(self.arm, open_mm):
             return False, -1, 'gripper pre-open failed'
-        for i, (raw_pose, label) in enumerate(candidates[:MAX_ATTEMPTS]):
+        max_attempts = getattr(self, '_max_attempts', MAX_ATTEMPTS)
+        # On a balancing base, back-to-back candidate goals shake the robot over
+        # (each unreachable attempt yanks the arm toward a new target). An
+        # inter-attempt pause lets the base recover between goals. Env-driven so
+        # rigid/hanging tiers are unaffected (default 0).
+        attempt_pause = float(os.environ.get('HAMS_ATTEMPT_PAUSE', '0') or 0)
+        for i, (raw_pose, label) in enumerate(candidates[:max_attempts]):
+            if i and attempt_pause > 0:
+                time.sleep(attempt_pause)
             # Drive the grasp _grasp_offset m deeper along its own approach axis
             # (mirrors the skill's GRASP_OFFSET): the contact servo tends to stop
             # ~1 cm short, so a small positive offset closes the fingers ONTO a
@@ -438,7 +506,10 @@ class GraspBenchmark(SkillsBase):
                     'closing anyway (grasp may be off-target)')
             time.sleep(SETTLE_SEC)
             self._debug_wrist_snapshot(f'contact_cand{i}')
-            if not self.close_gripper(self.arm, 1.0):
+            # close at the default grip force (Newtons); passing 1.0 here set a
+            # 1 N close — 30x weaker than the deployed skill — which stalled the jaw
+            # early and broke the contact reading. Use the calibrated default.
+            if not self.close_gripper(self.arm):
                 return False, i, 'gripper close failed'
             self._last_grasp_pose = pose
             return True, i, label
@@ -612,7 +683,7 @@ class GraspBenchmark(SkillsBase):
         for 'cheese'), so the box is what makes segmentation work. Keeping the
         detection identical across methods is also what makes the benchmark a fair
         comparison of grasp SYNTHESIS rather than of who got lucky with SAM."""
-        from .skills.grasp import GEMINI_GRASP_PROMPT
+        from .base import GEMINI_GRASP_PROMPT
         from .perception_utils import extract_json
         if width is None or height is None:
             info = self.latest_caminfo()
@@ -634,6 +705,37 @@ class GraspBenchmark(SkillsBase):
             return [px1, py1, px2, py2]
         except (ValueError, TypeError):
             return None
+
+    def _gt_point_cloud(self):
+        """GT-TARGETED perception control: crop the head cloud around a FIXED
+        WORLD point (the known handle-bar centre), converted to pelvis via the
+        sim's __pelvis__ pose. Removes the detector entirely — every tier and
+        method then targets the true handle regardless of camera viewpoint, so
+        the comparison isolates grasp synthesis/execution from perception."""
+        pel = self._obj_poses.get('__pelvis__')
+        if not pel or self._gt_point is None:
+            return None
+        p = np.array(pel[:3])
+        qw, qx, qy, qz = (float(v) for v in pel[3:7])
+        R = np.array([
+            [1 - 2*(qy*qy + qz*qz), 2*(qx*qy - qz*qw), 2*(qx*qz + qy*qw)],
+            [2*(qx*qy + qz*qw), 1 - 2*(qx*qx + qz*qz), 2*(qy*qz - qx*qw)],
+            [2*(qx*qz - qy*qw), 2*(qy*qz + qx*qw), 1 - 2*(qx*qx + qy*qy)],
+        ])
+        c = R.T @ (np.asarray(self._gt_point, dtype=float) - p)   # pelvis frame
+        scene = self.scene_to_cloud(target_frame='pelvis')
+        if scene is None:
+            return None
+        # the handle is a tall bar: crop a vertical capsule, not a ball
+        dxy = np.linalg.norm(scene[:, :2] - c[None, :2], axis=1)
+        dz = np.abs(scene[:, 2] - c[2])
+        obj = scene[(dxy <= 0.09) & (dz <= 0.35)]
+        self.get_logger().info(
+            f'[gt-point] {len(obj)}/{len(scene)} pts around handle '
+            f'(pelvis {c[0]:.3f},{c[1]:.3f},{c[2]:.3f})')
+        if len(obj) < MIN_GRASP_POINTS:
+            return None
+        return obj.astype(np.float32)
 
     def _gt_cloud(self):
         """Object cloud straight from ground truth: the whole head-camera cloud
@@ -678,8 +780,46 @@ class GraspBenchmark(SkillsBase):
         mask = self.segment(text=obj_text, positive_boxes=box)
         if mask is None:
             return None
+        # Brightness sanity guard — same rule as SkillsBase.detect_object_cloud:
+        # a dark mask means the detector boxed the fridge edge, not the white bar.
+        _bmin = float(os.environ.get('HAMS_MASK_BRIGHTNESS_MIN', '0') or 0)
+        if _bmin > 0:
+            b0 = self._mask_mean_brightness(mask)
+            if b0 is not None and b0 < _bmin:
+                self.get_logger().warn(
+                    f'boxed_cloud: mask brightness {b0:.0f} < {_bmin:.0f} — retrying '
+                    'with disambiguated prompt')
+                box2 = self._gemini_box(
+                    f'{obj_text} — the BRIGHT WHITE vertical bar mounted on the '
+                    'door front, NOT the dark fridge side edge or corner')
+                if box2 is not None:
+                    mask2 = self.segment(text=obj_text, positive_boxes=box2)
+                    if mask2 is not None:
+                        b2 = self._mask_mean_brightness(mask2)
+                        if b2 is not None and (b0 is None or b2 > b0):
+                            mask = mask2
         self._debug_mask_overlay(mask, box, 'perceive')
         cloud = self.mask_to_cloud(mask, target_frame='pelvis')
+        # Depth sanity guard — same rule as SkillsBase.detect_object_cloud: the
+        # handle protrudes (~0.5 m); door/edge depth (~0.9+ m) means wrong target.
+        _dmax = float(os.environ.get('HAMS_TARGET_MAX_DEPTH', '0') or 0)
+        if _dmax > 0 and cloud is not None and len(cloud):
+            d0 = float(np.median(np.linalg.norm(cloud[:, :2], axis=1)))
+            if d0 > _dmax:
+                self.get_logger().warn(
+                    f'boxed_cloud: cloud depth {d0:.2f} m > {_dmax:.2f} — retrying '
+                    'with disambiguated prompt')
+                box2 = self._gemini_box(
+                    f'{obj_text} — the bar that STICKS OUT toward the camera, '
+                    'NOT the flat door face or fridge side edge')
+                if box2 is not None:
+                    mask2 = self.segment(text=obj_text, positive_boxes=box2)
+                    if mask2 is not None:
+                        c2 = self.mask_to_cloud(mask2, target_frame='pelvis')
+                        if c2 is not None and len(c2):
+                            d2 = float(np.median(np.linalg.norm(c2[:, :2], axis=1)))
+                            if d2 < d0:
+                                cloud = c2
         if cloud is not None:
             c = cloud.mean(axis=0)
             self.get_logger().info(
@@ -825,6 +965,18 @@ def main():
     ap.add_argument('--out', default='', help='result JSON path')
     ap.add_argument('--success-dz', type=float, default=0.08,
                     help='ground-truth lift height that counts as success [m]')
+    ap.add_argument('--success-mode', default='lift', choices=('lift', 'contact'),
+                    help="how a grasp is scored. 'lift' (default): the object rises "
+                         "success-dz (counter objects that can be picked up). "
+                         "'contact': the grasp executes AND the fingers close ONTO "
+                         "the target (they stall in the holding band, not on air) — "
+                         "for FIXED targets like the fridge handle that never lift. "
+                         "contact mode also skips the post-grasp lift.")
+    ap.add_argument('--max-attempts', type=int, default=MAX_ATTEMPTS,
+                    help='ranked candidates the executor walks before giving up '
+                         '(analytic/graspgenx methods). Higher lets a kinematically '
+                         'hard target (e.g. a handle at the wrist-pitch limit) fall '
+                         'through to a lower-ranked but reachable grasp.')
     ap.add_argument('--grasp-offset', type=float, default=0.0,
                     help='drive each grasp this many metres deeper along its '
                          'approach axis before executing (grasp-quality knob for '
@@ -871,7 +1023,7 @@ def main():
                           box_source=args.box_source)
     node._do_plan = not args.no_plan
     node._grasp_offset = args.grasp_offset
-    node._finger_sink = args.finger_sink
+    node._max_attempts = args.max_attempts
     executor = MultiThreadedExecutor(num_threads=8)
     executor.add_node(node)
     spin = threading.Thread(target=executor.spin, daemon=True)
@@ -898,8 +1050,9 @@ def main():
             raise RuntimeError('no head-camera image (is the sim publishing?)')
 
         node.go_home()
-        if base is not None:
-            rec['gt_start'] = base.tolist()
+        rec['gt_start'] = base.tolist()
+        contact_mode = args.success_mode == 'contact'
+        node.reset_grip_track(args.arm)
 
         t0 = time.monotonic()
         if args.method == 'skill':
@@ -913,8 +1066,18 @@ def main():
             # --task-success mode, so hold in place there and let /robocasa/success
             # debounce instead.
             if ok:
-                if not args.task_success:
-                    node.lift_from_current()
+                # The skill's chosen pose never crosses the action boundary, so
+                # read the pose the graspgenx frame actually reached off TF (before
+                # any lift) for the after-the-fact grasp-line visualization.
+                cp = node.frame_pose_pelvis(GRASP_FRAMES[args.arm])
+                if cp is not None:
+                    rec['chosen_pose'] = dict(
+                        pos=[round(cp.position.x, 4), round(cp.position.y, 4),
+                             round(cp.position.z, 4)],
+                        quat=[round(cp.orientation.x, 5), round(cp.orientation.y, 5),
+                              round(cp.orientation.z, 5), round(cp.orientation.w, 5)])
+            if ok and not contact_mode:
+                node.lift_from_current()
                 time.sleep(HOLD_SEC)
             rec['exec_time_s'] = round(time.monotonic() - t0, 2)
         else:
@@ -923,23 +1086,97 @@ def main():
             if plan is None:
                 raise RuntimeError('grasp synthesis produced no candidates')
             rec['meta'] = plan['meta']
+            # Record the ranked candidate poses (pelvis frame) + labels for
+            # after-the-fact grasp-line visualization.
+            rec['candidates'] = [
+                dict(label=lbl,
+                     pos=[round(p.position.x, 4), round(p.position.y, 4),
+                          round(p.position.z, 4)],
+                     quat=[round(p.orientation.x, 5), round(p.orientation.y, 5),
+                           round(p.orientation.z, 5), round(p.orientation.w, 5)])
+                for p, lbl in plan['candidates'][:max(node._max_attempts, 8)]]
 
             t1 = time.monotonic()
             ok, idx, label = node.execute(plan['candidates'], plan['width_m'])
             rec.update(executed=ok, chosen_index=idx, chosen_label=label)
             if ok:
-                if not args.task_success:
-                    node.lift()
+                cp = node._last_grasp_pose
+                rec['chosen_pose'] = dict(
+                    pos=[round(cp.position.x, 4), round(cp.position.y, 4),
+                         round(cp.position.z, 4)],
+                    quat=[round(cp.orientation.x, 5), round(cp.orientation.y, 5),
+                          round(cp.orientation.z, 5), round(cp.orientation.w, 5)])
+            if ok and not contact_mode:
+                node.lift()
                 time.sleep(HOLD_SEC)
             rec['exec_time_s'] = round(time.monotonic() - t1, 2)
 
+        # Grade the hold carefully: sample the settled aperture TWICE (1 s and 3 s
+        # after the close) and require BOTH in the hold band and stable within
+        # 8 mm. On a dynamic base a single early read can misgrade a grasp that
+        # is still settling (or about to slip).
+        time.sleep(1.0)
+        g1 = node._grip_last.get(args.arm)
+        g1_mm = g1[0] if g1 else None
+        time.sleep(2.0)
         now = node.gt_pos(args.gt_name)
-        dz = float(now[2] - base[2]) if (now is not None and base is not None) else 0.0
+        dz = float(now[2] - base[2]) if now is not None else 0.0
+        gmin = node._grip_min.get(args.arm)
+        gmaxf = node._grip_maxf.get(args.arm)
+        gcontact = node._grip_contact.get(args.arm, False)
+        gfinal = node._grip_last.get(args.arm)
+        gfinal_mm = gfinal[0] if gfinal else None      # settled aperture after close
+        in_band = lambda g: g is not None and CONTACT_MIN_HOLD_MM < g < CONTACT_MAX_HOLD_MM
+        holding = bool(in_band(g1_mm) and in_band(gfinal_mm)
+                       and abs(gfinal_mm - g1_mm) < 8.0)
+        rec['grip_hold_early_mm'] = g1_mm
+
+        # Geometric target check: fingertip (executed graspgenx frame + TCP depth)
+        # mapped to WORLD via the sim's __pelvis__ ground truth must be near a real
+        # handle bar — the aperture band alone cannot tell the bar from the door
+        # edge. Records tip_to_handle_mm; gates contact-mode success.
+        tip_dist_mm = None
+        try:
+            fp = node.frame_pose_pelvis(GRASP_FRAMES[args.arm])
+            pel = node._obj_poses.get('__pelvis__')
+            if fp is not None and pel:
+                q = fp.orientation
+                x, y, z, w = q.x, q.y, q.z, q.w
+                Rg = np.array([
+                    [1-2*(y*y+z*z), 2*(x*y-z*w), 2*(x*z+y*w)],
+                    [2*(x*y+z*w), 1-2*(x*x+z*z), 2*(y*z-x*w)],
+                    [2*(x*z-y*w), 2*(y*z+x*w), 1-2*(x*x+y*y)]])
+                tip_p = (np.array([fp.position.x, fp.position.y, fp.position.z])
+                         + Rg[:, 2] * TCP_DEPTH_M)
+                pw = np.array(pel[:3])
+                qw_, qx_, qy_, qz_ = pel[3:7]
+                Rp = np.array([
+                    [1-2*(qy_*qy_+qz_*qz_), 2*(qx_*qy_-qz_*qw_), 2*(qx_*qz_+qy_*qw_)],
+                    [2*(qx_*qy_+qz_*qw_), 1-2*(qx_*qx_+qz_*qz_), 2*(qy_*qz_-qx_*qw_)],
+                    [2*(qx_*qz_-qy_*qw_), 2*(qy_*qz_+qx_*qw_), 1-2*(qx_*qx_+qy_*qy_)]])
+                tw = pw + Rp @ tip_p
+                dists = []
+                for (bx, by), (z0, z1) in HANDLE_BARS_WORLD:
+                    dxy = float(np.hypot(tw[0]-bx, tw[1]-by))
+                    dz = max(0.0, z0 - tw[2], tw[2] - z1)
+                    dists.append(float(np.hypot(dxy, dz)))
+                tip_dist_mm = round(min(dists) * 1000.0, 1)
+                rec['tip_world'] = [round(float(v), 4) for v in tw]
+        except Exception as e:                                   # noqa: BLE001
+            node.get_logger().warn(f'tip-to-handle check failed: {e}')
+        rec['tip_to_handle_mm'] = tip_dist_mm
+        on_handle = tip_dist_mm is not None and tip_dist_mm <= TIP_TO_HANDLE_MAX_MM
+        holding = holding and on_handle
         rec.update(gt_end=(now.tolist() if now is not None else None),
                    lift_dz_m=round(dz, 4),
-                   task_success=bool(node._task_success),
-                   success=(bool(node._task_success) if args.task_success
-                            else bool(ok and dz >= args.success_dz)))
+                   grip_min_mm=gmin, grip_max_force_n=gmaxf,
+                   grip_contact_flag=gcontact, grip_final_mm=gfinal_mm,
+                   grip_final=gfinal, holding=holding,
+                   task_success=node._task_success)
+        if contact_mode:
+            rec['success'] = bool(ok and holding)
+        else:
+            rec['success'] = bool(ok and dz >= args.success_dz)
     except Exception as e:                                    # noqa: BLE001
         rec['error'] = str(e)
         node.get_logger().error(f'benchmark episode failed: {e}')
