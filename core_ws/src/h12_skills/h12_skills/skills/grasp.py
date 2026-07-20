@@ -149,7 +149,11 @@ TARGET_FRAME = 'graspgenx_target_frame'
 # in servo_frame_to_world still bails genuinely out-of-reach candidates quickly,
 # so the extra budget is only spent on poses that are actually close to reachable.
 SERVO_DURATION_SEC = 15   # primary (iter-0) approach/contact IK move budget [s]
-SERVO_MAX_ITER = 6        # world-frame servo refinement passes per pose
+# World-frame refinement passes per pose. Env-tunable: on a DYNAMIC base
+# (standing policy) sustained pulling at a marginal candidate torques the base
+# over — fewer passes = brief correction then move on (harness sets
+# HAMS_SERVO_MAX_ITER=2 for the almi tier; default 6 elsewhere).
+SERVO_MAX_ITER = int(os.environ.get('HAMS_SERVO_MAX_ITER', '6') or 6)
 # Convergence tolerances for the grasp servo, relaxed from base.py's defaults
 # (5 mm / ~1.15 deg). Real-robot IK + pelvis drift rarely settle a 6-DOF grasp
 # pose that tight within SERVO_MAX_ITER passes, so accept a looser world-frame

@@ -16,6 +16,7 @@ gripper ops) are implemented here; each skill under skills/ composes them in its
 SkillsNode (node.py) multiply-inherits from SkillsBase plus every skill mixin.
 """
 
+import os
 import threading
 import time
 
@@ -382,6 +383,25 @@ class SkillsBase(Node):
         """Most recent head-camera color frame (sensor_msgs/CompressedImage), or None."""
         return self._latest_image
 
+    def _mask_mean_brightness(self, mask_msg):
+        """Mean grayscale brightness (0-255) of the latest color frame inside
+        `mask_msg` (mono8 Image), or None. Used by the detection brightness
+        guard: the white handle bar reads ~200+, the dark fridge edge ~60-90."""
+        import cv2
+        img_msg = self._latest_image
+        if img_msg is None or mask_msg is None:
+            return None
+        bgr = cv2.imdecode(np.frombuffer(bytes(img_msg.data), np.uint8),
+                           cv2.IMREAD_COLOR)
+        if bgr is None:
+            return None
+        m = (np.frombuffer(bytes(mask_msg.data), np.uint8)
+             .reshape(mask_msg.height, mask_msg.width) > 127)
+        if m.shape[:2] != bgr.shape[:2] or not m.any():
+            return None
+        gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
+        return float(gray[m].mean())
+
     def latest_caminfo(self):
         """Most recent color CameraInfo, or None."""
         return self._latest_caminfo
@@ -582,8 +602,65 @@ class SkillsBase(Node):
             mask = self.segment(text=obj, positive_boxes=box, outer_gh=gh)
             if mask is None:
                 return None, None, f'no mask for {obj!r}'
+            # Brightness sanity guard (HAMS_MASK_BRIGHTNESS_MIN, 0 = off): from a
+            # low camera viewpoint the detector confuses the DARK fridge edge for
+            # the WHITE handle bar. If the segmented region is darker than the
+            # threshold, re-ask once with a disambiguating description and keep
+            # the brighter of the two masks. No effect when detection is right
+            # (the real handle's mask is bright).
+            _bmin = float(os.environ.get('HAMS_MASK_BRIGHTNESS_MIN', '0') or 0)
+            if _bmin > 0:
+                b0 = self._mask_mean_brightness(mask)
+                self.get_logger().info(
+                    f'detect: mask brightness = '
+                    f'{"None" if b0 is None else round(b0)} (min {_bmin:.0f})')
+                if b0 is not None and b0 < _bmin:
+                    self.get_logger().warn(
+                        f'detect: mask brightness {b0:.0f} < {_bmin:.0f} — '
+                        'likely the dark fridge edge; retrying with '
+                        'disambiguated prompt')
+                    obj2 = (f'{obj} — the BRIGHT WHITE vertical bar mounted on '
+                            'the door front, NOT the dark fridge side edge or corner')
+                    box2 = (box_provider or self._gemini_box)(obj2, run, gh)
+                    mask2 = self.segment(text=obj, positive_boxes=box2, outer_gh=gh) \
+                        if box2 is not None else None
+                    if mask2 is not None:
+                        b2 = self._mask_mean_brightness(mask2)
+                        if b2 is not None and (b0 is None or b2 > b0):
+                            mask = mask2
+                            self.get_logger().info(
+                                f'detect: retry mask brighter ({b2:.0f}) — using it')
             obj_cloud = self.mask_to_cloud(mask, target_frame='pelvis')
             reason = f'{obj!r} mask produced no usable cloud'
+            # Depth sanity guard (HAMS_TARGET_MAX_DEPTH, 0 = off): the handle bar
+            # PROTRUDES toward the robot (~0.5 m in pelvis frame); the door face /
+            # fridge edge sits ~0.9-1.0 m away. A perceived cloud deeper than the
+            # threshold means the detector grabbed the door/edge — retry once with
+            # a disambiguating prompt and keep the NEARER cloud. Pure geometry, no
+            # ground truth.
+            _dmax = float(os.environ.get('HAMS_TARGET_MAX_DEPTH', '0') or 0)
+            if _dmax > 0 and obj_cloud is not None and len(obj_cloud):
+                d0 = float(np.median(np.linalg.norm(obj_cloud[:, :2], axis=1)))
+                self.get_logger().info(
+                    f'detect: cloud median forward depth = {d0:.2f} m (max {_dmax:.2f})')
+                if d0 > _dmax:
+                    self.get_logger().warn(
+                        'detect: perceived cloud is at DOOR depth, not handle '
+                        'depth — retrying with disambiguated prompt')
+                    obj2 = (f'{obj} — the bar that STICKS OUT toward the camera, '
+                            'mounted proud of the door surface; NOT the flat door '
+                            'face or the fridge side edge')
+                    box2 = (box_provider or self._gemini_box)(obj2, run, gh)
+                    if box2 is not None:
+                        mask2 = self.segment(text=obj, positive_boxes=box2, outer_gh=gh)
+                        if mask2 is not None:
+                            c2 = self.mask_to_cloud(mask2, target_frame='pelvis')
+                            if c2 is not None and len(c2):
+                                d2 = float(np.median(np.linalg.norm(c2[:, :2], axis=1)))
+                                self.get_logger().info(
+                                    f'detect: retry cloud depth = {d2:.2f} m')
+                                if d2 < d0:
+                                    obj_cloud = c2
         else:
             if box is None:
                 return None, None, f'no bounding box for {obj!r} (SAM disabled)'
@@ -872,7 +949,14 @@ class SkillsBase(Node):
                 return True
             # First move both failed to converge in pelvis AND left a large world
             # error => genuinely unreachable; bail so the caller tries the next grasp.
-            if i == 0 and not ok and (lin > 0.05 or ang > 0.20):
+            # Thresholds are env-tunable: on a DYNAMIC base (standing policy) the
+            # base's own transient motion can leave >5 cm world error after an
+            # otherwise-fine first pass — the refinement iterations exist exactly
+            # to fix that, so the gate must be looser there (harness sets
+            # HAMS_SERVO_FASTFAIL_LIN/_ANG for the almi tier; defaults unchanged).
+            _ff_lin = float(os.environ.get('HAMS_SERVO_FASTFAIL_LIN', '0.05') or 0.05)
+            _ff_ang = float(os.environ.get('HAMS_SERVO_FASTFAIL_ANG', '0.20') or 0.20)
+            if i == 0 and not ok and (lin > _ff_lin or ang > _ff_ang):
                 self.get_logger().warn(
                     f'servo[{frame}]: unreachable; caller tries next grasp')
                 return False
