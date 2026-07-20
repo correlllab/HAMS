@@ -23,10 +23,11 @@ controller_server:
       movement_time_allowance: 30.0
     goal_checker:
       plugin: "nav2_controller::SimpleGoalChecker"
-      # Humanoid RL gait (ALMI) wobbles around the setpoint; the 0.10 defaults
-      # are wheeled-robot tolerances it can never settle inside.
-      xy_goal_tolerance: 0.35
-      yaw_goal_tolerance: 0.60
+      # Real-verified reference values (fast_lio_nav2_humanoid); the earlier
+      # in-tree 0.10s had drifted tighter than anything a walking humanoid
+      # can settle inside.
+      xy_goal_tolerance: 0.25
+      yaw_goal_tolerance: 0.25
       stateful: True
     FollowPath:
       plugin: "nav2_regulated_pure_pursuit_controller::RegulatedPurePursuitController"
