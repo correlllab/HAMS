@@ -4,9 +4,11 @@ from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import (
     DeclareLaunchArgument,
+    IncludeLaunchDescription,
     TimerAction,
 )
 from launch.conditions import IfCondition
+from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import AndSubstitution, LaunchConfiguration, PythonExpression
 from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
@@ -67,6 +69,19 @@ def generate_launch_description():
         DeclareLaunchArgument('model_logging', default_value='true'),
         DeclareLaunchArgument('model_visualization', default_value='true'),
         DeclareLaunchArgument('model_clear_logs', default_value='true'),
+
+        # Both hand/wrist RealSense cameras and their camera->link static TFs.
+        # These live on the companion desktop (the wrists' USB runs here), while
+        # the head camera comes up with the onboard driver bringup
+        # (h1_real_drivers.launch.py). Equivalent of
+        # `ros2 launch cl_realsense h12_hand_cameras.launch.py`.
+        IncludeLaunchDescription(
+            PythonLaunchDescriptionSource(
+                os.path.join(
+                    get_package_share_directory('cl_realsense'),
+                    'launch', 'h12_hand_cameras.launch.py')
+            )
+        ),
 
         # vision foundation-model services (gemini + sam, served by model_server)
         Node(

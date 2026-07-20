@@ -15,6 +15,7 @@
   <exec_depend>h12_ros2_controller</exec_depend>
   <exec_depend>h12_safety_layer</exec_depend>
   <exec_depend>h12_lowerbody_rl</exec_depend>
+  <exec_depend>cl_realsense</exec_depend>
   <exec_depend>model_server</exec_depend>
   <exec_depend>custom_ros_messages</exec_depend>
   <exec_depend>magpie_msgs</exec_depend>
