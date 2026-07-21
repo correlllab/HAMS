@@ -6,6 +6,7 @@ Panels:
       Expanded:
         - /Global Options1
         - /Status1
+        - /TF1/Frames1
         - /HeadDepthImage1/Topic1
         - /HeadColorImage1/Topic1
         - /LeftDepthImage1/Topic1
@@ -14,15 +15,12 @@ Panels:
         - /RightColorImage1/Topic1
         - /PoseArray1/Topic1
         - /GraspGenMarkers1/Topic1
-        - /HeadPC21
         - /HeadPC21/Topic1
         - /LeftHandPC21/Topic1
         - /RightHandPC21/Topic1
         - /HeadAnnotatedImage1/Topic1
         - /LeftHandAnnotatedImage1/Topic1
         - /RightHandAnnotatedImage1/Topic1
-        - /FrontierMarkers1
-        - /FrontierMarkers1/Status1
       Splitter Ratio: 0.5
     Tree Height: 725
   - Class: rviz_common/Selection
@@ -42,7 +40,7 @@ Panels:
     Experimental: false
     Name: Time
     SyncMode: 0
-    SyncSource: ""
+    SyncSource: LeftHandPC2
 Visualization Manager:
   Class: ""
   Displays:
@@ -71,14 +69,22 @@ Visualization Manager:
         All Enabled: false
         body:
           Value: false
-        camera_color_optical_frame:
-          Value: true
         camera_init:
           Value: false
-        camera_link:
+        graspgenx_target_frame:
           Value: true
         head_camera_link:
-          Value: true
+          Value: false
+        head_color_frame:
+          Value: false
+        head_color_optical_frame:
+          Value: false
+        head_depth_frame:
+          Value: false
+        head_depth_optical_frame:
+          Value: false
+        head_link:
+          Value: false
         imu_link:
           Value: false
         left_ankle_pitch_link:
@@ -88,9 +94,19 @@ Visualization Manager:
         left_elbow_link:
           Value: false
         left_grasp_frame:
-          Value: true
+          Value: false
         left_graspgenx_frame:
           Value: true
+        left_hand_color_frame:
+          Value: false
+        left_hand_color_optical_frame:
+          Value: false
+        left_hand_depth_frame:
+          Value: false
+        left_hand_depth_optical_frame:
+          Value: false
+        left_hand_link:
+          Value: false
         left_hip_pitch_link:
           Value: false
         left_hip_roll_link:
@@ -162,9 +178,19 @@ Visualization Manager:
         right_elbow_link:
           Value: false
         right_grasp_frame:
-          Value: true
+          Value: false
         right_graspgenx_frame:
           Value: true
+        right_hand_color_frame:
+          Value: false
+        right_hand_color_optical_frame:
+          Value: false
+        right_hand_depth_frame:
+          Value: false
+        right_hand_depth_optical_frame:
+          Value: false
+        right_hand_link:
+          Value: false
         right_hip_pitch_link:
           Value: false
         right_hip_roll_link:
@@ -193,79 +219,99 @@ Visualization Manager:
       Show Axes: true
       Show Names: true
       Tree:
-        body:
-          pelvis:
-            left_hip_yaw_link:
-              left_hip_pitch_link:
-                left_hip_roll_link:
-                  left_knee_link:
-                    left_ankle_pitch_link:
-                      left_ankle_roll_link:
-                        {}
-            right_hip_yaw_link:
-              right_hip_pitch_link:
-                right_hip_roll_link:
-                  right_knee_link:
-                    right_ankle_pitch_link:
-                      right_ankle_roll_link:
-                        {}
-            torso_link:
-              head_camera_link:
-                {}
-              imu_link:
-                {}
-              left_shoulder_pitch_link:
-                left_shoulder_roll_link:
-                  left_shoulder_yaw_link:
-                    left_elbow_link:
-                      left_wrist_roll_link:
-                        left_wrist_pitch_link:
-                          left_wrist_yaw_link:
-                            left_grasp_frame:
-                              {}
-                            left_graspgenx_frame:
-                              {}
-                            lg_mount:
-                              lg_base_bot:
-                                lg_base_top:
-                                  lg_left_crank:
-                                    lg_left_finger:
-                                      lg_left_rocker:
-                                        {}
-                                  lg_right_crank:
-                                    lg_right_finger:
-                                      lg_right_rocker:
-                                        {}
-              livox_link:
-                {}
-              logo_link:
-                {}
-              right_shoulder_pitch_link:
-                right_shoulder_roll_link:
-                  right_shoulder_yaw_link:
-                    right_elbow_link:
-                      right_wrist_roll_link:
-                        right_wrist_pitch_link:
-                          right_wrist_yaw_link:
-                            rg_mount:
-                              rg_base_bot:
-                                rg_base_top:
-                                  rg_left_crank:
-                                    rg_left_finger:
-                                      rg_left_rocker:
-                                        {}
-                                  rg_right_crank:
-                                    rg_right_finger:
-                                      rg_right_rocker:
-                                        {}
-                            right_grasp_frame:
-                              {}
-                            right_graspgenx_frame:
-                              {}
-        camera_init:
-          {}
         map:
-          {}
+          camera_init:
+            body:
+              pelvis:
+                left_hip_yaw_link:
+                  left_hip_pitch_link:
+                    left_hip_roll_link:
+                      left_knee_link:
+                        left_ankle_pitch_link:
+                          left_ankle_roll_link:
+                            {}
+                right_hip_yaw_link:
+                  right_hip_pitch_link:
+                    right_hip_roll_link:
+                      right_knee_link:
+                        right_ankle_pitch_link:
+                          right_ankle_roll_link:
+                            {}
+                torso_link:
+                  head_camera_link:
+                    head_link:
+                      head_color_frame:
+                        head_color_optical_frame:
+                          {}
+                      head_depth_frame:
+                        head_depth_optical_frame:
+                          {}
+                  imu_link:
+                    {}
+                  left_shoulder_pitch_link:
+                    left_shoulder_roll_link:
+                      left_shoulder_yaw_link:
+                        left_elbow_link:
+                          left_wrist_roll_link:
+                            left_wrist_pitch_link:
+                              left_wrist_yaw_link:
+                                left_grasp_frame:
+                                  {}
+                                left_graspgenx_frame:
+                                  {}
+                                lg_mount:
+                                  left_hand_link:
+                                    left_hand_color_frame:
+                                      left_hand_color_optical_frame:
+                                        {}
+                                    left_hand_depth_frame:
+                                      left_hand_depth_optical_frame:
+                                        {}
+                                  lg_base_bot:
+                                    lg_base_top:
+                                      lg_left_crank:
+                                        lg_left_finger:
+                                          lg_left_rocker:
+                                            {}
+                                      lg_right_crank:
+                                        lg_right_finger:
+                                          lg_right_rocker:
+                                            {}
+                  livox_link:
+                    {}
+                  logo_link:
+                    {}
+                  right_shoulder_pitch_link:
+                    right_shoulder_roll_link:
+                      right_shoulder_yaw_link:
+                        right_elbow_link:
+                          right_wrist_roll_link:
+                            right_wrist_pitch_link:
+                              right_wrist_yaw_link:
+                                rg_mount:
+                                  rg_base_bot:
+                                    rg_base_top:
+                                      rg_left_crank:
+                                        rg_left_finger:
+                                          rg_left_rocker:
+                                            {}
+                                      rg_right_crank:
+                                        rg_right_finger:
+                                          rg_right_rocker:
+                                            {}
+                                  right_hand_link:
+                                    right_hand_color_frame:
+                                      right_hand_color_optical_frame:
+                                        {}
+                                    right_hand_depth_frame:
+                                      right_hand_depth_optical_frame:
+                                        {}
+                                right_grasp_frame:
+                                  {}
+                                right_graspgenx_frame:
+                                  {}
+            graspgenx_target_frame:
+              {}
       Update Interval: 0
       Value: true
     - Alpha: 1
@@ -815,7 +861,7 @@ Visualization Manager:
       Class: rviz_default_plugins/Map
       Color Scheme: map
       Draw Behind: false
-      Enabled: true
+      Enabled: false
       Name: Map
       Topic:
         Depth: 5
@@ -831,12 +877,12 @@ Visualization Manager:
         Reliability Policy: Reliable
         Value: /map_updates
       Use Timestamp: false
-      Value: true
+      Value: false
     - Alpha: 0.699999988079071
       Class: rviz_default_plugins/Map
       Color Scheme: map
       Draw Behind: false
-      Enabled: true
+      Enabled: false
       Name: GlobalCostMap
       Topic:
         Depth: 5
@@ -852,7 +898,7 @@ Visualization Manager:
         Reliability Policy: Reliable
         Value: /global_costmap/costmap_updates
       Use Timestamp: false
-      Value: true
+      Value: false
     - Alpha: 0.699999988079071
       Class: rviz_default_plugins/Map
       Color Scheme: map
@@ -1128,7 +1174,7 @@ Visualization Manager:
         Value: /frame_targets
       Value: false
     - Class: rviz_default_plugins/MarkerArray
-      Enabled: true
+      Enabled: false
       Name: GraspGenMarkers
       Namespaces:
         {}
@@ -1138,7 +1184,7 @@ Visualization Manager:
         History Policy: Keep Last
         Reliability Policy: Reliable
         Value: /graspgen_markers
-      Value: true
+      Value: false
     - Alpha: 1
       Autocompute Intensity Bounds: true
       Autocompute Value Bounds:
@@ -1253,7 +1299,7 @@ Visualization Manager:
       Color: 255; 255; 255
       Color Transformer: RGB8
       Decay Time: 0
-      Enabled: false
+      Enabled: true
       Invert Rainbow: false
       Max Color: 255; 255; 255
       Max Intensity: 4096
@@ -1274,7 +1320,7 @@ Visualization Manager:
         Value: /realsense/left_hand/depth/color/points
       Use Fixed Frame: true
       Use rainbow: true
-      Value: false
+      Value: true
     - Alpha: 1
       Autocompute Intensity Bounds: true
       Autocompute Value Bounds:
@@ -1287,7 +1333,7 @@ Visualization Manager:
       Color: 255; 255; 255
       Color Transformer: RGB8
       Decay Time: 0
-      Enabled: false
+      Enabled: true
       Invert Rainbow: false
       Max Color: 255; 255; 255
       Max Intensity: 4096
@@ -1308,9 +1354,9 @@ Visualization Manager:
         Value: /realsense/right_hand/depth/color/points
       Use Fixed Frame: true
       Use rainbow: true
-      Value: false
+      Value: true
     - Class: rviz_default_plugins/Image
-      Enabled: false
+      Enabled: true
       Max Value: 1
       Median window: 5
       Min Value: 0
@@ -1322,9 +1368,9 @@ Visualization Manager:
         History Policy: Keep Last
         Reliability Policy: Best Effort
         Value: /realsense/head/color/image_raw/compressed/annotated
-      Value: false
+      Value: true
     - Class: rviz_default_plugins/Image
-      Enabled: false
+      Enabled: true
       Max Value: 1
       Median window: 5
       Min Value: 0
@@ -1335,10 +1381,10 @@ Visualization Manager:
         Durability Policy: Volatile
         History Policy: Keep Last
         Reliability Policy: Best Effort
-        Value: /realsense/left_hand/color/image_rect_raw/compressed/annotated
-      Value: false
+        Value: /realsense/left_hand/color/image_raw/compressed/annotated
+      Value: true
     - Class: rviz_default_plugins/Image
-      Enabled: false
+      Enabled: true
       Max Value: 1
       Median window: 5
       Min Value: 0
@@ -1349,24 +1395,12 @@ Visualization Manager:
         Durability Policy: Volatile
         History Policy: Keep Last
         Reliability Policy: Best Effort
-        Value: /realsense/right_hand/color/image_rect_raw/compressed/annotated
-      Value: false
-    - Class: rviz_default_plugins/MarkerArray
-      Enabled: true
-      Name: FrontierMarkers
-      Namespaces:
-        {}
-      Topic:
-        Depth: 5
-        Durability Policy: Volatile
-        History Policy: Keep Last
-        Reliability Policy: Reliable
-        Value: /frontier_explore/frontiers
+        Value: /realsense/right_hand/color/image_raw/compressed/annotated
       Value: true
   Enabled: true
   Global Options:
     Background Color: 48; 48; 48
-    Fixed Frame: map
+    Fixed Frame: pelvis
     Frame Rate: 30
   Name: root
   Tools:
@@ -1409,29 +1443,29 @@ Visualization Manager:
   Views:
     Current:
       Class: rviz_default_plugins/Orbit
-      Distance: 3.987441062927246
+      Distance: 3.114797592163086
       Enable Stereo Rendering:
         Stereo Eye Separation: 0.05999999865889549
         Stereo Focal Distance: 1
         Swap Stereo Eyes: false
         Value: false
       Focal Point:
-        X: 0.42181214690208435
-        Y: 0.025078225880861282
-        Z: 0.3700871169567108
+        X: 0.6177334189414978
+        Y: -0.009289286099374294
+        Z: 0.1523815095424652
       Focal Shape Fixed Size: true
       Focal Shape Size: 0.05000000074505806
       Invert Z Axis: false
       Name: Current View
       Near Clip Distance: 0.009999999776482582
-      Pitch: 0.7247970700263977
+      Pitch: 0.6747972369194031
       Target Frame: <Fixed Frame>
       Value: Orbit (rviz_default_plugins)
-      Yaw: 4.78108024597168
+      Yaw: 3.279273748397827
     Saved: ~
 Window Geometry:
   Displays:
-    collapsed: false
+    collapsed: true
   HeadAnnotatedImage:
     collapsed: false
   HeadColorImage:
@@ -1440,14 +1474,14 @@ Window Geometry:
     collapsed: false
   Height: 1016
   Hide Left Dock: false
-  Hide Right Dock: false
+  Hide Right Dock: true
   LeftColorImage:
     collapsed: false
   LeftDepthImage:
     collapsed: false
   LeftHandAnnotatedImage:
     collapsed: false
-  QMainWindow State: 000000ff00000000fd0000000400000000000001560000035efc0200000010fb0000001200530065006c0065006300740069006f006e00000001e10000009b0000005c00fffffffb0000001e0054006f006f006c002000500072006f007000650072007400690065007302000001ed0000055d00000185000000a3fb000000120056006900650077007300200054006f006f02000001df000002110000018500000122fb000000200054006f006f006c002000500072006f0070006500720074006900650073003203000002880000011d000002210000017afb0000002000730065006c0065006300740069006f006e00200062007500660066006500720200000138000000aa0000023a00000294fb00000014005700690064006500530074006500720065006f02000000e6000000d2000003ee0000030bfb0000000c004b0069006e0065006300740200000186000001060000030c00000261fb0000001c00480065006100640043006f006c006f00720049006d006100670065000000003b000000cb0000002800fffffffb0000001c0048006500610064004400650070007400680049006d006100670065000000010c000000740000002800fffffffb0000001c004c0065006600740043006f006c006f00720049006d0061006700650000000186000000690000002800fffffffb0000001c004c006500660074004400650070007400680049006d00610067006500000001f5000000d00000002800fffffffb0000001e005200690067006800740043006f006c006f00720049006d00610067006500000002cb000000fa0000002800fffffffb0000001e00520069006700680074004400650070007400680049006d00610067006500000003cb000001310000002800fffffffb0000002400480065006100640041006e006e006f007400610074006500640049006d006100670065000000003b000001740000002800fffffffb0000002c004c00650066007400480061006e00640041006e006e006f007400610074006500640049006d006100670065000000003b000001f40000002800fffffffb0000002e0052006900670068007400480061006e00640041006e006e006f007400610074006500640049006d006100670065000000003b0000035e0000002800ffffff00000001000002420000035efc0200000004fb000000100044006900730070006c006100790073010000003b0000035e000000c700fffffffb0000001e0054006f006f006c002000500072006f00700065007200740069006500730100000041000000780000000000000000fb0000000a00560069006500770073000000015e0000023b000000a000fffffffb0000001200530065006c0065006300740069006f006e010000025a000000b200000000000000000000000200000490000000a9fc0100000001fb0000000a00560069006500770073030000004e00000080000002e100000197000000030000073a0000003efc0100000002fb0000000800540069006d006501000000000000073a0000025300fffffffb0000000800540069006d00650100000000000004500000000000000000000004f20000035e00000004000000040000000800000008fc0000000100000002000000010000000a0054006f006f006c00730100000000ffffffff0000000000000000
+  QMainWindow State: 000000ff00000000fd0000000400000000000001390000035efc0200000010fb0000001200530065006c0065006300740069006f006e00000001e10000009b0000005c00fffffffb0000001e0054006f006f006c002000500072006f007000650072007400690065007302000001ed0000039500000185000000a3fb000000120056006900650077007300200054006f006f02000001df000002110000018500000122fb000000200054006f006f006c002000500072006f0070006500720074006900650073003203000002880000011d000002210000017afb0000002000730065006c0065006300740069006f006e00200062007500660066006500720200000138000000aa0000023a00000294fb00000014005700690064006500530074006500720065006f02000000e6000000d2000003ee0000030bfb0000000c004b0069006e0065006300740200000186000001060000030c00000261fb0000001c00480065006100640043006f006c006f00720049006d006100670065000000003b000000cb0000002800fffffffb0000001c0048006500610064004400650070007400680049006d006100670065000000010c000000740000002800fffffffb0000001c004c0065006600740043006f006c006f00720049006d0061006700650000000186000000690000002800fffffffb0000001c004c006500660074004400650070007400680049006d00610067006500000001f5000000d00000002800fffffffb0000001e005200690067006800740043006f006c006f00720049006d00610067006500000002cb000000fa0000002800fffffffb0000001e00520069006700680074004400650070007400680049006d00610067006500000003cb000001310000002800fffffffb0000002400480065006100640041006e006e006f007400610074006500640049006d006100670065010000003b0000010c0000002800fffffffb0000002c004c00650066007400480061006e00640041006e006e006f007400610074006500640049006d006100670065010000014d0000009c0000002800fffffffb0000002e0052006900670068007400480061006e00640041006e006e006f007400610074006500640049006d00610067006501000001ef000001aa0000002800ffffff00000001000002260000035efc0200000004fb000000100044006900730070006c006100790073000000003b0000035e000000c700fffffffb0000001e0054006f006f006c002000500072006f00700065007200740069006500730100000041000000780000000000000000fb0000000a00560069006500770073000000015e0000023b000000a000fffffffb0000001200530065006c0065006300740069006f006e010000025a000000b200000000000000000000000200000490000000a9fc0100000001fb0000000a00560069006500770073030000004e00000080000002e100000197000000030000039d0000003efc0100000002fb0000000800540069006d006501000000000000039d0000025300fffffffb0000000800540069006d006501000000000000045000000000000000000000025e0000035e00000004000000040000000800000008fc0000000100000002000000010000000a0054006f006f006c00730100000000ffffffff0000000000000000
   RightColorImage:
     collapsed: false
   RightDepthImage:
@@ -1462,6 +1496,6 @@ Window Geometry:
     collapsed: false
   Views:
     collapsed: false
-  Width: 1850
-  X: 3555
-  Y: 1243
+  Width: 925
+  X: 995
+  Y: 27

@@ -10,6 +10,13 @@ one detection topic per image topic. Each bundle echoes the source image in
 `rgb_image` and carries every detection as a `Detection` (class string, xyxy box
 as bbox_min/bbox_max points, confidence).
 
+Each bundle also carries that camera's latest ALIGNED DEPTH frame and color
+`camera_info`, on topics derived from the image topic by realsense convention
+(see DEPTH_STREAM / CAMERA_INFO_STREAM). Because the depth is aligned to the
+color grid, a subscriber can back-project a detection box to a 3-D point with
+nothing but the bundle — that is what drives the hand-camera visual servo in
+h12_skills. Cameras that don't publish those streams get bundles without them.
+
 Alongside each detection topic it also publishes an annotated `sensor_msgs/Image`
 (the frame with the detection boxes drawn on it) on a sibling topic ending in
 `/annotated` — add that as an Image display in RViz to see the detections.
@@ -46,7 +53,7 @@ from rcl_interfaces.msg import ParameterDescriptor, ParameterType
 
 from cv_bridge import CvBridge
 
-from sensor_msgs.msg import CompressedImage, Image
+from sensor_msgs.msg import CameraInfo, CompressedImage, Image
 from geometry_msgs.msg import Point
 
 from ultralytics import YOLOWorld
@@ -78,13 +85,14 @@ YOLO_NMS_IOU = 0.01
 YOLO_HALF = False
 
 # Defaults for the pub/sub wiring (all overridable via ROS params, see below).
-# NB: the head camera publishes color on .../color/image_raw/compressed, but the
-# hand cameras only publish RECTIFIED color (.../color/image_rect_raw/compressed) —
-# their image_raw/compressed topic has no publisher. Match each accordingly.
+# All three cameras publish color on .../color/image_raw/compressed: the hand
+# cameras moved from image_rect_raw to image_raw when cl_realsense split out
+# h12_hand_cameras.launch.py (it enables the compressed plugin on
+# <name>.color.image_raw, realsense2_camera 4.58).
 DEFAULT_IMAGE_TOPICS = [
     "/realsense/head/color/image_raw/compressed",
-    "/realsense/left_hand/color/image_rect_raw/compressed",
-    "/realsense/right_hand/color/image_rect_raw/compressed",
+    "/realsense/left_hand/color/image_raw/compressed",
+    "/realsense/right_hand/color/image_raw/compressed",
 ]
 # Default open-vocabulary class prompts: the battery-workcell parts the
 # yolo_world_battery_best.pt checkpoint was fine-tuned on. Override live via the
@@ -96,6 +104,19 @@ DEFAULT_PUBLISH_RATE_HZ = 5.0
 # Suffix appended to an image topic to derive its detection topic when
 # `detection_topics` is not supplied explicitly.
 DETECTION_TOPIC_SUFFIX = "/detections"
+# Each bundle also carries the ALIGNED DEPTH frame and the color intrinsics for
+# its camera, so a subscriber can back-project a detection box to a 3-D point
+# without subscribing to the camera itself (h12_skills' hand-camera visual servo
+# is the consumer). Both topics are derived from the image topic by convention:
+#   /realsense/<cam>/color/image_raw/compressed
+#     -> /realsense/<cam>/aligned_depth_to_color/image_raw/compressedDepth
+#     -> /realsense/<cam>/color/camera_info
+# `aligned_depth_to_color` is depth resampled onto the COLOR pixel grid, so the
+# detection boxes index it directly — that alignment is what makes the echoed
+# depth usable. A camera that doesn't follow this layout simply never receives
+# frames on the derived topics, and its bundles go out with those fields empty.
+DEPTH_STREAM = "aligned_depth_to_color/image_raw/compressedDepth"
+CAMERA_INFO_STREAM = "color/camera_info"
 # Suffix for the per-camera annotated-image topic (raw sensor_msgs/Image with the
 # detection boxes drawn on it) — add this as an Image display in RViz.
 ANNOTATED_TOPIC_SUFFIX = "/annotated"
@@ -188,6 +209,12 @@ class _Channel:
         self.annotated_publisher = annotated_publisher  # sensor_msgs/Image
         self._img_lock = threading.Lock()
         self._latest = None  # most recent CompressedImage, or None until one arrives
+        # Latest aligned-depth frame + color intrinsics for THIS camera, echoed
+        # into every bundle so subscribers can back-project a box (see
+        # DEPTH_STREAM / CAMERA_INFO_STREAM). None until the first frame lands —
+        # a camera without these streams just publishes bundles without them.
+        self._latest_depth = None
+        self._latest_caminfo = None
 
     def set_latest(self, msg):
         with self._img_lock:
@@ -196,6 +223,21 @@ class _Channel:
     def take_latest(self):
         with self._img_lock:
             return self._latest
+
+    def set_depth(self, msg):
+        with self._img_lock:
+            self._latest_depth = msg
+
+    def set_caminfo(self, msg):
+        with self._img_lock:
+            self._latest_caminfo = msg
+
+    def take_depth_and_info(self):
+        """The latest (depth, camera_info) pair for this camera; either may be
+        None. Taken under one lock so a bundle can't mix a depth frame with
+        intrinsics from a different reconfiguration."""
+        with self._img_lock:
+            return self._latest_depth, self._latest_caminfo
 
 
 class YoloServer(Node):
@@ -259,10 +301,24 @@ class YoloServer(Node):
             self.create_subscription(
                 CompressedImage, img_topic, partial(self._on_image, ch),
                 qos_profile_sensor_data, callback_group=self._cb_group)
+            # Aligned depth + color intrinsics for the same camera, cached and
+            # echoed into the bundle (see DEPTH_STREAM / CAMERA_INFO_STREAM).
+            depth_topic = self._derive_camera_topic(img_topic, DEPTH_STREAM)
+            info_topic = self._derive_camera_topic(img_topic, CAMERA_INFO_STREAM)
+            if depth_topic and info_topic:
+                self.create_subscription(
+                    CompressedImage, depth_topic, partial(self._on_depth, ch),
+                    qos_profile_sensor_data, callback_group=self._cb_group)
+                self.create_subscription(
+                    CameraInfo, info_topic, partial(self._on_caminfo, ch),
+                    qos_profile_sensor_data, callback_group=self._cb_group)
             self.create_timer(period, partial(self._on_timer, ch),
                               callback_group=self._cb_group)
             self.get_logger().info(
                 f"  {img_topic}  ->  {det_topic}  (+ {ann_topic})")
+            self.get_logger().info(
+                f"      depth {depth_topic or '(none — non-realsense topic layout)'}"
+                f"  info {info_topic or '(none)'}")
 
         self.get_logger().info(
             f"yolo_server ready: {len(self._channels)} topic(s) @ {rate:.2f} Hz")
@@ -279,6 +335,17 @@ class YoloServer(Node):
         topic ending in '/annotated' (e.g. '.../compressed/annotated')."""
         return image_topic.rstrip("/") + ANNOTATED_TOPIC_SUFFIX
 
+    @staticmethod
+    def _derive_camera_topic(image_topic, stream):
+        """Sibling `stream` topic of a color image topic, or None when the topic
+        doesn't follow the realsense '<ns>/color/...' layout. Everything up to
+        '/color/' is the camera namespace, so
+        '/realsense/head/color/image_raw/compressed' + 'color/camera_info'
+        -> '/realsense/head/color/camera_info'."""
+        if "/color/" not in image_topic:
+            return None
+        return f"{image_topic.rsplit('/color/', 1)[0]}/{stream}"
+
     def _current_queries(self):
         """The class vocabulary, read live so `ros2 param set` retunes it."""
         return [str(q) for q in self.get_parameter("queries").value]
@@ -286,6 +353,14 @@ class YoloServer(Node):
     def _on_image(self, channel, msg):
         """Cache the latest frame for `channel`; inference happens on the timer."""
         channel.set_latest(msg)
+
+    def _on_depth(self, channel, msg):
+        """Cache the latest aligned-depth frame for `channel`'s camera."""
+        channel.set_depth(msg)
+
+    def _on_caminfo(self, channel, msg):
+        """Cache the latest color CameraInfo for `channel`'s camera."""
+        channel.set_caminfo(msg)
 
     def _on_timer(self, channel):
         """One inference/publish cycle for a single image topic."""
@@ -333,7 +408,7 @@ class YoloServer(Node):
         finally:
             self._lock.release()
 
-        bundle = self._build_bundle(msg, boxes, scores, class_ids, queries)
+        bundle = self._build_bundle(channel, msg, boxes, scores, class_ids, queries)
         channel.publisher.publish(bundle)
 
         n = int(boxes.shape[0])
@@ -363,14 +438,25 @@ class YoloServer(Node):
                 self._save_overlay_to_disk(rec, vis)
         rec.finish(success=True, message="ok")
 
-    def _build_bundle(self, image_msg, boxes, scores, class_ids, queries):
-        """Assemble a DetectionBundle: echo the source image and turn each detection
-        into a Detection (class string + xyxy box as bbox_min/bbox_max points)."""
+    def _build_bundle(self, channel, image_msg, boxes, scores, class_ids, queries):
+        """Assemble a DetectionBundle: echo the source image, the camera's latest
+        aligned depth + intrinsics, and turn each detection into a Detection
+        (class string + xyxy box as bbox_min/bbox_max points)."""
         bundle = DetectionBundle()
         # Echo the source frame so subscribers can correlate detections to pixels;
-        # its header carries the original stamp + frame_id. depth_image, camera_info
-        # and camera_pose are left at defaults (this node only has the RGB frame).
+        # its header carries the original stamp + frame_id. camera_pose is left at
+        # its default — subscribers get the pose from TF via the depth frame_id.
         bundle.rgb_image = image_msg
+        # Aligned depth + intrinsics let a subscriber back-project a box straight
+        # to a 3-D point in the camera optical frame. Both are the LATEST frames,
+        # not stamp-matched to the color frame: they are only meaningful for a
+        # roughly static scene, which is what the servo consumer assumes. Left
+        # empty when the camera publishes neither (see _derive_camera_topic).
+        depth_msg, caminfo_msg = channel.take_depth_and_info()
+        if depth_msg is not None:
+            bundle.depth_image = depth_msg
+        if caminfo_msg is not None:
+            bundle.camera_info = caminfo_msg
         detections = []
         for i in range(int(boxes.shape[0])):
             x1, y1, x2, y2 = (float(v) for v in boxes[i])

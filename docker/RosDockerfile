@@ -542,3 +542,18 @@ RUN BIN=/usr/local/lib/python3.10/dist-packages/mujoco_mpc/mjpc/agent_server; \
 b = pathlib.Path(mujoco_mpc.__file__).parent / 'mjpc' / 'agent_server'; \
 assert b.exists(), f'agent_server binary missing at {b}'; \
 print('MJPC OK — mujoco', mujoco.__version__, '| agent_server:', b)"
+
+# -----------------------------------------------------------------------------
+# Intel RealSense ROS driver — h1_real_desktop_bringup.launch.py now includes
+# cl_realsense's h12_hand_cameras.launch.py (both wrist cams' USB runs on the
+# companion desktop), which launches realsense2_camera_node. The apt package
+# pulls librealsense2 with it. image-transport-plugins supplies the
+# compressed/compressedDepth/theora transports — without at least one plugin
+# the realsense node's image publisher setup throws "No plugins found!".
+# Appended last (same layer-order reasoning as the blocks above) so adding
+# the driver can't bust the heavy layers earlier.
+# -----------------------------------------------------------------------------
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ros-humble-realsense2-camera \
+        ros-humble-image-transport-plugins \
+    && rm -rf /var/lib/apt/lists/*

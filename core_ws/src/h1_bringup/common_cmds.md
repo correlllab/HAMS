@@ -16,6 +16,11 @@ ros2 topic hz /lowstate          # sim/robot is alive and publishing state
 ros2 action list | grep -E 'skill|frame_task|named_config'
 ```
 
+**Timeouts:** every `/skill/*` goal takes a `timeout` Duration. **Omit it (or send
+zero) and the skill runs to completion** — it then ends only by finishing,
+failing, or being canceled, never on a clock. Give a non-zero `timeout` when you
+actually want a bound. Ctrl-C on `send_goal` cancels the in-flight goal.
+
 ---
 
 ## Frontier exploration (`/skill/frontier_explore`)
@@ -45,7 +50,8 @@ Field reference:
 ## Grasp (`/skill/grasp`)
 
 Pick up a named object. Does **not** lift after grasping — the skill computes the
-approach and grasp width itself. `arm` is `"left"` or `"right"`.
+approach and grasp width itself. `arm` is `"left"` or `"right"`; `""` (or
+`"none"`) auto-selects the arm currently closest to the object.
 
 ```bash
 ros2 action send_goal /skill/grasp custom_ros_messages/action/SkillGrasp \
@@ -59,6 +65,31 @@ ros2 action send_goal /skill/grasp custom_ros_messages/action/SkillGrasp \
   "{target_object: 'mug', arm: 'left', timeout: {sec: 60, nanosec: 0}}" \
   --feedback
 ```
+
+```bash
+# top-down + visual servo: auto arm, steep from above (battery-workcell part).
+# No timeout -> runs to completion; cancel with Ctrl-C to stop it.
+ros2 action send_goal /skill/grasp custom_ros_messages/action/SkillGrasp \
+  "{target_object: 'screw', arm: '', top_down: true, visual_servo: true}" \
+  --feedback
+```
+
+Optional goal fields (omit / `false` / `0` = off):
+
+| Field | Meaning |
+|---|---|
+| `top_down` | skip GraspGenX; build ONE synthetic grasp above the object — the tier-1 orientation (forward azimuth, fingers across pelvis ±Y, level wrist) pitched `TOP_DOWN_PITCH_DEG` = 80° below horizontal, base backed 0.1146 m off along that approach so the fingers close on the cloud centroid. Still steeper than the arm's ~45° practical reach, and there is no second candidate to fall back to, so an unreachable pose aborts the skill. |
+| `min_downward_pitch_deg` | keep only GraspGenX grasps approaching at least this far below horizontal (a *minimum* pitch, not proximity to vertical) |
+| `visual_servo` | at the pre-grasp, close the loop on the arm's hand camera: translate (orientation frozen) until the object is centered at `VISUAL_SERVO_DEPTH_M` = 0.10 m, then close **there** instead of running the contact descent. Tolerance 5 mm lateral / 2 mm range (the arm's own IK settles to ~1.2 mm, so tighter than ~4 mm lateral is unreachable and just burns the budget), 90 s budget (~50 corrections). If it can't converge or sees no detection the skill **aborts** — there is no open-loop fallback, so the result tells you the grasp was never aligned. Only works for the 7 YOLO battery classes — the hand detector knows nothing else. |
+
+Small battery-workcell parts (`Bolt`, `BusBar`, `InteriorScrew`, `Nut`,
+`OrageCover`, `Screw`, `ScrewHole`) are routed to the head-camera YOLO detector
+and the raw bounding-box cloud instead of Gemini + SAM — no goal field needed,
+the match is on `target_object`.
+
+The full sequence runs: pre-grasp standoff → contact move (`APPROACH_DIST −
+CONTACT_OFFSET` = 7.5 cm along the approach) → force close at
+`base.GRIP_FORCE_N`. It does **not** lift afterwards.
 
 ---
 

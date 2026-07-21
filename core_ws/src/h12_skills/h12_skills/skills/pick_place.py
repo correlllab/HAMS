@@ -9,8 +9,8 @@ Flow (one _Run budget across every phase):
             held-object geometry come back through _last_grasp_outcome (see
             skills/grasp.py — the action messages are unchanged), and the
             reached gripper aperture confirms an object is actually held.
-  carry   — lift straight up, then transit to a standoff directly ABOVE the
-            commanded release pose.
+  carry   — lift straight up in LIFT_STEP increments, then transit to a
+            standoff directly ABOVE the commanded release pose.
   place   — descend vertically until the held object's centroid sits
             rest_height above the place target's top face. The descent is
             grasp-agnostic — the OBJECT always arrives from above, whatever the
@@ -51,7 +51,7 @@ from tf2_ros import TransformException
 
 from custom_ros_messages.action import SkillGrasp, SkillPickPlace
 
-from ..base import _Run, GRASP_FRAMES, WORLD_FRAME
+from ..base import _Run, GRASP_FRAMES, SLOW_MODE_TIME_SCALE, WORLD_FRAME
 from ..perception_utils import pose_to_matrix, matrix_to_pose, transform_to_matrix
 from .grasp import (get_approach_pose, _approach_target_tf, _pose_at,
                     SERVO_DURATION_SEC, SERVO_MAX_ITER, SERVO_LIN_TOL,
@@ -66,7 +66,16 @@ from .grasp import (get_approach_pose, _approach_target_tf, _pose_at,
 # re-expressed through the fixed URDF offset (_place_frame_offset).
 PLACE_FRAMES = {'left': 'left_grasp_frame', 'right': 'right_grasp_frame'}
 
-LIFT_HEIGHT = 0.12       # [m] straight-up lift after the grasp closes
+LIFT_HEIGHT = 0.30       # [m] total straight-up lift after the grasp closes
+# [m] per-waypoint increment of that lift: the rise is commanded as a ladder of
+# LIFT_STEP moves instead of one LIFT_HEIGHT move, so the arm clears the pick
+# site in short committed hops that stay interruptible. Each waypoint is an
+# ABSOLUTE offset from the executed grasp pose, so servo error at one rung
+# cannot accumulate into the next.
+LIFT_STEP = 0.05
+# [s] commanded motion time per lift increment (a 5 cm hop does not need the
+# full SERVO_DURATION_SEC the 12 cm one-shot lift used).
+LIFT_STEP_DURATION_SEC = 4.0
 PRE_PLACE_DIST = 0.10    # [m] pre-place standoff straight above the release pose
 # [m] release the object this far above its rest pose. Keep it >= the place
 # servo's convergence tolerance (SERVO_LIN_TOL, 25 mm): a tolerance larger than
@@ -202,13 +211,25 @@ class PickPlaceSkill:
         # --- carry: lift, then transit to the pre-place standoff ----------------
         if not run.phase('carry', 0.55):
             return run.result
-        lift = copy.deepcopy(outcome.pose)
-        lift.position.z += LIFT_HEIGHT
-        if not self._servo_pose(place_frame, to_place(lift), world_ok, gh,
-                                do_plan=False):
-            return run.abort('lift after grasp failed')
-        if gh.is_cancel_requested or run.remaining() <= 0.0:
-            return run.abort('canceled or timed out during carry')
+        # Rise to LIFT_HEIGHT as a ladder of LIFT_STEP hops. Every rung is an
+        # absolute offset from the executed grasp pose (no error accumulation),
+        # and the budget check between rungs keeps the long lift interruptible.
+        n_rungs = max(1, int(round(LIFT_HEIGHT / LIFT_STEP)))
+        for k in range(1, n_rungs + 1):
+            dz = min(k * LIFT_STEP, LIFT_HEIGHT)
+            lift = copy.deepcopy(outcome.pose)
+            lift.position.z += dz
+            if not self._servo_pose(place_frame, to_place(lift), world_ok, gh,
+                                    do_plan=False,
+                                    duration_sec=LIFT_STEP_DURATION_SEC):
+                return run.abort(
+                    f'lift after grasp failed at {dz * 100:.0f}cm of '
+                    f'{LIFT_HEIGHT * 100:.0f}cm')
+            if gh.is_cancel_requested or run.remaining() <= 0.0:
+                return run.abort('canceled or timed out during carry')
+        self.get_logger().info(
+            f'pick_place: lifted {LIFT_HEIGHT * 100:.0f}cm in {n_rungs} x '
+            f'{LIFT_STEP * 100:.0f}cm increments')
         if not self._servo_pose(place_frame, to_place(pre_place), world_ok, gh,
                                 do_plan=True):
             return run.abort('pre-place pose unreachable')
@@ -217,8 +238,12 @@ class PickPlaceSkill:
         if not run.phase('place', 0.75):
             return run.result
         place_cmd = to_place(place_pose)
+        # Slow: this descent lowers a held object onto the stack, and the stall
+        # detection below only distinguishes early touchdown from a failed
+        # descent AFTER the fact — at full speed a misjudged rest_height presses
+        # the object into the stack before that check ever runs.
         if not self._servo_pose(place_frame, place_cmd, world_ok, gh,
-                                do_plan=False):
+                                do_plan=False, slow_mode=True):
             if gh.is_cancel_requested or run.remaining() <= 0.0:
                 return run.abort('canceled or timed out during place')
             # A stall NEAR the release pose is early touchdown (rest_height is a
@@ -243,13 +268,16 @@ class PickPlaceSkill:
         # Two-step retreat: back the open fingers out along the reverse grasp
         # approach so they can't catch the just-placed object, THEN rise clear of
         # the stack. Best-effort — the object is already placed.
+        # Both retreat legs run slow: the open fingers are still inside the
+        # just-placed object's footprint, so a fast withdrawal is what knocks it
+        # off the stack.
         retract = get_approach_pose(place_pose, -RETRACT_DIST)
         ok_clear = self._servo_pose(place_frame, to_place(retract), world_ok, gh,
-                                    do_plan=False)
+                                    do_plan=False, slow_mode=True)
         rise = copy.deepcopy(retract)
         rise.position.z += PRE_PLACE_DIST
         ok_rise = self._servo_pose(place_frame, to_place(rise), world_ok, gh,
-                                   do_plan=False)
+                                   do_plan=False, slow_mode=True)
         if not (ok_clear and ok_rise):
             self.get_logger().warn('pick_place: post-release retreat incomplete')
         return run.succeed(
@@ -267,9 +295,16 @@ class PickPlaceSkill:
         inner = SkillGrasp.Goal()
         inner.target_object = obj
         inner.arm = arm
-        whole = int(inner_timeout)
-        inner.timeout = Duration(
-            sec=whole, nanosec=int(round((inner_timeout - whole) * 1e9)))
+        if inner_timeout == float('inf'):
+            # This goal carries no deadline (timeout 0 = run to completion, see
+            # DEFAULT_SKILL_TIMEOUT), so remaining() is infinite and can't be put
+            # in an integer Duration. Hand the inner grasp a zero Duration, which
+            # means exactly the same thing — the semantic propagates unchanged.
+            inner.timeout = Duration(sec=0, nanosec=0)
+        else:
+            whole = int(inner_timeout)
+            inner.timeout = Duration(
+                sec=whole, nanosec=int(round((inner_timeout - whole) * 1e9)))
 
         def _proxy(feedback_msg):
             run.feedback.phase = 'grasp'
@@ -291,11 +326,15 @@ class PickPlaceSkill:
         return outcome, None
 
     def _servo_pose(self, frame, pose, world_ok, gh, do_plan,
-                    duration_sec=SERVO_DURATION_SEC):
+                    duration_sec=SERVO_DURATION_SEC, slow_mode=False):
         """Drive URDF frame `frame` to `pose` — a Pose in WORLD_FRAME when
         `world_ok` (drift-compensated servo; the pelvis fallback is re-resolved
         fresh at call time), else a pelvis-frame Pose driven directly. Same
-        relaxed tolerances as the grasp skill's servo."""
+        relaxed tolerances as the grasp skill's servo.
+
+        `slow_mode` runs the move at the frame_task server's quarter speed AND
+        scales `duration_sec` by SLOW_MODE_TIME_SCALE to match, since the
+        duration is a timeout rather than a trajectory time."""
         if world_ok:
             world_pose, fallback = pose, self._transform_pose(
                 pose, WORLD_FRAME, 'pelvis')
@@ -307,8 +346,10 @@ class PickPlaceSkill:
             world_pose, fallback = None, pose
         return self.servo_frame_to_world(
             frame, world_pose, fallback, outer_gh=gh,
-            duration_sec=duration_sec, max_iter=SERVO_MAX_ITER,
-            lin_tol=SERVO_LIN_TOL, ang_tol=SERVO_ANG_TOL, do_plan=do_plan)
+            duration_sec=duration_sec * (SLOW_MODE_TIME_SCALE if slow_mode else 1.0),
+            max_iter=SERVO_MAX_ITER,
+            lin_tol=SERVO_LIN_TOL, ang_tol=SERVO_ANG_TOL, do_plan=do_plan,
+            slow_mode=slow_mode)
 
     def _place_frame_offset(self, arm):
         """Fixed rigid transform (4x4) of the arm's pinch-point grasp frame
