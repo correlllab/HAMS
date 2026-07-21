@@ -12,7 +12,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .adapter import MemoryAdapter
-from .metrics import aggregate_episode_summaries, score_query, summarize_episode
+from .metrics import (
+    aggregate_episode_summaries,
+    score_location_query,
+    score_query,
+    summarize_episode,
+)
 from .report import write_reports
 
 
@@ -29,6 +34,7 @@ BUILTIN_ADAPTERS = {
     "embodied_agent_vlm": (
         "benchmarks.spatial_memory.embodied_agent_vlm_adapter:EmbodiedAgentVLMAdapter"
     ),
+    "vlmaps": "benchmarks.spatial_memory.vlmaps_adapter:VLMapsAdapter",
 }
 
 
@@ -84,6 +90,10 @@ def _validate_episode_contract(episode_dir: Path) -> tuple[list[dict], list[dict
             path = (episode_dir / observation[key]).resolve()
             if episode_dir.resolve() not in path.parents or not path.is_file():
                 raise RuntimeError(f"invalid observation {key}: {path}")
+        if observation.get("depth_path") is not None:
+            depth_path = (episode_dir / observation["depth_path"]).resolve()
+            if episode_dir.resolve() not in depth_path.parents or not depth_path.is_file():
+                raise RuntimeError(f"invalid observation depth_path: {depth_path}")
     for query in queries:
         if int(query["checkpoint_frame"]) not in expected:
             raise RuntimeError(f"invalid query checkpoint: {query}")
@@ -150,11 +160,10 @@ def evaluate_episode(
                         query, diagnostics
                     ),
                     "candidates": candidate_records,
-                    "metrics": score_query(
-                        query,
-                        candidate_ids,
-                        top_k,
-                    ),
+                    "metrics": {
+                        **score_query(query, candidate_ids, top_k),
+                        **score_location_query(query, candidate_records),
+                    },
                 }
                 query_results.append(result)
                 print(
@@ -180,7 +189,10 @@ def evaluate(args) -> Path:
     dataset_dir = Path(args.dataset).resolve()
     with open(dataset_dir / "benchmark_manifest.json", encoding="utf-8") as file:
         manifest = json.load(file)
-    if manifest.get("benchmark_id") != "robocasa_object_relocation_v1":
+    if manifest.get("benchmark_id") not in {
+        "robocasa_object_relocation_v1",
+        "robocasa_object_relocation_v2",
+    }:
         raise RuntimeError("unsupported benchmark dataset")
 
     episode_records = manifest["episodes"]

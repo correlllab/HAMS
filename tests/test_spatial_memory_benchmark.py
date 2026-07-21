@@ -1,6 +1,10 @@
 import unittest
 
-from benchmarks.spatial_memory.metrics import score_query, summarize_episode
+from benchmarks.spatial_memory.metrics import (
+    score_location_query,
+    score_query,
+    summarize_episode,
+)
 
 
 class SpatialMemoryMetricTests(unittest.TestCase):
@@ -109,6 +113,26 @@ class SpatialMemoryMetricTests(unittest.TestCase):
         self.assertEqual(summary["vlm_fallback_rate"], 0.5)
         self.assertEqual(summary["vlm_faiss_recall_pool_hit_rate"], 1.0)
         self.assertEqual(summary["vlm_faiss_recall_pool_coverage"], 0.5)
+
+    def test_scores_map_native_location_and_stale_position(self):
+        query = {
+            "target_position_world_xyz": [2.0, 0.0, 1.0],
+            "stale_target_position_world_xyz": [0.0, 0.0, 1.0],
+        }
+        metrics = score_location_query(query, [{
+            "metadata": {"predicted_world_xyz": [1.8, 0.0, 1.0]},
+        }])
+        self.assertAlmostEqual(metrics["location_error_m_top1"], 0.2)
+        self.assertEqual(metrics["location_success_at_0_5m"], 1.0)
+        self.assertEqual(metrics["stale_location_top1"], 0.0)
+
+    def test_frame_only_adapter_has_no_location_metric(self):
+        metrics = score_location_query(
+            {"target_position_world_xyz": [1.0, 2.0, 3.0]},
+            [{"metadata": {"robot_pose": [1.0, 2.0, 0.0]}}],
+        )
+        self.assertIsNone(metrics["location_error_m_top1"])
+        self.assertIsNone(metrics["location_success_at_0_5m"])
 
 
 if __name__ == "__main__":

@@ -9,6 +9,7 @@ records and simulator oracle labels are deliberately stored in separate files.
 The sensor side remains compatible with EmbodiedAgent's scan importer::
 
     color/000000.png
+    depth/000000.npy             # float32 meters, zero means no return
     robot_xy/000000.txt
     frame_meta/000000.json
 
@@ -47,10 +48,15 @@ from spatial_memory_scan import (
     _write_contact_sheet,
     write_frame_atomic,
 )
+from spatial_memory_geometry import (
+    CAMERA_FRAME,
+    camera_intrinsics_from_fovy,
+    camera_to_world_from_mujoco,
+)
 
 
-SCHEMA_VERSION = 1
-BENCHMARK_ID = "robocasa_object_relocation_v1"
+SCHEMA_VERSION = 2
+BENCHMARK_ID = "robocasa_object_relocation_v2"
 TARGET_NAME = "target"
 
 
@@ -303,8 +309,8 @@ def _render_rgb_and_visibility(
     camera: mujoco.MjvCamera,
     option: mujoco.MjvOption,
     target_geom_ids: set[int],
-) -> tuple[np.ndarray, int]:
-    """Render RGB and count pixels visually affected by the target.
+) -> tuple[np.ndarray, np.ndarray, int, np.ndarray]:
+    """Render RGB-D, target visibility, and the exact rendered camera pose.
 
     MuJoCo 3.3's segmentation remap can index past its temporary table for some
     Objaverse assets whose scene ``segid`` values are sparse. A paired normal /
@@ -327,7 +333,25 @@ def _render_rgb_and_visibility(
         model.geom_group[geom_ids] = original_groups
     difference = np.abs(rgb.astype(np.int16) - background.astype(np.int16))
     visible_pixels = int((difference.max(axis=2) > 8).sum())
-    return rgb, visible_pixels
+
+    renderer.enable_depth_rendering()
+    renderer.update_scene(data, camera=camera, scene_option=option)
+    gl_camera = renderer.scene.camera[0]
+    camera_to_world = camera_to_world_from_mujoco(
+        gl_camera.pos,
+        gl_camera.forward,
+        gl_camera.up,
+    )
+    depth_m = np.asarray(renderer.render(), dtype=np.float32).copy()
+    renderer.disable_depth_rendering()
+    zfar = float(model.vis.map.zfar * model.stat.extent)
+    invalid = (
+        ~np.isfinite(depth_m)
+        | (depth_m <= 0.0)
+        | (depth_m >= 0.999 * zfar)
+    )
+    depth_m[invalid] = 0.0
+    return rgb, depth_m, visible_pixels, camera_to_world
 
 
 def _object_pose(env) -> list[float]:
@@ -384,7 +408,13 @@ def _episode_timestamp(frame_idx: int, interval_seconds: float) -> str:
     )
 
 
-def _build_queries(observations: list[dict], oracle_frames: list[dict], target: dict) -> list[dict]:
+def _build_queries(
+    observations: list[dict],
+    oracle_frames: list[dict],
+    target: dict,
+    target_pose_a: list[float],
+    target_pose_b: list[float],
+) -> list[dict]:
     lap1_visible = [
         item["observation_id"] for item in oracle_frames
         if item["lap"] == 1 and item["target_visible"]
@@ -409,6 +439,8 @@ def _build_queries(observations: list[dict], oracle_frames: list[dict], target: 
             "text": f"Find the {language}",
             "relevant_observation_ids": lap1_visible,
             "stale_observation_ids": [],
+            "target_position_world_xyz": target_pose_a[:3],
+            "stale_target_position_world_xyz": None,
         }
     ]
     first_visible_lap2 = next(
@@ -437,6 +469,8 @@ def _build_queries(observations: list[dict], oracle_frames: list[dict], target: 
             ),
             "relevant_observation_ids": visible_so_far,
             "stale_observation_ids": lap1_visible,
+            "target_position_world_xyz": target_pose_b[:3],
+            "stale_target_position_world_xyz": target_pose_a[:3],
         })
     queries.extend([
         {
@@ -446,6 +480,8 @@ def _build_queries(observations: list[dict], oracle_frames: list[dict], target: 
             "text": f"Where was the {language} before it moved?",
             "relevant_observation_ids": lap1_visible,
             "stale_observation_ids": [],
+            "target_position_world_xyz": target_pose_a[:3],
+            "stale_target_position_world_xyz": None,
         },
         {
             "query_id": "absent_end_lap2",
@@ -454,6 +490,8 @@ def _build_queries(observations: list[dict], oracle_frames: list[dict], target: 
             "text": "Find a teddy bear",
             "relevant_observation_ids": [],
             "stale_observation_ids": [],
+            "target_position_world_xyz": None,
+            "stale_target_position_world_xyz": None,
         },
     ])
     return queries
@@ -465,7 +503,7 @@ def generate_episode(args, episode_index: int, object_group: str) -> dict:
     episode_dir = Path(args.output) / "episodes" / episode_id
     if episode_dir.exists():
         raise RuntimeError(f"episode output already exists: {episode_dir}")
-    for directory in ("color", "robot_xy", "frame_meta", "oracle"):
+    for directory in ("color", "depth", "robot_xy", "frame_meta", "oracle"):
         (episode_dir / directory).mkdir(parents=True, exist_ok=True)
 
     env = None
@@ -526,6 +564,11 @@ def generate_episode(args, episode_index: int, object_group: str) -> dict:
             args.visibility_pixels,
             math.ceil(args.image_size * args.image_size * args.visibility_fraction),
         )
+        intrinsics = camera_intrinsics_from_fovy(
+            args.image_size,
+            args.image_size,
+            args.fovy,
+        )
 
         for lap in (1, 2):
             if lap == 2:
@@ -543,7 +586,7 @@ def generate_episode(args, episode_index: int, object_group: str) -> dict:
                     camera, x, y, camera_z, yaw, args.pitch, args.look_distance
                 )
 
-                rgb, target_pixels = _render_rgb_and_visibility(
+                rgb, depth_m, target_pixels, camera_to_world = _render_rgb_and_visibility(
                     renderer,
                     model,
                     data,
@@ -567,9 +610,13 @@ def generate_episode(args, episode_index: int, object_group: str) -> dict:
                         "fovy_deg": args.fovy,
                         "width": args.image_size,
                         "height": args.image_size,
+                        "intrinsics": intrinsics.tolist(),
+                        "camera_to_world": camera_to_world.tolist(),
+                        "coordinate_frame": CAMERA_FRAME,
                         "lap": lap,
                         "route_index": route_item["route_index"],
                     },
+                    depth_m=depth_m,
                 )
                 observation_id = f"obs_{frame_idx:06d}"
                 observations.append({
@@ -579,8 +626,13 @@ def generate_episode(args, episode_index: int, object_group: str) -> dict:
                     "route_index": route_item["route_index"],
                     "timestamp": timestamp,
                     "image_path": frame_meta["image_path"],
+                    "depth_path": frame_meta["depth_path"],
+                    "depth_unit": frame_meta["depth_unit"],
                     "pose_path": frame_meta["pose_path"],
                     "robot_pose": frame_meta["robot_pose"],
+                    "camera_intrinsics": intrinsics.tolist(),
+                    "camera_to_world": camera_to_world.tolist(),
+                    "camera_coordinate_frame": CAMERA_FRAME,
                 })
                 oracle_frames.append({
                     "observation_id": observation_id,
@@ -597,7 +649,13 @@ def generate_episode(args, episode_index: int, object_group: str) -> dict:
                     f"lap={lap} route={route_item['route_index']} target_pixels={target_pixels}"
                 )
 
-        queries = _build_queries(observations, oracle_frames, target)
+        queries = _build_queries(
+            observations,
+            oracle_frames,
+            target,
+            pose_a,
+            pose_b,
+        )
         _write_jsonl(episode_dir / "observations.jsonl", observations)
         _write_jsonl(episode_dir / "queries.jsonl", queries)
         _json_dump(
@@ -674,6 +732,10 @@ def generate(args) -> Path:
             },
             "capture": {
                 "motion": "two identical deterministic kinematic camera-route laps",
+                "modalities": ["rgb", "depth"],
+                "depth_unit": "meter",
+                "invalid_depth_value": 0.0,
+                "camera_coordinate_frame": CAMERA_FRAME,
                 "route_points_per_lap": args.route_points,
                 "capture_interval_seconds": args.capture_interval,
                 "camera_height_m": args.camera_height,

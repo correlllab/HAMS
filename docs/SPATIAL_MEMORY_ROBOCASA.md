@@ -194,6 +194,13 @@ receives the same sensor stream. Captures have deterministic two-second
 timestamps; `--capture-interval 1`, `2`, or `3` can model a different sensor
 rate without waiting in wall-clock time.
 
+Benchmark v2 also saves float32 metric depth and the exact rendered camera
+geometry needed by 3D map methods. The coordinate convention is OpenCV camera
+space (`x` right, `y` down, `z` forward), and every observation includes a 3×3
+intrinsic matrix plus a 4×4 camera-to-world transform. Zero depth means no
+return. Old v1 RGB-only datasets remain readable by image-retrieval adapters,
+but VLMaps deliberately refuses them rather than inventing depth or poses.
+
 To separate generation from evaluation:
 
 ```bash
@@ -201,13 +208,13 @@ docker/scripts/spatial_memory_camera.sh benchmark-setup --episodes 12
 docker/scripts/spatial_memory_camera.sh benchmark-eval
 ```
 
-The default evaluator returns FAISS Top K directly. To test the production-style
+The default evaluator is VLMaps. To test the production-style EmbodiedAgent
 two-stage path on the **same frozen episodes**, put the Gemini key in
 `docker/.env` as shown above and select the VLM adapter:
 
 ```bash
 docker/scripts/spatial_memory_camera.sh benchmark-eval \
-  --benchmark-name object_relocation_layout09_style09_seed42 \
+  --benchmark-name object_relocation_rgbd_layout09_style09_seed42 \
   --adapter embodied_agent_vlm \
   --recall-k 12 \
   --top-k 3 \
@@ -241,16 +248,17 @@ Each episode stores algorithm input and ground truth separately:
 ```text
 episodes/<episode-id>/
 ├── color/                  RGB sensor observations
+├── depth/                  float32 metric depth (`.npy`)
 ├── robot_xy/               x y yaw sidecars
-├── frame_meta/             timestamps and camera metadata
+├── frame_meta/             timestamps, intrinsics, and camera-to-world metadata
 ├── observations.jsonl      neutral streaming-ingest contract
 ├── queries.jsonl           evaluator-owned query checkpoints and relevance IDs
 ├── oracle/episode.json     simulator-only object poses and visibility labels
 └── contact_sheet.jpg       both route laps in time order
 ```
 
-The adapter receives only one `observations.jsonl` record and its RGB image at a
-time. It never receives `queries.jsonl` relevance fields or `oracle/`. The first
+The adapter receives only one `observations.jsonl` record and its sensor files at
+a time. It never receives `queries.jsonl` relevance fields or `oracle/`. The first
 lap checks static retrieval. During lap 2, a query runs after each frame starting
 with the first frame where B is actually visible; this prevents camera travel
 time from being counted as memory update delay.
@@ -266,6 +274,8 @@ time from being counted as memory update delay.
 - stale old-location top-1 rate and stale fraction in the top K;
 - update lag in frames, measured from first visible B observation;
 - historical old-location recall;
+- top-1 world-coordinate error and success within 0.5 m for map-native adapters;
+- stale-location coordinate rate and location update lag after relocation;
 - absent-query top-1 raw score, plus confidence and false-positive rate at 0.5
   for adapters that expose calibrated `confidence_0_1`; and
 - FAISS recall-pool hit/coverage and VLM valid-response/fallback rates when using
@@ -297,19 +307,74 @@ python3 -m benchmarks.spatial_memory.report \
   --dataset /path/to/the/benchmark-dataset
 ```
 
-The `embodied_agent` adapter is the current EmbodiedAgent SigLIP + live FAISS
-pipeline. `embodied_agent_vlm` adds the repository's Gemini precision stage
-without changing the dataset, query schedule, or metrics.
+The default evaluator is `vlmaps`, reflecting the mentor-selected comparison
+priority. The `embodied_agent` adapter remains the current EmbodiedAgent SigLIP
++ live FAISS pipeline. `embodied_agent_vlm` adds the repository's Gemini
+precision stage without changing the dataset, query schedule, or metrics.
+
+### VLMaps baseline (highest priority)
+
+Keep the official repository beside HAMS:
+
+```text
+workspace/
+├── Humanoid_Simulation/
+├── EmbodiedAgent/
+└── vlmaps/
+```
+
+Clone it once, generate a new RGB-D dataset, and evaluate:
+
+```bash
+cd /home/tanxuan/workspace/Humanoid_Simulation
+git clone --depth 1 https://github.com/vlmaps/vlmaps.git ../vlmaps
+
+docker/scripts/spatial_memory_camera.sh benchmark-setup \
+  --benchmark-name object_relocation_rgbd_layout09_style09_seed42 \
+  --episodes 12 --image-size 512
+
+docker/scripts/spatial_memory_camera.sh benchmark-eval \
+  --benchmark-name object_relocation_rgbd_layout09_style09_seed42 \
+  --adapter vlmaps --top-k 3
+```
+
+VLMaps has its own Docker runtime because the official LSeg dependencies are
+large and should not alter the existing SigLIP/FAISS image. The first evaluation
+downloads the official LSeg checkpoint plus ViT and CLIP weights; they are cached
+under `container_cache/vlmaps/` and `container_cache/huggingface/`. No Gemini key
+or API quota is involved.
+
+The adapter is a streaming benchmark adaptation, not a claim that the official
+repository natively handles live replacement. It uses the official VLMaps LSeg
+network, checkpoint, multi-template CLIP text embeddings, metric-depth
+backprojection, distance-weighted 3D voxel fusion, and category indexing. The
+sparse voxel map is updated after each frame so the evaluator can query at every
+live checkpoint. Like original VLMaps, it fuses observations but does not remove
+the old object location; `dynamic_point_removal=false` is recorded in every
+query diagnostic.
+
+The fixed kitchen category vocabulary is independent of the randomized episode
+and receives no oracle target pose. If no voxel ranks the query above every
+fixed category, the adapter returns the top 0.5% similarity tail so the benchmark
+can still measure a coordinate. The readable report labels this as
+`top_similarity_quantile_fallback`; it must not be presented as a normal VLMaps
+category win. Use 512×512 for the real experiment because mugs and bowls occupy
+few pixels in distant views; 256×256 is suitable only for plumbing smoke tests.
+
+Map methods return a supporting observation ID to satisfy the common Top-K image
+contract and also return `metadata.predicted_world_xyz`. The evaluator scores the
+coordinate against simulator ground truth. Image-only methods show `N/A` for
+location metrics; their camera pose is never misreported as the object location.
 
 Two built-in sanity/comparison baselines are also available:
 
 ```bash
 docker/scripts/spatial_memory_camera.sh benchmark-eval \
-  --benchmark-name object_relocation_layout09_style09_seed42 \
+  --benchmark-name object_relocation_rgbd_layout09_style09_seed42 \
   --adapter latest_only --top-k 3
 
 docker/scripts/spatial_memory_camera.sh benchmark-eval \
-  --benchmark-name object_relocation_layout09_style09_seed42 \
+  --benchmark-name object_relocation_rgbd_layout09_style09_seed42 \
   --adapter embodied_agent_recency --recall-k 12 --top-k 3
 ```
 
@@ -329,29 +394,31 @@ After all methods have run on the same frozen episodes, generate one comparison:
 
 ```bash
 docker/scripts/spatial_memory_camera.sh benchmark-compare \
-  --benchmark-name object_relocation_layout09_style09_seed42
+  --benchmark-name object_relocation_rgbd_layout09_style09_seed42 \
+  --compare-adapters latest_only,embodied_agent,vlmaps
 ```
 
-The command selects the latest `latest_only`, `embodied_agent`, and
-`embodied_agent_recency` runs by default. Use `--compare-adapters` to change the
+The command selects the latest `vlmaps`, `embodied_agent`, and `latest_only`
+runs by default. Use `--compare-adapters` to change the
 list. It refuses to compare different Top-K values, episode subsets, query text,
 or oracle labels; consequently, a one-episode Gemini smoke run cannot silently be
 compared with a 20-episode baseline. Outputs are written below
 `comparisons/<run-id>/` as `comparison.html`, `comparison.md`, and
 `comparison.json`, with means and 95% confidence intervals across episodes.
 
-For the normal four-method evaluation, the separate evaluator commands can be
+For the normal five-method evaluation, the separate evaluator commands can be
 replaced by one opt-in suite command:
 
 ```bash
 docker/scripts/spatial_memory_camera.sh benchmark-suite \
-  --benchmark-name object_relocation_layout09_style09_seed42 \
+  --benchmark-name object_relocation_rgbd_layout09_style09_seed42 \
   --recall-k 12 --top-k 3
 ```
 
-It runs `latest_only`, `embodied_agent`, `embodied_agent_recency`, and
-`embodied_agent_vlm` sequentially on the same frozen dataset, then generates a
-comparison containing all four. `--max-episodes` applies to every method, which
+It runs `vlmaps`, `latest_only`, `embodied_agent`,
+`embodied_agent_recency`, and `embodied_agent_vlm` sequentially on the same
+frozen dataset, then generates a comparison containing all five.
+`--max-episodes` applies to every method, which
 is useful for a one-episode quota check. The suite requires the local key before
 starting and counts the scheduled VLM queries before running any method. The
 default safety limit is 20 calls; on the current 20-episode dataset the guard

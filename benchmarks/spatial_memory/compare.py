@@ -18,20 +18,29 @@ METHOD_LABELS = {
     "embodied_agent": "SigLIP + FAISS",
     "embodied_agent_recency": "SigLIP + FAISS + recency",
     "embodied_agent_vlm": "SigLIP + FAISS + Gemini",
+    "vlmaps": "VLMaps (LSeg 3D map)",
 }
 
 COMPARISON_METRICS = [
     ("static_recall_at_k", "Static Recall@K", "rate", "higher"),
     ("static_mrr", "Static MRR", "rate", "higher"),
+    ("static_location_error_m_top1", "Static location error Top-1", "meters", "lower"),
+    ("static_location_success_at_0_5m", "Static location success @ 0.5 m", "rate", "higher"),
     ("live_current_recall_at_k", "Current-location Recall@K", "rate", "higher"),
     ("live_latest_visible_frame_recall_at_k", "Latest-frame Recall@K", "rate", "higher"),
     ("live_latest_visible_frame_top1_accuracy", "Latest-frame Top-1", "rate", "higher"),
     ("live_current_top1_accuracy", "Current Top-1", "rate", "higher"),
     ("live_stale_top1_rate", "Stale Top-1 rate", "rate", "lower"),
     ("live_stale_fraction_at_k", "Stale fraction@K", "rate", "lower"),
+    ("live_location_error_m_top1", "Current location error Top-1", "meters", "lower"),
+    ("live_location_success_at_0_5m", "Current location success @ 0.5 m", "rate", "higher"),
+    ("live_stale_location_top1_rate", "Stale-location Top-1 rate", "rate", "lower"),
+    ("location_update_lag_frames_at_0_5m", "Location update lag @ 0.5 m", "frames", "lower"),
     ("update_lag_frames_at_k", "Update lag@K", "frames", "lower"),
     ("history_recall_at_k", "History Recall@K", "rate", "higher"),
     ("history_mrr", "History MRR", "rate", "higher"),
+    ("history_location_error_m_top1", "History location error Top-1", "meters", "lower"),
+    ("history_location_success_at_0_5m", "History location success @ 0.5 m", "rate", "higher"),
     ("absent_top1_score", "Absent Top-1 raw score*", "score", "lower"),
     ("absent_top1_confidence", "Absent Top-1 confidence", "rate", "lower"),
     ("absent_false_positive_rate_at_0_5", "Absent false-positive rate @ 0.5", "rate", "lower"),
@@ -112,6 +121,8 @@ def _format_number(value: float, kind: str) -> str:
         return f"{value:.2f}"
     if kind == "ms":
         return f"{value:.1f} ms"
+    if kind == "meters":
+        return f"{value:.3f} m"
     return f"{value:.4f}"
 
 

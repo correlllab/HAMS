@@ -20,12 +20,17 @@ fi
 
 COMPOSE_FILE="$REPO_ROOT/docker/docker-compose.yml"
 MEMORY_DOCKERFILE="$REPO_ROOT/docker/SpatialMemoryDockerfile"
+VLMAPS_DOCKERFILE="$REPO_ROOT/docker/VLMapsDockerfile"
 EMBODIED_ROOT="${EMBODIED_AGENT_ROOT:-$WORKSPACE_ROOT/EmbodiedAgent}"
+VLMAPS_ROOT="${VLMAPS_ROOT:-$WORKSPACE_ROOT/vlmaps}"
 SCAN_ROOT="${SPATIAL_SCAN_ROOT:-$REPO_ROOT/container_cache/spatial_memory_scans}"
 BENCHMARK_ROOT="${SPATIAL_BENCHMARK_ROOT:-$REPO_ROOT/container_cache/spatial_memory_benchmarks}"
 HF_CACHE="${SPATIAL_HF_CACHE:-$REPO_ROOT/container_cache/huggingface}"
 MEMORY_IMAGE="${SPATIAL_MEMORY_IMAGE:-hams_spatial_memory:latest}"
 MEMORY_RUNTIME_SCHEMA=2
+VLMAPS_IMAGE="${SPATIAL_VLMAPS_IMAGE:-hams_vlmaps:latest}"
+VLMAPS_RUNTIME_SCHEMA=2
+VLMAPS_CACHE="${SPATIAL_VLMAPS_CACHE:-$REPO_ROOT/container_cache/vlmaps}"
 
 TASK=Kitchen
 LAYOUT=9
@@ -64,7 +69,7 @@ BENCHMARK_EPISODES=12
 BENCHMARK_OBJECTS="mug,bowl"
 BENCHMARK_ROUTE_POINTS=8
 BENCHMARK_CAPTURE_INTERVAL=2
-BENCHMARK_ADAPTER="embodied_agent"
+BENCHMARK_ADAPTER="vlmaps"
 BENCHMARK_ADAPTER_KWARGS=""
 BENCHMARK_ADAPTER_OPTION_USED=0
 BENCHMARK_ADAPTER_KWARGS_OPTION_USED=0
@@ -72,7 +77,7 @@ BENCHMARK_MAX_EPISODES=""
 BENCHMARK_KEEP_STATE=0
 BENCHMARK_VLM_CALL_LIMIT="${SPATIAL_VLM_CALL_LIMIT:-20}"
 BENCHMARK_VLM_PREFLIGHT_DONE=0
-BENCHMARK_COMPARE_ADAPTERS="latest_only,embodied_agent,embodied_agent_recency"
+BENCHMARK_COMPARE_ADAPTERS="vlmaps,embodied_agent,latest_only"
 
 usage() {
     cat <<'EOF'
@@ -90,6 +95,7 @@ Usage:
   docker/scripts/spatial_memory_camera.sh benchmark-eval [options]
   docker/scripts/spatial_memory_camera.sh benchmark-suite [options]
   docker/scripts/spatial_memory_camera.sh benchmark-compare [options]
+  docker/scripts/spatial_memory_camera.sh vlmaps-build
   docker/scripts/spatial_memory_camera.sh build
   docker/scripts/spatial_memory_camera.sh where [options]
   docker/scripts/spatial_memory_camera.sh benchmark-where [options]
@@ -105,8 +111,9 @@ Commands:
              (add --replace to replace an existing selected dataset and its reports)
   benchmark-setup  generate only the algorithm-neutral two-lap episodes
   benchmark-eval   evaluate an existing dataset through a selected adapter
-  benchmark-suite  run three baselines + Gemini, then compare all four
+  benchmark-suite  run VLMaps, three baselines, and Gemini, then compare all five
   benchmark-compare compare latest matching runs on identical episodes
+  vlmaps-build build the dedicated official VLMaps / LSeg runtime
   build    build the small memory-only Docker image
   where    print the selected host scan directory
   benchmark-where  print the selected host benchmark directory
@@ -155,16 +162,17 @@ Object-relocation benchmark options:
   --objects GROUP,...     RoboCasa object groups (default: mug,bowl)
   --route-points N        observations per camera lap (default: 8)
   --capture-interval SEC  synthetic sensor interval (default: 2)
-  --adapter NAME|MOD:CLS  evaluator adapter (default: embodied_agent)
+  --adapter NAME|MOD:CLS  evaluator adapter (default: vlmaps)
                            sanity baseline: latest_only
                            temporal baseline: embodied_agent_recency
                            VLM built-in: embodied_agent_vlm
+                           map baseline: vlmaps (RGB-D benchmark v2 only)
   --adapter-kwargs JSON   constructor kwargs for a custom adapter
   --max-episodes N        evaluate only the first N episodes
   --keep-state            retain generated memory and FAISS files in the report
   --vlm-call-limit N       scheduled VLM-call safety cap (default: 20)
-  --compare-adapters A,... latest runs to compare (default: latest_only,
-                           embodied_agent,embodied_agent_recency)
+  --compare-adapters A,... latest runs to compare (default: vlmaps,
+                           embodied_agent,latest_only)
 
 Examples:
   docker/scripts/spatial_memory_camera.sh all
@@ -179,8 +187,10 @@ Examples:
     --adapter latest_only --top-k 3
   docker/scripts/spatial_memory_camera.sh benchmark-eval \
     --adapter embodied_agent_recency --recall-k 12 --top-k 3
+  docker/scripts/spatial_memory_camera.sh benchmark-eval \
+    --adapter vlmaps --top-k 3
   docker/scripts/spatial_memory_camera.sh benchmark-suite \
-    --benchmark-name object_relocation_layout09_style09_seed42 --top-k 3
+    --benchmark-name object_relocation_rgbd_layout09_style09_seed42 --top-k 3
   docker/scripts/spatial_memory_camera.sh benchmark-compare
   docker/scripts/spatial_memory_camera.sh all --layout 10 --style 10
   docker/scripts/spatial_memory_camera.sh memory --query "blue cabinets"
@@ -308,7 +318,7 @@ validate_options() {
         SCAN_NAME="$(slugify "$SCAN_NAME")"
     fi
     if [[ -z "$BENCHMARK_NAME" ]]; then
-        BENCHMARK_NAME="object_relocation_layout$(printf '%02d' "$LAYOUT")_style$(printf '%02d' "$STYLE")_seed${SEED}"
+        BENCHMARK_NAME="object_relocation_rgbd_layout$(printf '%02d' "$LAYOUT")_style$(printf '%02d' "$STYLE")_seed${SEED}"
     else
         BENCHMARK_NAME="$(slugify "$BENCHMARK_NAME")"
     fi
@@ -421,6 +431,19 @@ build_memory_image() {
     fi
 }
 
+build_vlmaps_image() {
+    local installed_schema=""
+    if docker image inspect "$VLMAPS_IMAGE" >/dev/null 2>&1; then
+        installed_schema="$(docker image inspect \
+            --format '{{ index .Config.Labels "org.hams.vlmaps-runtime" }}' \
+            "$VLMAPS_IMAGE" 2>/dev/null || true)"
+    fi
+    if [[ "$FORCE_BUILD" == 1 || "$installed_schema" != "$VLMAPS_RUNTIME_SCHEMA" ]]; then
+        note "building VLMaps image $VLMAPS_IMAGE"
+        docker build -f "$VLMAPS_DOCKERFILE" -t "$VLMAPS_IMAGE" "$REPO_ROOT"
+    fi
+}
+
 run_scan() {
     mkdir -p "$SCAN_ROOT"
     local -a command=(
@@ -496,7 +519,6 @@ run_memory() {
     [[ -d "$host_scan/color" ]] \
         || die "scan not found: $host_scan (run the scan command first)"
     mkdir -p "$HF_CACHE"
-    build_memory_image
 
     local -a gpu_args=(--gpus all)
     [[ "$DEVICE" == cpu ]] && gpu_args=()
@@ -543,7 +565,6 @@ run_rerank() {
         key_args=(-e "$key_name")
     fi
     mkdir -p "$HF_CACHE"
-    build_memory_image
 
     local -a gpu_args=(--gpus all)
     [[ "$DEVICE" == cpu ]] && gpu_args=()
@@ -655,16 +676,32 @@ enforce_benchmark_vlm_call_limit() {
 run_benchmark_eval() {
     local host_benchmark
     host_benchmark="$(benchmark_host_dir)"
-    [[ -d "$EMBODIED_ROOT/.git" ]] \
-        || die "EmbodiedAgent not found at $EMBODIED_ROOT"
     [[ -f "$host_benchmark/benchmark_manifest.json" ]] \
         || die "benchmark dataset not found: $host_benchmark (run benchmark-setup first)"
+    if [[ "$BENCHMARK_ADAPTER" == embodied_agent* ]]; then
+        [[ -d "$EMBODIED_ROOT/.git" ]] \
+            || die "EmbodiedAgent not found at $EMBODIED_ROOT"
+    fi
+    if [[ "$BENCHMARK_ADAPTER" == vlmaps ]]; then
+        [[ -d "$VLMAPS_ROOT/.git" ]] \
+            || die "official VLMaps checkout not found at $VLMAPS_ROOT"
+        python3 - "$host_benchmark/benchmark_manifest.json" <<'PY' || exit $?
+import json
+import sys
+with open(sys.argv[1], encoding="utf-8") as file:
+    manifest = json.load(file)
+if manifest.get("benchmark_id") != "robocasa_object_relocation_v2":
+    raise SystemExit(
+        "[spatial-camera] ERROR: VLMaps requires an RGB-D benchmark-v2 dataset; "
+        "run benchmark-setup with a new --benchmark-name"
+    )
+PY
+    fi
     if [[ "$BENCHMARK_ADAPTER" == embodied_agent_vlm \
           && "$BENCHMARK_VLM_PREFLIGHT_DONE" == 0 ]]; then
         enforce_benchmark_vlm_call_limit
     fi
     mkdir -p "$HF_CACHE"
-    build_memory_image
 
     local adapter_kwargs="$BENCHMARK_ADAPTER_KWARGS"
     if [[ -z "$adapter_kwargs" ]]; then
@@ -674,6 +711,8 @@ run_benchmark_eval() {
             adapter_kwargs="{\"model\":\"$MODEL\",\"device\":\"$DEVICE\",\"recall_k\":$RERANK_RECALL_K}"
         elif [[ "$BENCHMARK_ADAPTER" == embodied_agent_vlm ]]; then
             adapter_kwargs="{\"model\":\"$MODEL\",\"device\":\"$DEVICE\",\"recall_k\":$RERANK_RECALL_K,\"vlm_model\":\"$VLM_MODEL\"}"
+        elif [[ "$BENCHMARK_ADAPTER" == vlmaps ]]; then
+            adapter_kwargs="{\"device\":\"$DEVICE\",\"vlmaps_root\":\"/opt/vlmaps\",\"checkpoint_path\":\"/cache/vlmaps/demo_e200.ckpt\"}"
         else
             adapter_kwargs="{}"
         fi
@@ -685,21 +724,39 @@ run_benchmark_eval() {
             "embodied_agent_vlm requires GEMINI_API_KEY or GOOGLE_API_KEY; put it in $SPATIAL_ENV_FILE"
         key_args=(-e "$key_name")
     fi
+    local runtime_image="$MEMORY_IMAGE"
+    local runtime_home="/tmp"
+    local -a runtime_mounts=(
+        -v "$EMBODIED_ROOT:/opt/EmbodiedAgent:ro"
+        -v "$REPO_ROOT:/opt/Humanoid_Simulation:ro"
+        -v "$host_benchmark:/data"
+        -v "$HF_CACHE:/cache/huggingface"
+    )
+    if [[ "$BENCHMARK_ADAPTER" == vlmaps ]]; then
+        mkdir -p "$VLMAPS_CACHE"
+        mkdir -p "$VLMAPS_CACHE/home"
+        build_vlmaps_image
+        runtime_image="$VLMAPS_IMAGE"
+        runtime_home="/cache/vlmaps/home"
+        runtime_mounts+=(
+            -v "$VLMAPS_ROOT:/opt/vlmaps:ro"
+            -v "$VLMAPS_CACHE:/cache/vlmaps"
+        )
+    else
+        build_memory_image
+    fi
     local -a gpu_args=(--gpus all)
     [[ "$DEVICE" == cpu || "$BENCHMARK_ADAPTER" == latest_only ]] && gpu_args=()
     local -a command=(
         docker run --rm
         "${gpu_args[@]}"
         --user "$(id -u):$(id -g)"
-        -e HOME=/tmp
+        -e HOME="$runtime_home"
         -e PYTHONPATH=/opt/EmbodiedAgent:/opt/Humanoid_Simulation
         -e HF_HOME=/cache/huggingface
         "${key_args[@]}"
-        -v "$EMBODIED_ROOT:/opt/EmbodiedAgent:ro"
-        -v "$REPO_ROOT:/opt/Humanoid_Simulation:ro"
-        -v "$host_benchmark:/data"
-        -v "$HF_CACHE:/cache/huggingface"
-        "$MEMORY_IMAGE"
+        "${runtime_mounts[@]}"
+        "$runtime_image"
         python -u -m benchmarks.spatial_memory.evaluate
         --dataset /data
         --adapter "$BENCHMARK_ADAPTER"
@@ -740,12 +797,13 @@ run_benchmark_compare() {
 run_benchmark_suite() {
     [[ "$BENCHMARK_ADAPTER_OPTION_USED" == 0 \
        && "$BENCHMARK_ADAPTER_KWARGS_OPTION_USED" == 0 ]] \
-        || die "benchmark-suite selects its four adapters; do not pass --adapter or --adapter-kwargs"
+        || die "benchmark-suite selects its five adapters; do not pass --adapter or --adapter-kwargs"
     require_vlm_key
     enforce_benchmark_vlm_call_limit
 
     local adapter
     for adapter in \
+        vlmaps \
         latest_only \
         embodied_agent \
         embodied_agent_recency \
@@ -754,7 +812,7 @@ run_benchmark_suite() {
         BENCHMARK_ADAPTER_KWARGS=""
         run_benchmark_eval
     done
-    BENCHMARK_COMPARE_ADAPTERS="latest_only,embodied_agent,embodied_agent_recency,embodied_agent_vlm"
+    BENCHMARK_COMPARE_ADAPTERS="vlmaps,latest_only,embodied_agent,embodied_agent_recency,embodied_agent_vlm"
     run_benchmark_compare
 }
 
@@ -881,6 +939,7 @@ main() {
             run_benchmark_compare
             ;;
         build) build_memory_image ;;
+        vlmaps-build) build_vlmaps_image ;;
         where) scan_host_dir ;;
         benchmark-where) benchmark_host_dir ;;
         help|-h|--help) usage ;;

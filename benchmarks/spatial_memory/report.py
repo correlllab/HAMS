@@ -17,6 +17,8 @@ METRICS = [
     ("static_recall_at_k", "Static Recall@K", "rate"),
     ("static_coverage_at_k", "Static visible-view coverage@K", "rate"),
     ("static_mrr", "Static MRR", "rate"),
+    ("static_location_error_m_top1", "Static location error Top-1", "meters"),
+    ("static_location_success_at_0_5m", "Static location success @ 0.5 m", "rate"),
     ("live_current_recall_at_k", "Current-location Recall@K", "rate"),
     ("live_current_coverage_at_k", "Current visible-view coverage@K", "rate"),
     ("live_latest_visible_frame_recall_at_k", "Latest visible frame Recall@K", "rate"),
@@ -24,11 +26,17 @@ METRICS = [
     ("live_current_top1_accuracy", "Current Top-1", "rate"),
     ("live_stale_top1_rate", "Stale Top-1 rate", "rate"),
     ("live_stale_fraction_at_k", "Stale fraction@K", "rate"),
+    ("live_location_error_m_top1", "Current location error Top-1", "meters"),
+    ("live_location_success_at_0_5m", "Current location success @ 0.5 m", "rate"),
+    ("live_stale_location_top1_rate", "Stale-location Top-1 rate", "rate"),
     ("update_lag_frames_at_k", "Update lag@K", "frames"),
     ("update_lag_frames_top1", "Update lag Top-1", "frames"),
+    ("location_update_lag_frames_at_0_5m", "Location update lag @ 0.5 m", "frames"),
     ("history_recall_at_k", "History Recall@K", "rate"),
     ("history_coverage_at_k", "History visible-view coverage@K", "rate"),
     ("history_mrr", "History MRR", "rate"),
+    ("history_location_error_m_top1", "History location error Top-1", "meters"),
+    ("history_location_success_at_0_5m", "History location success @ 0.5 m", "rate"),
     ("absent_top1_score", "Absent Top-1 score", "score"),
     ("absent_top1_confidence", "Absent Top-1 confidence", "rate"),
     ("absent_false_positive_rate_at_0_5", "Absent false-positive rate @ 0.5", "rate"),
@@ -47,6 +55,8 @@ PRIMARY_METRICS = [
     "live_current_recall_at_k",
     "live_latest_visible_frame_recall_at_k",
     "live_stale_top1_rate",
+    "live_location_success_at_0_5m",
+    "live_stale_location_top1_rate",
     "update_lag_frames_at_k",
     "history_recall_at_k",
 ]
@@ -76,6 +86,8 @@ def _format_metric(value, kind: str) -> str:
         return f"{number:.1f} frames"
     if kind == "ms":
         return f"{number:.1f} ms"
+    if kind == "meters":
+        return f"{number:.3f} m"
     return f"{number:.4f}"
 
 
@@ -258,6 +270,19 @@ def _candidate_gallery(
                 f'<span class="rerank-reason">'
                 f'{html.escape(str(metadata["rerank_reasoning"]))}</span>'
             )
+        predicted_xyz = metadata.get("predicted_world_xyz")
+        if isinstance(predicted_xyz, list) and len(predicted_xyz) == 3:
+            rerank_details += (
+                '<br><span class="rerank-detail">predicted xyz '
+                f'({float(predicted_xyz[0]):.3f}, '
+                f'{float(predicted_xyz[1]):.3f}, '
+                f'{float(predicted_xyz[2]):.3f}) m</span>'
+            )
+        if metadata.get("selection_mode"):
+            rerank_details += (
+                '<br><span class="rerank-detail">selection: '
+                f'{html.escape(str(metadata["selection_mode"]))}</span>'
+            )
         figures.append(
             f'<figure class="{" ".join(classes)}">'
             f"{image_html}<figcaption><strong>Rank {int(candidate['rank'])}</strong><br>"
@@ -322,6 +347,18 @@ def _query_html(
                 '<span class="result miss">VLM invalid · FAISS fallback</span>'
                 f"{pool_html}"
             )
+    map_html = ""
+    if diagnostics.get("map_native") is True:
+        selection_mode = str(diagnostics.get("selection_mode", "map query"))
+        selection_class = (
+            "miss" if "fallback" in selection_mode else "neutral"
+        )
+        map_html = (
+            f'<span class="result {selection_class}">'
+            f'{html.escape(selection_mode)} · '
+            f'{int(diagnostics.get("voxel_count", 0))} voxels · '
+            f'{int(diagnostics.get("component_count", 0))} components</span>'
+        )
     return (
         '<article class="query">'
         '<div class="query-heading">'
@@ -335,6 +372,7 @@ def _query_html(
         f'<span class="result {recall_class}">Recall@{top_k}: {recall_text}</span>'
         f"{stale_html}"
         f"{rerank_html}"
+        f"{map_html}"
         "</div>"
         f"{_candidate_gallery(query_result, observations, episode_dir, output_dir)}"
         "</article>"
@@ -532,6 +570,10 @@ def _html_document(
         "any correct view at B; <strong>visible-view coverage@K</strong> measures how many correct "
         "views were returned; <strong>Latest visible frame Recall@K</strong> checks the just-ingested "
         "visible frame itself. Lower stale rate and update lag are better.</p>"
+        '<p class="note"><strong>Map-native metrics:</strong> adapters such as VLMaps also return '
+        "a predicted world xyz. Location error and success @ 0.5 m use that coordinate; image-only "
+        "adapters show N/A rather than treating camera pose as object position. A top-similarity "
+        "fallback is displayed explicitly when no voxel wins VLMaps category classification.</p>"
         f'<h2>Aggregate metrics</h2><div class="aggregate">{_metric_table_html(aggregate)}</div>'
         f"<h2>Episodes</h2>{episodes}"
         '<footer>Generated from results.json. Oracle visibility labels were used only by the evaluator, '

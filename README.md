@@ -133,15 +133,32 @@ call the VLM. See the linked guide for key handling, metrics, and result sheets.
 For the quantitative live-update test, run the algorithm-neutral object
 relocation benchmark. It repeats the same camera route before and after moving a
 randomized target between two kitchen surfaces, then measures current recall,
-stale retrieval, update lag, historical recall, and latency:
+stale retrieval, update lag, historical recall, map-location error, and latency.
+Benchmark v2 records RGB, metric depth, camera intrinsics, and camera-to-world
+poses so map-based methods can consume the same frozen episodes:
 
 ```bash
 docker/scripts/spatial_memory_camera.sh benchmark --episodes 12
 ```
 
-The default evaluator is EmbodiedAgent SigLIP + FAISS; other methods plug in
+The default and highest-priority evaluator is VLMaps; other methods plug in
 through the benchmark's `MemoryAdapter` interface. No VLM key is required for
-the default run. To compare the same episodes using real FAISS recall (up to
+the default run. VLMaps uses the official LSeg model/checkpoint from a sibling
+`vlmaps` checkout:
+
+```bash
+git clone --depth 1 https://github.com/vlmaps/vlmaps.git ../vlmaps
+docker/scripts/spatial_memory_camera.sh benchmark-eval \
+  --benchmark-name object_relocation_rgbd_layout09_style09_seed42 \
+  --adapter vlmaps --top-k 3
+```
+
+This path needs no Gemini key. Its first run downloads several GB of official
+LSeg, ViT, and CLIP weights into `container_cache/`; later runs reuse them. The
+report shows predicted world xyz, location error/success at 0.5 m, stale-location
+rate, and whether VLMaps used its explicitly labeled top-similarity fallback.
+
+To compare the same episodes using real FAISS recall (up to
 Top-12) followed by Gemini and final Top-3, use:
 
 ```bash
@@ -158,18 +175,19 @@ For a no-API method comparison on the same frozen episodes, evaluate the
 
 ```bash
 docker/scripts/spatial_memory_camera.sh benchmark-compare \
-  --benchmark-name object_relocation_layout09_style09_seed42
+  --benchmark-name object_relocation_rgbd_layout09_style09_seed42 \
+  --compare-adapters latest_only,embodied_agent,vlmaps
 ```
 
 The comparison report enforces identical episodes, queries, labels, and Top-K
 before showing aggregate metrics with 95% confidence intervals.
 
-To run all three baselines, Gemini, and the final four-method comparison with
-one command on an existing frozen dataset, use:
+To run VLMaps, all three baselines, Gemini, and the final five-method comparison
+with one command on an existing frozen dataset, use:
 
 ```bash
 docker/scripts/spatial_memory_camera.sh benchmark-suite \
-  --benchmark-name object_relocation_layout09_style09_seed42 \
+  --benchmark-name object_relocation_rgbd_layout09_style09_seed42 \
   --recall-k 12 --top-k 3
 ```
 

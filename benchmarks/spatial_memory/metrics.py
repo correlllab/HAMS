@@ -6,6 +6,9 @@ import math
 import statistics
 
 
+LOCATION_SUCCESS_THRESHOLD_M = 0.5
+
+
 def percentile(values: list[float], quantile: float) -> float | None:
     if not values:
         return None
@@ -52,6 +55,59 @@ def score_query(query: dict, candidate_ids: list[str], top_k: int) -> dict:
     }
 
 
+def score_location_query(query: dict, candidates: list[dict]) -> dict:
+    """Score an adapter's map-native top-1 world-coordinate prediction.
+
+    Frame-retrieval adapters remain valid benchmark participants: when their
+    candidates do not expose ``metadata.predicted_world_xyz``, these metrics
+    are reported as unavailable rather than inferred from the camera pose.
+    """
+    target = query.get("target_position_world_xyz")
+    prediction = None
+    if candidates:
+        metadata = candidates[0].get("metadata")
+        if isinstance(metadata, dict):
+            prediction = metadata.get("predicted_world_xyz")
+    if target is None or prediction is None:
+        return {
+            "location_error_m_top1": None,
+            "location_success_at_0_5m": None,
+            "stale_location_top1": None,
+        }
+    try:
+        target_xyz = [float(value) for value in target]
+        prediction_xyz = [float(value) for value in prediction]
+    except (TypeError, ValueError):
+        return {
+            "location_error_m_top1": None,
+            "location_success_at_0_5m": None,
+            "stale_location_top1": None,
+        }
+    if len(target_xyz) != 3 or len(prediction_xyz) != 3:
+        return {
+            "location_error_m_top1": None,
+            "location_success_at_0_5m": None,
+            "stale_location_top1": None,
+        }
+    error = math.dist(prediction_xyz, target_xyz)
+    stale_position = query.get("stale_target_position_world_xyz")
+    stale_top1 = None
+    if stale_position is not None:
+        try:
+            stale_xyz = [float(value) for value in stale_position]
+        except (TypeError, ValueError):
+            stale_xyz = []
+        if len(stale_xyz) == 3:
+            stale_top1 = float(math.dist(prediction_xyz, stale_xyz) < error)
+    return {
+        "location_error_m_top1": error,
+        "location_success_at_0_5m": float(
+            error <= LOCATION_SUCCESS_THRESHOLD_M
+        ),
+        "stale_location_top1": stale_top1,
+    }
+
+
 def _mean(records: list[dict], key: str) -> float | None:
     values = [record[key] for record in records if record.get(key) is not None]
     return statistics.fmean(values) if values else None
@@ -76,6 +132,19 @@ def summarize_episode(query_results: list[dict], ingestion_ms: list[float]) -> d
         if successful_top1:
             update_lag_top1 = min(
                 int(item["checkpoint_frame"]) - first_visible for item in successful_top1
+            )
+
+    location_update_lag = None
+    if live:
+        first_visible = int(live[0]["first_visible_current_frame"])
+        location_successes = [
+            item for item in live
+            if item["metrics"].get("location_success_at_0_5m") == 1.0
+        ]
+        if location_successes:
+            location_update_lag = min(
+                int(item["checkpoint_frame"]) - first_visible
+                for item in location_successes
             )
 
     def track_metric(track: str, key: str) -> float | None:
@@ -113,6 +182,12 @@ def summarize_episode(query_results: list[dict], ingestion_ms: list[float]) -> d
         "static_recall_at_k": track_metric("static", "recall_at_k"),
         "static_coverage_at_k": track_metric("static", "relevant_coverage_at_k"),
         "static_mrr": track_metric("static", "reciprocal_rank"),
+        "static_location_error_m_top1": track_metric(
+            "static", "location_error_m_top1"
+        ),
+        "static_location_success_at_0_5m": track_metric(
+            "static", "location_success_at_0_5m"
+        ),
         "live_current_recall_at_k": track_metric("live_current", "recall_at_k"),
         "live_current_coverage_at_k": track_metric(
             "live_current", "relevant_coverage_at_k"
@@ -126,11 +201,27 @@ def summarize_episode(query_results: list[dict], ingestion_ms: list[float]) -> d
         "live_current_top1_accuracy": track_metric("live_current", "top1_relevant"),
         "live_stale_top1_rate": track_metric("live_current", "stale_top1"),
         "live_stale_fraction_at_k": track_metric("live_current", "stale_fraction_at_k"),
+        "live_location_error_m_top1": track_metric(
+            "live_current", "location_error_m_top1"
+        ),
+        "live_location_success_at_0_5m": track_metric(
+            "live_current", "location_success_at_0_5m"
+        ),
+        "live_stale_location_top1_rate": track_metric(
+            "live_current", "stale_location_top1"
+        ),
         "update_lag_frames_at_k": update_lag_at_k,
         "update_lag_frames_top1": update_lag_top1,
+        "location_update_lag_frames_at_0_5m": location_update_lag,
         "history_recall_at_k": track_metric("history", "recall_at_k"),
         "history_coverage_at_k": track_metric("history", "relevant_coverage_at_k"),
         "history_mrr": track_metric("history", "reciprocal_rank"),
+        "history_location_error_m_top1": track_metric(
+            "history", "location_error_m_top1"
+        ),
+        "history_location_success_at_0_5m": track_metric(
+            "history", "location_success_at_0_5m"
+        ),
         "absent_top1_score": statistics.fmean(absent_scores) if absent_scores else None,
         "absent_top1_confidence": (
             statistics.fmean(absent_confidences) if absent_confidences else None

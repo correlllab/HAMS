@@ -34,6 +34,7 @@ import h1_2_robosuite
 SCHEMA_VERSION = 2
 GENERATED_OUTPUT_NAMES = {
     "color",
+    "depth",
     "frame_meta",
     "robot_xy",
     "memory",
@@ -59,6 +60,7 @@ def next_frame_index(color_dir: Path) -> int:
     output = color_dir.parent
     indices = []
     paths = list(color_dir.glob("*.png"))
+    paths += list((output / "depth").glob("*.npy"))
     paths += list((output / "robot_xy").glob("*.txt"))
     paths += list((output / "frame_meta").glob("*.json"))
     paths += list((output / "frame_meta").glob(".*.reserve"))
@@ -82,15 +84,27 @@ def write_frame_atomic(
     source_type: str,
     episode_id: str | None,
     camera_metadata: dict,
+    depth_m: np.ndarray | None = None,
 ) -> tuple[Path, dict]:
-    """Persist pose + metadata first, then publish the PNG as the commit marker."""
+    """Persist sensor sidecars first, then publish PNG as the commit marker."""
     stem = f"{frame_idx:06d}"
     memory_id = f"mem_{stem}"
     image_path = output / "color" / f"{stem}.png"
     pose_path = output / "robot_xy" / f"{stem}.txt"
     metadata_path = output / "frame_meta" / f"{stem}.json"
-    for directory in (image_path.parent, pose_path.parent, metadata_path.parent):
+    depth_path = output / "depth" / f"{stem}.npy" if depth_m is not None else None
+    directories = [image_path.parent, pose_path.parent, metadata_path.parent]
+    if depth_path is not None:
+        directories.append(depth_path.parent)
+    for directory in directories:
         directory.mkdir(parents=True, exist_ok=True)
+
+    if depth_m is not None:
+        depth_m = np.asarray(depth_m, dtype=np.float32)
+        if depth_m.shape != rgb.shape[:2]:
+            raise ValueError(
+                f"depth shape {depth_m.shape} does not match RGB shape {rgb.shape[:2]}"
+            )
 
     # O_EXCL is the cross-process reservation. Two direct Python callers that choose
     # the same next id cannot both pass this point, even without the wrapper's flock.
@@ -117,15 +131,23 @@ def write_frame_atomic(
         "episode_id": episode_id,
         "camera": camera_metadata,
     }
+    if depth_path is not None:
+        metadata["depth_path"] = f"depth/{stem}.npy"
+        metadata["depth_unit"] = "meter"
 
     suffix = f".{os.getpid()}.tmp"
     pose_tmp = pose_path.with_name(f".{pose_path.name}{suffix}")
     metadata_tmp = metadata_path.with_name(f".{metadata_path.name}{suffix}")
     image_tmp = image_path.with_name(f".{image_path.name}{suffix}")
+    depth_tmp = (
+        depth_path.with_name(f".{depth_path.name}{suffix}")
+        if depth_path is not None else None
+    )
     try:
-        existing = [
-            path for path in (image_path, pose_path, metadata_path) if path.exists()
-        ]
+        final_paths = [image_path, pose_path, metadata_path]
+        if depth_path is not None:
+            final_paths.append(depth_path)
+        existing = [path for path in final_paths if path.exists()]
         if existing:
             raise FileExistsError(
                 "refusing to replace an existing frame: "
@@ -133,6 +155,10 @@ def write_frame_atomic(
             )
         np.savetxt(pose_tmp, np.asarray([pose], dtype=float), fmt="%.9f")
         os.replace(pose_tmp, pose_path)
+        if depth_path is not None and depth_tmp is not None:
+            with open(depth_tmp, "wb") as file:
+                np.save(file, depth_m, allow_pickle=False)
+            os.replace(depth_tmp, depth_path)
         with open(metadata_tmp, "w", encoding="utf-8") as file:
             json.dump(metadata, file, indent=2)
             file.write("\n")
@@ -142,8 +168,9 @@ def write_frame_atomic(
         # that a visible frame already has both pose and capture metadata.
         os.replace(image_tmp, image_path)
     finally:
-        for temporary in (pose_tmp, metadata_tmp, image_tmp):
-            temporary.unlink(missing_ok=True)
+        for temporary in (pose_tmp, depth_tmp, metadata_tmp, image_tmp):
+            if temporary is not None:
+                temporary.unlink(missing_ok=True)
         reservation_path.unlink(missing_ok=True)
     return image_path, metadata
 
