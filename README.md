@@ -97,6 +97,62 @@ chosen ROS domain (default `1`): `/clock`; the RealSense topics
 `.../color/camera_info`; the Livox topics `/livox/lidar` (CustomMsg),
 `/livox/pointcloud`, and `/livox/imu`; and `/{left,right}/gripper/state`.
 
+## Spatial-memory camera baseline
+
+For a repeatable kitchen-memory test that does not depend on H1 walking, run:
+
+```bash
+docker/scripts/spatial_memory_camera.sh all
+```
+
+It captures a fixed-height camera scan, imports it through EmbodiedAgent's
+existing `EpisodicMemory` and embedding code, builds a FAISS index, and writes
+visual retrieval results. See
+[RoboCasa spatial-memory camera baseline](docs/SPATIAL_MEMORY_ROBOCASA.md) for
+the output format, alternate kitchen layouts, and rerun commands. After the
+baseline exists, append a timestamped closed/open-fridge sequence and update the
+existing memory with:
+
+```bash
+docker/scripts/spatial_memory_camera.sh live
+```
+
+To compare FAISS ordering against the repository's existing Gemini VLM reranker,
+first create its separate, frozen benchmark dataset, then explicitly provide an
+API key and run the evaluator:
+
+```bash
+docker/scripts/spatial_memory_camera.sh rerank-setup
+docker/scripts/spatial_memory_camera.sh rerank \
+  --case open_refrigerator --permutations 1
+```
+
+The reranker is opt-in; the scan, live capture, and normal memory checks never
+call the VLM. See the linked guide for key handling, metrics, and result sheets.
+
+For the quantitative live-update test, run the algorithm-neutral object
+relocation benchmark. It repeats the same camera route before and after moving a
+randomized target between two kitchen surfaces, then measures current recall,
+stale retrieval, update lag, historical recall, and latency:
+
+```bash
+docker/scripts/spatial_memory_camera.sh benchmark --episodes 12
+```
+
+The default evaluator is EmbodiedAgent SigLIP + FAISS; other methods plug in
+through the benchmark's `MemoryAdapter` interface. No VLM key is required for
+the default run. To compare the same episodes using real FAISS recall (up to
+Top-12) followed by Gemini and final Top-3, use:
+
+```bash
+docker/scripts/spatial_memory_camera.sh benchmark-eval \
+  --adapter embodied_agent_vlm --recall-k 12 --top-k 3 --max-episodes 1
+```
+
+This optional command requires `GEMINI_API_KEY` (or `GOOGLE_API_KEY`) in the
+current shell. Its readable report exposes VLM validity, fallback, original
+FAISS rank, confidence, and reasoning.
+
 ## Run the ROS container and bringup
 
 The ROS launcher only builds the workspace and drops to a shell, so bringup

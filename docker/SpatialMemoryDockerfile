@@ -1,0 +1,17 @@
+# Minimal runtime for the simulator-independent EmbodiedAgent memory core.
+# Habitat, ROS, RoboCasa, and the VLM agent loop are intentionally excluded.
+FROM pytorch/pytorch:2.7.1-cuda12.8-cudnn9-runtime
+
+LABEL org.hams.spatial-memory-runtime="2"
+
+RUN pip install --no-cache-dir \
+        "transformers==4.47.1" \
+        "faiss-cpu==1.14.3" \
+        "sentencepiece==0.2.1" \
+        "protobuf==5.29.5" \
+        "google-genai==2.11.0"
+
+ENV PYTHONUNBUFFERED=1
+WORKDIR /opt/EmbodiedAgent
+
+CMD ["python", "tools/robocasa_memory_smoke.py", "--help"]
