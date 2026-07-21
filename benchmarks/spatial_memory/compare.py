@@ -109,7 +109,7 @@ def _metric_stats(report: dict, metric: str, kind: str) -> dict | None:
         low, high = mean - margin, mean + margin
         if kind == "rate":
             low, high = max(0.0, low), min(1.0, high)
-        elif kind in {"frames", "ms"}:
+        elif kind in {"frames", "ms", "meters"}:
             low = max(0.0, low)
     return {"mean": mean, "count": len(values), "ci95_low": low, "ci95_high": high}
 

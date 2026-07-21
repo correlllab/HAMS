@@ -44,14 +44,19 @@ def fake_report(path: Path, adapter_spec: str, values: list[float]) -> dict:
 
 class SpatialMemoryComparisonTests(unittest.TestCase):
     def test_nonnegative_metric_confidence_interval_is_clamped(self):
-        report = {
-            "episodes": [
-                {"summary": {"update_lag_frames_at_k": value}}
-                for value in (0.0, 0.0, 1.0)
-            ]
-        }
-        stats = _metric_stats(report, "update_lag_frames_at_k", "frames")
-        self.assertEqual(stats["ci95_low"], 0.0)
+        for metric, kind in (
+            ("update_lag_frames_at_k", "frames"),
+            ("static_location_error_m_top1", "meters"),
+        ):
+            with self.subTest(kind=kind):
+                report = {
+                    "episodes": [
+                        {"summary": {metric: value}}
+                        for value in (0.0, 0.0, 1.0)
+                    ]
+                }
+                stats = _metric_stats(report, metric, kind)
+                self.assertEqual(stats["ci95_low"], 0.0)
 
     def test_writes_comparison_with_confidence_intervals(self):
         with tempfile.TemporaryDirectory() as temp_dir:
