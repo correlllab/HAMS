@@ -261,10 +261,13 @@ time from being counted as memory update delay.
 - current-location Recall@K and top-1 accuracy after relocation (any correct B view);
 - current visible-view coverage@K and latest-visible-frame Recall@K, which expose
   correct B frames that the ranking still misses;
+- latest-visible-frame Top-1 accuracy, which distinguishes returning the newest
+  frame somewhere in Top K from ranking it first;
 - stale old-location top-1 rate and stale fraction in the top K;
 - update lag in frames, measured from first visible B observation;
 - historical old-location recall;
-- absent-query top-1 similarity score; and
+- absent-query top-1 raw score, plus confidence and false-positive rate at 0.5
+  for adapters that expose calibrated `confidence_0_1`; and
 - FAISS recall-pool hit/coverage and VLM valid-response/fallback rates when using
   the VLM adapter; and
 - ingest/query p50 and p95 latency.
@@ -297,6 +300,46 @@ python3 -m benchmarks.spatial_memory.report \
 The `embodied_agent` adapter is the current EmbodiedAgent SigLIP + live FAISS
 pipeline. `embodied_agent_vlm` adds the repository's Gemini precision stage
 without changing the dataset, query schedule, or metrics.
+
+Two built-in sanity/comparison baselines are also available:
+
+```bash
+docker/scripts/spatial_memory_camera.sh benchmark-eval \
+  --benchmark-name object_relocation_layout09_style09_seed42 \
+  --adapter latest_only --top-k 3
+
+docker/scripts/spatial_memory_camera.sh benchmark-eval \
+  --benchmark-name object_relocation_layout09_style09_seed42 \
+  --adapter embodied_agent_recency --recall-k 12 --top-k 3
+```
+
+`latest_only` ignores the query and returns the newest frames. It is a deliberate
+sanity baseline: it should do well on immediate live updates but poorly on static
+and historical retrieval. `embodied_agent_recency` retrieves up to 12 FAISS
+candidates, min-max normalizes their similarity within that recall pool, then
+blends it with linear frame recency using a fixed default weight of `0.25`. The
+prior is query-independent, so it cannot special-case phrases such as "before it
+moved". To evaluate a preselected alternative weight, pass for example:
+
+```bash
+--adapter-kwargs '{"model":"siglip_base","device":"auto","recall_k":12,"recency_weight":0.1}'
+```
+
+After all methods have run on the same frozen episodes, generate one comparison:
+
+```bash
+docker/scripts/spatial_memory_camera.sh benchmark-compare \
+  --benchmark-name object_relocation_layout09_style09_seed42
+```
+
+The command selects the latest `latest_only`, `embodied_agent`, and
+`embodied_agent_recency` runs by default. Use `--compare-adapters` to change the
+list. It refuses to compare different Top-K values, episode subsets, query text,
+or oracle labels; consequently, a one-episode Gemini smoke run cannot silently be
+compared with a 20-episode baseline. Outputs are written below
+`comparisons/<run-id>/` as `comparison.html`, `comparison.md`, and
+`comparison.json`, with means and 95% confidence intervals across episodes.
+
 To compare another method, implement
 `benchmarks.spatial_memory.adapter.MemoryAdapter` (`reset`, `ingest`, `query`,
 and `close`) and select it by import path:

@@ -17,8 +17,14 @@ from .report import write_reports
 
 
 BUILTIN_ADAPTERS = {
+    "latest_only": (
+        "benchmarks.spatial_memory.latest_only_adapter:LatestOnlyAdapter"
+    ),
     "embodied_agent": (
         "benchmarks.spatial_memory.embodied_agent_adapter:EmbodiedAgentAdapter"
+    ),
+    "embodied_agent_recency": (
+        "benchmarks.spatial_memory.embodied_agent_recency_adapter:EmbodiedAgentRecencyAdapter"
     ),
     "embodied_agent_vlm": (
         "benchmarks.spatial_memory.embodied_agent_vlm_adapter:EmbodiedAgentVLMAdapter"

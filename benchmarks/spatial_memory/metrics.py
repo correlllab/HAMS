@@ -41,6 +41,10 @@ def score_query(query: dict, candidate_ids: list[str], top_k: int) -> dict:
         "checkpoint_recall_at_k": (
             float(checkpoint_id in ranked) if checkpoint_is_relevant else None
         ),
+        "checkpoint_top1": (
+            float(bool(ranked) and ranked[0] == checkpoint_id)
+            if checkpoint_is_relevant else None
+        ),
         "top1_relevant": float(bool(ranked) and ranked[0] in relevant) if relevant else None,
         "reciprocal_rank": 1.0 / relevant_ranks[0] if relevant_ranks else 0.0,
         "stale_top1": float(bool(ranked) and ranked[0] in stale),
@@ -84,6 +88,13 @@ def summarize_episode(query_results: list[dict], ingestion_ms: list[float]) -> d
         float(item["candidates"][0]["score"])
         for item in by_track.get("absent", []) if item["candidates"]
     ]
+    absent_confidences = [
+        float(item["candidates"][0]["metadata"]["confidence_0_1"])
+        for item in by_track.get("absent", [])
+        if item.get("candidates")
+        and isinstance(item["candidates"][0].get("metadata"), dict)
+        and item["candidates"][0]["metadata"].get("confidence_0_1") is not None
+    ]
     vlm_queries = [
         item for item in query_results
         if item.get("adapter_diagnostics", {}).get("rerank_attempted") is True
@@ -109,6 +120,9 @@ def summarize_episode(query_results: list[dict], ingestion_ms: list[float]) -> d
         "live_latest_visible_frame_recall_at_k": track_metric(
             "live_current", "checkpoint_recall_at_k"
         ),
+        "live_latest_visible_frame_top1_accuracy": track_metric(
+            "live_current", "checkpoint_top1"
+        ),
         "live_current_top1_accuracy": track_metric("live_current", "top1_relevant"),
         "live_stale_top1_rate": track_metric("live_current", "stale_top1"),
         "live_stale_fraction_at_k": track_metric("live_current", "stale_fraction_at_k"),
@@ -118,6 +132,13 @@ def summarize_episode(query_results: list[dict], ingestion_ms: list[float]) -> d
         "history_coverage_at_k": track_metric("history", "relevant_coverage_at_k"),
         "history_mrr": track_metric("history", "reciprocal_rank"),
         "absent_top1_score": statistics.fmean(absent_scores) if absent_scores else None,
+        "absent_top1_confidence": (
+            statistics.fmean(absent_confidences) if absent_confidences else None
+        ),
+        "absent_false_positive_rate_at_0_5": (
+            statistics.fmean(value >= 0.5 for value in absent_confidences)
+            if absent_confidences else None
+        ),
         "vlm_valid_response_rate": statistics.fmean(vlm_valid) if vlm_valid else None,
         "vlm_fallback_rate": (
             1.0 - statistics.fmean(vlm_valid) if vlm_valid else None

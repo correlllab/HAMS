@@ -153,6 +153,17 @@ This optional command requires `GEMINI_API_KEY` (or `GOOGLE_API_KEY`) in the
 current shell. Its readable report exposes VLM validity, fallback, original
 FAISS rank, confidence, and reasoning.
 
+For a no-API method comparison on the same frozen episodes, evaluate the
+`latest_only` and `embodied_agent_recency` adapters, then run:
+
+```bash
+docker/scripts/spatial_memory_camera.sh benchmark-compare \
+  --benchmark-name object_relocation_layout09_style09_seed42
+```
+
+The comparison report enforces identical episodes, queries, labels, and Top-K
+before showing aggregate metrics with 95% confidence intervals.
+
 ## Run the ROS container and bringup
 
 The ROS launcher only builds the workspace and drops to a shell, so bringup

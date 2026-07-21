@@ -152,6 +152,10 @@ class EmbodiedAgentVLMAdapter(EmbodiedAgentAdapter):
                     "faiss_score": float(candidate.retrieval_score),
                     "vlm_rank": vlm_rank if rerank_valid else None,
                     "rerank_valid": rerank_valid,
+                    **(
+                        {"confidence_0_1": float(analysis["confidence"])}
+                        if analysis else {}
+                    ),
                     "rerank_object_location": analysis.get("object_location"),
                     "rerank_reasoning": analysis.get("reasoning"),
                 },

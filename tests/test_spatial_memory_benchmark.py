@@ -18,6 +18,7 @@ class SpatialMemoryMetricTests(unittest.TestCase):
         self.assertEqual(metrics["recall_at_k"], 1.0)
         self.assertEqual(metrics["relevant_coverage_at_k"], 1.0)
         self.assertEqual(metrics["checkpoint_recall_at_k"], 1.0)
+        self.assertEqual(metrics["checkpoint_top1"], 0.0)
         self.assertEqual(metrics["top1_relevant"], 0.0)
         self.assertEqual(metrics["stale_top1"], 1.0)
         self.assertAlmostEqual(metrics["stale_fraction_at_k"], 1.0 / 3.0)
@@ -57,6 +58,27 @@ class SpatialMemoryMetricTests(unittest.TestCase):
         self.assertEqual(summary["update_lag_frames_at_k"], 2)
         self.assertEqual(summary["update_lag_frames_top1"], 2)
         self.assertEqual(summary["live_stale_top1_rate"], 0.5)
+
+    def test_absent_confidence_reports_false_positive_rate(self):
+        results = [{
+            "track": "absent",
+            "checkpoint_frame": 3,
+            "query_latency_ms": 1.0,
+            "candidates": [{
+                "score": 0.8,
+                "metadata": {"confidence_0_1": 0.8},
+            }],
+            "metrics": {
+                "recall_at_k": None,
+                "top1_relevant": None,
+                "reciprocal_rank": 0.0,
+                "stale_top1": 0.0,
+                "stale_fraction_at_k": 0.0,
+            },
+        }]
+        summary = summarize_episode(results, [1.0])
+        self.assertEqual(summary["absent_top1_confidence"], 0.8)
+        self.assertEqual(summary["absent_false_positive_rate_at_0_5"], 1.0)
 
     def test_reports_vlm_valid_and_fallback_rates(self):
         results = []

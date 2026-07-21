@@ -39,6 +39,7 @@ RERANK_REPLAY=""
 RERANK_CASES=()
 RERANK_OPTIONS_USED=0
 RERANK_CASE_OPTIONS_USED=0
+VLM_MODEL_OPTION_USED=0
 SCAN_NAME=""
 SCAN_NAME_EXPLICIT=0
 REPLACE=0
@@ -54,6 +55,7 @@ BENCHMARK_ADAPTER="embodied_agent"
 BENCHMARK_ADAPTER_KWARGS=""
 BENCHMARK_MAX_EPISODES=""
 BENCHMARK_KEEP_STATE=0
+BENCHMARK_COMPARE_ADAPTERS="latest_only,embodied_agent,embodied_agent_recency"
 
 usage() {
     cat <<'EOF'
@@ -69,6 +71,7 @@ Usage:
   docker/scripts/spatial_memory_camera.sh benchmark [options]
   docker/scripts/spatial_memory_camera.sh benchmark-setup [options]
   docker/scripts/spatial_memory_camera.sh benchmark-eval [options]
+  docker/scripts/spatial_memory_camera.sh benchmark-compare [options]
   docker/scripts/spatial_memory_camera.sh build
   docker/scripts/spatial_memory_camera.sh where [options]
   docker/scripts/spatial_memory_camera.sh benchmark-where [options]
@@ -84,6 +87,7 @@ Commands:
              (add --replace to replace an existing selected dataset and its reports)
   benchmark-setup  generate only the algorithm-neutral two-lap episodes
   benchmark-eval   evaluate an existing dataset through a selected adapter
+  benchmark-compare compare latest matching runs on identical episodes
   build    build the small memory-only Docker image
   where    print the selected host scan directory
   benchmark-where  print the selected host benchmark directory
@@ -120,7 +124,7 @@ Memory options:
   --force-build           rebuild the memory image even if it exists
 
 VLM rerank options:
-  --recall-k N            FAISS recall depth before VLM (default: 12)
+  --recall-k N            FAISS recall depth before VLM/recency (default: 12)
   --vlm-model NAME        default: gemini-3.5-flash
   --case NAME             repeatable controlled case selector (default: all)
   --permutations N        candidate-order trials per case (default: 3)
@@ -133,10 +137,14 @@ Object-relocation benchmark options:
   --route-points N        observations per camera lap (default: 8)
   --capture-interval SEC  synthetic sensor interval (default: 2)
   --adapter NAME|MOD:CLS  evaluator adapter (default: embodied_agent)
+                           sanity baseline: latest_only
+                           temporal baseline: embodied_agent_recency
                            VLM built-in: embodied_agent_vlm
   --adapter-kwargs JSON   constructor kwargs for a custom adapter
   --max-episodes N        evaluate only the first N episodes
   --keep-state            retain generated memory and FAISS files in the report
+  --compare-adapters A,... latest runs to compare (default: latest_only,
+                           embodied_agent,embodied_agent_recency)
 
 Examples:
   docker/scripts/spatial_memory_camera.sh all
@@ -147,6 +155,11 @@ Examples:
   docker/scripts/spatial_memory_camera.sh benchmark-eval --max-episodes 1
   docker/scripts/spatial_memory_camera.sh benchmark-eval \
     --adapter embodied_agent_vlm --recall-k 12 --top-k 3 --max-episodes 1
+  docker/scripts/spatial_memory_camera.sh benchmark-eval \
+    --adapter latest_only --top-k 3
+  docker/scripts/spatial_memory_camera.sh benchmark-eval \
+    --adapter embodied_agent_recency --recall-k 12 --top-k 3
+  docker/scripts/spatial_memory_camera.sh benchmark-compare
   docker/scripts/spatial_memory_camera.sh all --layout 10 --style 10
   docker/scripts/spatial_memory_camera.sh memory --query "blue cabinets"
 EOF
@@ -197,7 +210,7 @@ parse_options() {
             --session-id) [[ $# -ge 2 ]] || die "--session-id needs a value"; LIVE_SESSION="$2"; shift 2 ;;
             --validate-session) [[ $# -ge 2 ]] || die "--validate-session needs a value"; EXPECT_LIVE_SESSION="$2"; shift 2 ;;
             --recall-k) [[ $# -ge 2 ]] || die "--recall-k needs a value"; RERANK_RECALL_K="$2"; RERANK_OPTIONS_USED=1; shift 2 ;;
-            --vlm-model) [[ $# -ge 2 ]] || die "--vlm-model needs a value"; VLM_MODEL="$2"; RERANK_OPTIONS_USED=1; shift 2 ;;
+            --vlm-model) [[ $# -ge 2 ]] || die "--vlm-model needs a value"; VLM_MODEL="$2"; RERANK_OPTIONS_USED=1; VLM_MODEL_OPTION_USED=1; shift 2 ;;
             --case) [[ $# -ge 2 ]] || die "--case needs a value"; RERANK_CASES+=("$2"); RERANK_OPTIONS_USED=1; RERANK_CASE_OPTIONS_USED=1; shift 2 ;;
             --permutations) [[ $# -ge 2 ]] || die "--permutations needs a value"; RERANK_PERMUTATIONS="$2"; RERANK_OPTIONS_USED=1; RERANK_CASE_OPTIONS_USED=1; shift 2 ;;
             --response-replay) [[ $# -ge 2 ]] || die "--response-replay needs a value"; RERANK_REPLAY="$2"; RERANK_OPTIONS_USED=1; RERANK_CASE_OPTIONS_USED=1; shift 2 ;;
@@ -210,6 +223,7 @@ parse_options() {
             --adapter-kwargs) [[ $# -ge 2 ]] || die "--adapter-kwargs needs a value"; BENCHMARK_ADAPTER_KWARGS="$2"; shift 2 ;;
             --max-episodes) [[ $# -ge 2 ]] || die "--max-episodes needs a value"; BENCHMARK_MAX_EPISODES="$2"; shift 2 ;;
             --keep-state) BENCHMARK_KEEP_STATE=1; shift ;;
+            --compare-adapters) [[ $# -ge 2 ]] || die "--compare-adapters needs a value"; BENCHMARK_COMPARE_ADAPTERS="$2"; shift 2 ;;
             --replace) REPLACE=1; shift ;;
             --rebuild) REBUILD=1; shift ;;
             --force-build) FORCE_BUILD=1; shift ;;
@@ -258,6 +272,8 @@ validate_options() {
         || die "objects must be comma-separated RoboCasa group names"
     [[ "$BENCHMARK_ADAPTER" =~ ^[A-Za-z0-9_.:-]+$ ]] \
         || die "invalid adapter name or import path"
+    [[ "$BENCHMARK_COMPARE_ADAPTERS" =~ ^[A-Za-z0-9_.:-]+(,[A-Za-z0-9_.:-]+)+$ ]] \
+        || die "compare-adapters must contain at least two comma-separated adapter names"
 
     if [[ -z "$SCAN_NAME" ]]; then
         SCAN_NAME="$(slugify "$TASK")_layout$(printf '%02d' "$LAYOUT")_style$(printf '%02d' "$STYLE")_seed${SEED}"
@@ -584,6 +600,8 @@ run_benchmark_eval() {
     if [[ -z "$adapter_kwargs" ]]; then
         if [[ "$BENCHMARK_ADAPTER" == embodied_agent ]]; then
             adapter_kwargs="{\"model\":\"$MODEL\",\"device\":\"$DEVICE\"}"
+        elif [[ "$BENCHMARK_ADAPTER" == embodied_agent_recency ]]; then
+            adapter_kwargs="{\"model\":\"$MODEL\",\"device\":\"$DEVICE\",\"recall_k\":$RERANK_RECALL_K}"
         elif [[ "$BENCHMARK_ADAPTER" == embodied_agent_vlm ]]; then
             adapter_kwargs="{\"model\":\"$MODEL\",\"device\":\"$DEVICE\",\"recall_k\":$RERANK_RECALL_K,\"vlm_model\":\"$VLM_MODEL\"}"
         else
@@ -601,7 +619,7 @@ run_benchmark_eval() {
         fi
     fi
     local -a gpu_args=(--gpus all)
-    [[ "$DEVICE" == cpu ]] && gpu_args=()
+    [[ "$DEVICE" == cpu || "$BENCHMARK_ADAPTER" == latest_only ]] && gpu_args=()
     local -a command=(
         docker run --rm
         "${gpu_args[@]}"
@@ -630,6 +648,28 @@ run_benchmark_eval() {
     note "each run contains report.html, summary.md, and results.json"
 }
 
+run_benchmark_compare() {
+    local host_benchmark
+    host_benchmark="$(benchmark_host_dir)"
+    [[ -f "$host_benchmark/benchmark_manifest.json" ]] \
+        || die "benchmark dataset not found: $host_benchmark (run benchmark-setup first)"
+    command -v python3 >/dev/null 2>&1 || die "python3 is required for comparison reports"
+
+    local -a compare_adapters=()
+    IFS=',' read -r -a compare_adapters <<< "$BENCHMARK_COMPARE_ADAPTERS"
+    local -a command=(
+        python3 -m benchmarks.spatial_memory.compare
+        --dataset "$host_benchmark"
+    )
+    local adapter
+    for adapter in "${compare_adapters[@]}"; do
+        command+=(--adapter "$adapter")
+    done
+    note "comparing latest identical runs: $BENCHMARK_COMPARE_ADAPTERS"
+    "${command[@]}"
+    note "comparison reports: $host_benchmark/comparisons"
+}
+
 main() {
     local command="${1:-help}"
     shift || true
@@ -649,8 +689,13 @@ main() {
             || die "case, permutations, and response-replay are accepted only by rerank"
         if [[ "$RERANK_OPTIONS_USED" == 1 ]]; then
             validate_rerank_options
-            [[ "$BENCHMARK_ADAPTER" == embodied_agent_vlm ]] \
-                || die "benchmark VLM options require --adapter embodied_agent_vlm"
+            if [[ "$BENCHMARK_ADAPTER" == embodied_agent_recency ]]; then
+                [[ "$VLM_MODEL_OPTION_USED" == 0 ]] \
+                    || die "--vlm-model requires --adapter embodied_agent_vlm"
+            else
+                [[ "$BENCHMARK_ADAPTER" == embodied_agent_vlm ]] \
+                    || die "benchmark recall/VLM options require a recency or VLM adapter"
+            fi
         fi
     elif [[ "$command" != help && "$command" != -h && "$command" != --help \
             && "$RERANK_OPTIONS_USED" == 1 ]]; then
@@ -729,6 +774,13 @@ main() {
                 || die "benchmark-eval does not accept replace, rebuild, session, validation, or query options"
             acquire_benchmark_lock
             run_benchmark_eval
+            ;;
+        benchmark-compare)
+            [[ "$REPLACE" == 0 && "$REBUILD" == 0 && -z "$LIVE_SESSION" \
+               && -z "$EXPECT_LIVE_SESSION" && ${#QUERIES[@]} -eq 0 ]] \
+                || die "benchmark-compare does not accept replace, rebuild, session, validation, or query options"
+            acquire_benchmark_lock
+            run_benchmark_compare
             ;;
         build) build_memory_image ;;
         where) scan_host_dir ;;
