@@ -46,9 +46,23 @@ install(PROGRAMS ${PROJECT_NAME}/controller_launcher.py
 install(PROGRAMS ${PROJECT_NAME}/debug_visualizer_node.py
         DESTINATION lib/${PROJECT_NAME}
         RENAME mjpc_debug_visualizer)
+# Full-body grasp orchestrator (2026-07-20): perception 6-DOF pose -> ramped
+# (velocity-capped) target stream + mink IK q* + Magpie sequencing for the
+# "Grasp H12 Magpie" MPC. Plan: h12/docs/grasp_controller_plan_2026-07-20.md (P5).
+install(PROGRAMS ${PROJECT_NAME}/grasp_orchestrator.py
+        DESTINATION lib/${PROJECT_NAME}
+        RENAME grasp_orchestrator)
+# Perception -> pelvis grasp-pose adapter (2026-07-21): re-runs the h12_skills
+# gemini/sam/graspgen chain once on ~/perceive, picks the top grasp, and
+# publishes it as a pelvis-frame PoseStamped on /graspgen/grasp_pose (the topic
+# grasp_orchestrator subscribes to). Reuses h12_skills SkillsBase/GraspSkill.
+install(PROGRAMS ${PROJECT_NAME}/graspgen_pose_adapter.py
+        DESTINATION lib/${PROJECT_NAME}
+        RENAME graspgen_pose_adapter)
 
 # ---- shared resources ----
 install(DIRECTORY config DESTINATION share/${PROJECT_NAME})
+# (grasp-MPC bringup now lives in h1_bringup/launch/h1_real_desktop_full_bringup.launch.py)
 
 # ---- C++ MJPC controller (embeds mjpc::Agent; auto-skipped where absent) ----
 # The controller links the fork's static libs + headers directly from the warm
