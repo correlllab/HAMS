@@ -70,6 +70,8 @@ BENCHMARK_ADAPTER_OPTION_USED=0
 BENCHMARK_ADAPTER_KWARGS_OPTION_USED=0
 BENCHMARK_MAX_EPISODES=""
 BENCHMARK_KEEP_STATE=0
+BENCHMARK_VLM_CALL_LIMIT="${SPATIAL_VLM_CALL_LIMIT:-20}"
+BENCHMARK_VLM_PREFLIGHT_DONE=0
 BENCHMARK_COMPARE_ADAPTERS="latest_only,embodied_agent,embodied_agent_recency"
 
 usage() {
@@ -160,6 +162,7 @@ Object-relocation benchmark options:
   --adapter-kwargs JSON   constructor kwargs for a custom adapter
   --max-episodes N        evaluate only the first N episodes
   --keep-state            retain generated memory and FAISS files in the report
+  --vlm-call-limit N       scheduled VLM-call safety cap (default: 20)
   --compare-adapters A,... latest runs to compare (default: latest_only,
                            embodied_agent,embodied_agent_recency)
 
@@ -242,6 +245,7 @@ parse_options() {
             --adapter-kwargs) [[ $# -ge 2 ]] || die "--adapter-kwargs needs a value"; BENCHMARK_ADAPTER_KWARGS="$2"; BENCHMARK_ADAPTER_KWARGS_OPTION_USED=1; shift 2 ;;
             --max-episodes) [[ $# -ge 2 ]] || die "--max-episodes needs a value"; BENCHMARK_MAX_EPISODES="$2"; shift 2 ;;
             --keep-state) BENCHMARK_KEEP_STATE=1; shift ;;
+            --vlm-call-limit) [[ $# -ge 2 ]] || die "--vlm-call-limit needs a value"; BENCHMARK_VLM_CALL_LIMIT="$2"; shift 2 ;;
             --compare-adapters) [[ $# -ge 2 ]] || die "--compare-adapters needs a value"; BENCHMARK_COMPARE_ADAPTERS="$2"; shift 2 ;;
             --replace) REPLACE=1; shift ;;
             --rebuild) REBUILD=1; shift ;;
@@ -287,6 +291,10 @@ validate_options() {
         is_integer "$BENCHMARK_MAX_EPISODES" || die "max-episodes must be an integer"
         ((BENCHMARK_MAX_EPISODES > 0)) || die "max-episodes must be positive"
     fi
+    is_integer "$BENCHMARK_VLM_CALL_LIMIT" \
+        || die "vlm-call-limit must be an integer"
+    ((BENCHMARK_VLM_CALL_LIMIT > 0)) \
+        || die "vlm-call-limit must be positive"
     [[ "$BENCHMARK_OBJECTS" =~ ^[A-Za-z0-9_,-]+$ ]] \
         || die "objects must be comma-separated RoboCasa group names"
     [[ "$BENCHMARK_ADAPTER" =~ ^[A-Za-z0-9_.:-]+$ ]] \
@@ -619,6 +627,31 @@ run_benchmark_setup() {
     note "benchmark contact sheets: $host_benchmark/episodes/*/contact_sheet.jpg"
 }
 
+enforce_benchmark_vlm_call_limit() {
+    local host_benchmark
+    host_benchmark="$(benchmark_host_dir)"
+    [[ -f "$host_benchmark/benchmark_manifest.json" ]] \
+        || die "benchmark dataset not found: $host_benchmark (run benchmark-setup first)"
+    command -v python3 >/dev/null 2>&1 \
+        || die "python3 is required for VLM call estimation"
+
+    local -a command=(
+        python3 -m benchmarks.spatial_memory.quota
+        --dataset "$host_benchmark"
+        --call-limit "$BENCHMARK_VLM_CALL_LIMIT"
+    )
+    [[ -n "$BENCHMARK_MAX_EPISODES" ]] \
+        && command+=(--max-episodes "$BENCHMARK_MAX_EPISODES")
+    local scheduled_calls selected_episodes safe_episodes safe_calls
+    read -r scheduled_calls selected_episodes safe_episodes safe_calls \
+        < <("${command[@]}")
+    note "VLM preflight: $scheduled_calls scheduled calls across $selected_episodes episodes (safety limit: $BENCHMARK_VLM_CALL_LIMIT)"
+    if ((scheduled_calls > BENCHMARK_VLM_CALL_LIMIT)); then
+        die "VLM call limit exceeded; use --max-episodes $safe_episodes for $safe_calls calls, or explicitly raise --vlm-call-limit after checking quota"
+    fi
+    BENCHMARK_VLM_PREFLIGHT_DONE=1
+}
+
 run_benchmark_eval() {
     local host_benchmark
     host_benchmark="$(benchmark_host_dir)"
@@ -626,6 +659,10 @@ run_benchmark_eval() {
         || die "EmbodiedAgent not found at $EMBODIED_ROOT"
     [[ -f "$host_benchmark/benchmark_manifest.json" ]] \
         || die "benchmark dataset not found: $host_benchmark (run benchmark-setup first)"
+    if [[ "$BENCHMARK_ADAPTER" == embodied_agent_vlm \
+          && "$BENCHMARK_VLM_PREFLIGHT_DONE" == 0 ]]; then
+        enforce_benchmark_vlm_call_limit
+    fi
     mkdir -p "$HF_CACHE"
     build_memory_image
 
@@ -705,6 +742,7 @@ run_benchmark_suite() {
        && "$BENCHMARK_ADAPTER_KWARGS_OPTION_USED" == 0 ]] \
         || die "benchmark-suite selects its four adapters; do not pass --adapter or --adapter-kwargs"
     require_vlm_key
+    enforce_benchmark_vlm_call_limit
 
     local adapter
     for adapter in \

@@ -353,8 +353,12 @@ It runs `latest_only`, `embodied_agent`, `embodied_agent_recency`, and
 `embodied_agent_vlm` sequentially on the same frozen dataset, then generates a
 comparison containing all four. `--max-episodes` applies to every method, which
 is useful for a one-episode quota check. The suite requires the local key before
-starting, so a missing key cannot leave a partially completed no-VLM run. It is
-not the default because every streaming VLM query consumes API quota.
+starting and counts the scheduled VLM queries before running any method. The
+default safety limit is 20 calls; on the current 20-episode dataset the guard
+reports 153 scheduled calls and recommends the largest safe prefix (three
+episodes and 15 calls). Set a smaller subset with `--max-episodes`, or explicitly
+raise `--vlm-call-limit` only after checking the available quota. It is not the
+default because every streaming VLM query consumes API quota.
 
 To compare another method, implement
 `benchmarks.spatial_memory.adapter.MemoryAdapter` (`reset`, `ingest`, `query`,

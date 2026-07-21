@@ -174,7 +174,10 @@ docker/scripts/spatial_memory_camera.sh benchmark-suite \
 ```
 
 `benchmark-suite` is deliberately opt-in because it makes real multimodal API
-calls. The normal `benchmark` and `benchmark-eval` defaults remain VLM-free.
+calls. Before starting, it counts the scheduled queries and refuses to exceed
+the default 20-call safety limit. Use `--max-episodes 3` for the current dataset
+(15 calls), or explicitly raise `--vlm-call-limit` only after checking quota.
+The normal `benchmark` and `benchmark-eval` defaults remain VLM-free.
 
 ## Run the ROS container and bringup
 
