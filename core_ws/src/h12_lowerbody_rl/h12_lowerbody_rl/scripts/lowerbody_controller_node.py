@@ -139,17 +139,20 @@ class LowerBodyControllerNode(Node):
                     from_value=-IMU_OFFSET_RANGE_DEG, to_value=IMU_OFFSET_RANGE_DEG,
                     step=0.0)]))
         self.declare_parameter("default_height_cmd", 1.0)
-        # Auto-switch stand<->walk from ||[vx, vy, wz]|| with hysteresis (rise > fall):
-        # engage walk above rise, fall back to stand below fall. auto_switch:=false
-        # pins the robot to active_policy. rise lowered to 0.05 so the small
-        # velocity commands nav2 emits on fine approaches / gentle corrections
-        # still engage walking (at 0.10 the robot would hold the stand policy and
-        # not follow the path). fall kept below rise for hysteresis so it doesn't
-        # chatter near the boundary; both stay <= the handover gate's cmd_eps
-        # (0.10) so walk->stand's stop gate can still pass.
+        # Auto-switch stand<->walk from ||[vx, vy, wz]||: engage walk above rise,
+        # fall back to stand at or below fall. auto_switch:=false pins the robot
+        # to active_policy. rise 0.05 so a real velocity command starts walking
+        # (small enough to catch nav2's fine-approach commands). fall 0.0 so once
+        # walking the robot STAYS in walk for ANY nonzero command and only returns
+        # to stand at an exactly-zero command -- it never drops out of walk on
+        # small mid-path dips. (The fall check is <=, see _tick, so 0.0 fires at
+        # 0.) Both stay <= the handover gate's cmd_eps (0.10) so walk->stand's
+        # stop gate can still pass. NOTE: /cmd_vel is latched, so if a publisher
+        # stops mid-command the last (nonzero) value holds and the robot keeps
+        # walking -- publish an explicit zero to stand.
         self.declare_parameter("auto_switch", True)
         self.declare_parameter("auto_switch_rise_norm", 0.05)
-        self.declare_parameter("auto_switch_fall_norm", 0.03)
+        self.declare_parameter("auto_switch_fall_norm", 0.0)
         # Seconds to ramp the pre-pose target from the measured leg pose to the
         # policy's nominal (cosine blend; see the PREPOSE block above). Starting
         # at the measured pose means zero initial PD error, so full gains apply
@@ -388,7 +391,10 @@ class LowerBodyControllerNode(Node):
             active = self._manager.active_name
             if active == self._stand_policy and cmd_norm > self._auto_rise:
                 self._request_policy(WALK, require_stop=False)
-            elif active == WALK and cmd_norm < self._auto_fall:
+            elif active == WALK and cmd_norm <= self._auto_fall:
+                # <= (not <) so a fall threshold of 0.0 returns to stand at an
+                # exactly-zero command; a norm is never < 0, so strict < would
+                # never fire at 0 and the robot would stay in walk forever.
                 self._request_policy(self._stand_policy, require_stop=True)
 
         if self._manager.is_pending():
