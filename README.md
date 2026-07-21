@@ -141,10 +141,11 @@ poses so map-based methods can consume the same frozen episodes:
 docker/scripts/spatial_memory_camera.sh benchmark --episodes 12
 ```
 
-The default and highest-priority evaluator is VLMaps; other methods plug in
-through the benchmark's `MemoryAdapter` interface. No VLM key is required for
-the default run. VLMaps uses the official LSeg model/checkpoint from a sibling
-`vlmaps` checkout:
+The default evaluator is the EmbodiedAgent SigLIP + FAISS implementation under
+test; other methods plug in through the benchmark's `MemoryAdapter` interface.
+No VLM key is required for the default run. The mentor-selected, highest-priority
+comparison baseline is VLMaps, using the official LSeg model/checkpoint from a
+sibling `vlmaps` checkout:
 
 ```bash
 git clone --depth 1 https://github.com/vlmaps/vlmaps.git ../vlmaps

@@ -208,9 +208,9 @@ docker/scripts/spatial_memory_camera.sh benchmark-setup --episodes 12
 docker/scripts/spatial_memory_camera.sh benchmark-eval
 ```
 
-The default evaluator is VLMaps. To test the production-style EmbodiedAgent
-two-stage path on the **same frozen episodes**, put the Gemini key in
-`docker/.env` as shown above and select the VLM adapter:
+The default evaluator returns EmbodiedAgent SigLIP + FAISS Top K directly. To
+test its production-style two-stage path on the **same frozen episodes**, put
+the Gemini key in `docker/.env` as shown above and select the VLM adapter:
 
 ```bash
 docker/scripts/spatial_memory_camera.sh benchmark-eval \
@@ -307,12 +307,13 @@ python3 -m benchmarks.spatial_memory.report \
   --dataset /path/to/the/benchmark-dataset
 ```
 
-The default evaluator is `vlmaps`, reflecting the mentor-selected comparison
-priority. The `embodied_agent` adapter remains the current EmbodiedAgent SigLIP
-+ live FAISS pipeline. `embodied_agent_vlm` adds the repository's Gemini
-precision stage without changing the dataset, query schedule, or metrics.
+The default evaluator is `embodied_agent`, the current EmbodiedAgent SigLIP +
+live FAISS pipeline under test. `embodied_agent_vlm` adds the repository's
+Gemini precision stage without changing the dataset, query schedule, or
+metrics. VLMaps is the mentor-selected, highest-priority comparison baseline;
+its performance is reported as-is rather than tuned to beat the primary method.
 
-### VLMaps baseline (highest priority)
+### VLMaps baseline (highest-priority comparison)
 
 Keep the official repository beside HAMS:
 

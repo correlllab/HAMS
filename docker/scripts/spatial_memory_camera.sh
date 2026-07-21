@@ -69,7 +69,7 @@ BENCHMARK_EPISODES=12
 BENCHMARK_OBJECTS="mug,bowl"
 BENCHMARK_ROUTE_POINTS=8
 BENCHMARK_CAPTURE_INTERVAL=2
-BENCHMARK_ADAPTER="vlmaps"
+BENCHMARK_ADAPTER="embodied_agent"
 BENCHMARK_ADAPTER_KWARGS=""
 BENCHMARK_ADAPTER_OPTION_USED=0
 BENCHMARK_ADAPTER_KWARGS_OPTION_USED=0
@@ -162,7 +162,7 @@ Object-relocation benchmark options:
   --objects GROUP,...     RoboCasa object groups (default: mug,bowl)
   --route-points N        observations per camera lap (default: 8)
   --capture-interval SEC  synthetic sensor interval (default: 2)
-  --adapter NAME|MOD:CLS  evaluator adapter (default: vlmaps)
+  --adapter NAME|MOD:CLS  evaluator adapter (default: embodied_agent)
                            sanity baseline: latest_only
                            temporal baseline: embodied_agent_recency
                            VLM built-in: embodied_agent_vlm
