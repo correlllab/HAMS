@@ -5,6 +5,19 @@ set -Eeuo pipefail
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd -- "$SCRIPT_DIR/../.." && pwd)"
 WORKSPACE_ROOT="$(dirname -- "$REPO_ROOT")"
+SPATIAL_ENV_FILE="${SPATIAL_ENV_FILE:-$REPO_ROOT/docker/.env}"
+
+# Keep local credentials out of command history and Git. This mirrors
+# docker_run.sh, while still allowing an explicitly exported variable to be
+# used when no local env file exists. Values loaded from docker/.env take
+# precedence over stale variables in the invoking shell.
+if [[ -f "$SPATIAL_ENV_FILE" ]]; then
+    set -a
+    # shellcheck disable=SC1090
+    source "$SPATIAL_ENV_FILE"
+    set +a
+fi
+
 COMPOSE_FILE="$REPO_ROOT/docker/docker-compose.yml"
 MEMORY_DOCKERFILE="$REPO_ROOT/docker/SpatialMemoryDockerfile"
 EMBODIED_ROOT="${EMBODIED_AGENT_ROOT:-$WORKSPACE_ROOT/EmbodiedAgent}"
@@ -53,6 +66,8 @@ BENCHMARK_ROUTE_POINTS=8
 BENCHMARK_CAPTURE_INTERVAL=2
 BENCHMARK_ADAPTER="embodied_agent"
 BENCHMARK_ADAPTER_KWARGS=""
+BENCHMARK_ADAPTER_OPTION_USED=0
+BENCHMARK_ADAPTER_KWARGS_OPTION_USED=0
 BENCHMARK_MAX_EPISODES=""
 BENCHMARK_KEEP_STATE=0
 BENCHMARK_COMPARE_ADAPTERS="latest_only,embodied_agent,embodied_agent_recency"
@@ -71,6 +86,7 @@ Usage:
   docker/scripts/spatial_memory_camera.sh benchmark [options]
   docker/scripts/spatial_memory_camera.sh benchmark-setup [options]
   docker/scripts/spatial_memory_camera.sh benchmark-eval [options]
+  docker/scripts/spatial_memory_camera.sh benchmark-suite [options]
   docker/scripts/spatial_memory_camera.sh benchmark-compare [options]
   docker/scripts/spatial_memory_camera.sh build
   docker/scripts/spatial_memory_camera.sh where [options]
@@ -87,6 +103,7 @@ Commands:
              (add --replace to replace an existing selected dataset and its reports)
   benchmark-setup  generate only the algorithm-neutral two-lap episodes
   benchmark-eval   evaluate an existing dataset through a selected adapter
+  benchmark-suite  run three baselines + Gemini, then compare all four
   benchmark-compare compare latest matching runs on identical episodes
   build    build the small memory-only Docker image
   where    print the selected host scan directory
@@ -159,6 +176,8 @@ Examples:
     --adapter latest_only --top-k 3
   docker/scripts/spatial_memory_camera.sh benchmark-eval \
     --adapter embodied_agent_recency --recall-k 12 --top-k 3
+  docker/scripts/spatial_memory_camera.sh benchmark-suite \
+    --benchmark-name object_relocation_layout09_style09_seed42 --top-k 3
   docker/scripts/spatial_memory_camera.sh benchmark-compare
   docker/scripts/spatial_memory_camera.sh all --layout 10 --style 10
   docker/scripts/spatial_memory_camera.sh memory --query "blue cabinets"
@@ -219,8 +238,8 @@ parse_options() {
             --objects) [[ $# -ge 2 ]] || die "--objects needs a value"; BENCHMARK_OBJECTS="$2"; shift 2 ;;
             --route-points) [[ $# -ge 2 ]] || die "--route-points needs a value"; BENCHMARK_ROUTE_POINTS="$2"; shift 2 ;;
             --capture-interval) [[ $# -ge 2 ]] || die "--capture-interval needs a value"; BENCHMARK_CAPTURE_INTERVAL="$2"; shift 2 ;;
-            --adapter) [[ $# -ge 2 ]] || die "--adapter needs a value"; BENCHMARK_ADAPTER="$2"; shift 2 ;;
-            --adapter-kwargs) [[ $# -ge 2 ]] || die "--adapter-kwargs needs a value"; BENCHMARK_ADAPTER_KWARGS="$2"; shift 2 ;;
+            --adapter) [[ $# -ge 2 ]] || die "--adapter needs a value"; BENCHMARK_ADAPTER="$2"; BENCHMARK_ADAPTER_OPTION_USED=1; shift 2 ;;
+            --adapter-kwargs) [[ $# -ge 2 ]] || die "--adapter-kwargs needs a value"; BENCHMARK_ADAPTER_KWARGS="$2"; BENCHMARK_ADAPTER_KWARGS_OPTION_USED=1; shift 2 ;;
             --max-episodes) [[ $# -ge 2 ]] || die "--max-episodes needs a value"; BENCHMARK_MAX_EPISODES="$2"; shift 2 ;;
             --keep-state) BENCHMARK_KEEP_STATE=1; shift ;;
             --compare-adapters) [[ $# -ge 2 ]] || die "--compare-adapters needs a value"; BENCHMARK_COMPARE_ADAPTERS="$2"; shift 2 ;;
@@ -311,6 +330,23 @@ validate_rerank_options() {
     for rerank_case in "${RERANK_CASES[@]}"; do
         [[ "$rerank_case" =~ ^[A-Za-z0-9._-]+$ ]] || die "invalid rerank case: $rerank_case"
     done
+}
+
+vlm_key_env_name() {
+    if [[ -n "${GEMINI_API_KEY:-}" \
+          && "${GEMINI_API_KEY}" != "your-gemini-api-key-here" ]]; then
+        printf '%s\n' GEMINI_API_KEY
+    elif [[ -n "${GOOGLE_API_KEY:-}" \
+            && "${GOOGLE_API_KEY}" != "your-google-api-key-here" ]]; then
+        printf '%s\n' GOOGLE_API_KEY
+    else
+        return 1
+    fi
+}
+
+require_vlm_key() {
+    vlm_key_env_name >/dev/null || die \
+        "Gemini requires GEMINI_API_KEY or GOOGLE_API_KEY; put it in $SPATIAL_ENV_FILE"
 }
 
 validate_rerank_setup_scene() {
@@ -493,13 +529,10 @@ run_rerank() {
 
     local -a key_args=()
     if [[ -z "$RERANK_REPLAY" ]]; then
-        if [[ -n "${GEMINI_API_KEY:-}" ]]; then
-            key_args=(-e GEMINI_API_KEY)
-        elif [[ -n "${GOOGLE_API_KEY:-}" ]]; then
-            key_args=(-e GOOGLE_API_KEY)
-        else
-            die "rerank requires GEMINI_API_KEY or GOOGLE_API_KEY in the environment"
-        fi
+        local key_name
+        key_name="$(vlm_key_env_name)" || die \
+            "rerank requires GEMINI_API_KEY or GOOGLE_API_KEY; put it in $SPATIAL_ENV_FILE"
+        key_args=(-e "$key_name")
     fi
     mkdir -p "$HF_CACHE"
     build_memory_image
@@ -610,13 +643,10 @@ run_benchmark_eval() {
     fi
     local -a key_args=()
     if [[ "$BENCHMARK_ADAPTER" == embodied_agent_vlm ]]; then
-        if [[ -n "${GEMINI_API_KEY:-}" ]]; then
-            key_args=(-e GEMINI_API_KEY)
-        elif [[ -n "${GOOGLE_API_KEY:-}" ]]; then
-            key_args=(-e GOOGLE_API_KEY)
-        else
-            die "embodied_agent_vlm requires GEMINI_API_KEY or GOOGLE_API_KEY"
-        fi
+        local key_name
+        key_name="$(vlm_key_env_name)" || die \
+            "embodied_agent_vlm requires GEMINI_API_KEY or GOOGLE_API_KEY; put it in $SPATIAL_ENV_FILE"
+        key_args=(-e "$key_name")
     fi
     local -a gpu_args=(--gpus all)
     [[ "$DEVICE" == cpu || "$BENCHMARK_ADAPTER" == latest_only ]] && gpu_args=()
@@ -670,6 +700,26 @@ run_benchmark_compare() {
     note "comparison reports: $host_benchmark/comparisons"
 }
 
+run_benchmark_suite() {
+    [[ "$BENCHMARK_ADAPTER_OPTION_USED" == 0 \
+       && "$BENCHMARK_ADAPTER_KWARGS_OPTION_USED" == 0 ]] \
+        || die "benchmark-suite selects its four adapters; do not pass --adapter or --adapter-kwargs"
+    require_vlm_key
+
+    local adapter
+    for adapter in \
+        latest_only \
+        embodied_agent \
+        embodied_agent_recency \
+        embodied_agent_vlm; do
+        BENCHMARK_ADAPTER="$adapter"
+        BENCHMARK_ADAPTER_KWARGS=""
+        run_benchmark_eval
+    done
+    BENCHMARK_COMPARE_ADAPTERS="latest_only,embodied_agent,embodied_agent_recency,embodied_agent_vlm"
+    run_benchmark_compare
+}
+
 main() {
     local command="${1:-help}"
     shift || true
@@ -684,10 +734,13 @@ main() {
     fi
     if [[ "$command" == rerank ]]; then
         validate_rerank_options
-    elif [[ "$command" == benchmark || "$command" == benchmark-eval ]]; then
+    elif [[ "$command" == benchmark || "$command" == benchmark-eval \
+            || "$command" == benchmark-suite ]]; then
         [[ "$RERANK_CASE_OPTIONS_USED" == 0 ]] \
             || die "case, permutations, and response-replay are accepted only by rerank"
-        if [[ "$RERANK_OPTIONS_USED" == 1 ]]; then
+        if [[ "$command" == benchmark-suite ]]; then
+            validate_rerank_options
+        elif [[ "$RERANK_OPTIONS_USED" == 1 ]]; then
             validate_rerank_options
             if [[ "$BENCHMARK_ADAPTER" == embodied_agent_recency ]]; then
                 [[ "$VLM_MODEL_OPTION_USED" == 0 ]] \
@@ -699,7 +752,7 @@ main() {
         fi
     elif [[ "$command" != help && "$command" != -h && "$command" != --help \
             && "$RERANK_OPTIONS_USED" == 1 ]]; then
-        die "VLM options are accepted only by rerank, benchmark, or benchmark-eval"
+        die "VLM options are accepted only by rerank, benchmark, benchmark-eval, or benchmark-suite"
     fi
 
     case "$command" in
@@ -774,6 +827,13 @@ main() {
                 || die "benchmark-eval does not accept replace, rebuild, session, validation, or query options"
             acquire_benchmark_lock
             run_benchmark_eval
+            ;;
+        benchmark-suite)
+            [[ "$REPLACE" == 0 && "$REBUILD" == 0 && -z "$LIVE_SESSION" \
+               && -z "$EXPECT_LIVE_SESSION" && ${#QUERIES[@]} -eq 0 ]] \
+                || die "benchmark-suite does not accept replace, rebuild, session, validation, or query options"
+            acquire_benchmark_lock
+            run_benchmark_suite
             ;;
         benchmark-compare)
             [[ "$REPLACE" == 0 && "$REBUILD" == 0 && -z "$LIVE_SESSION" \

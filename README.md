@@ -118,8 +118,8 @@ docker/scripts/spatial_memory_camera.sh live
 ```
 
 To compare FAISS ordering against the repository's existing Gemini VLM reranker,
-first create its separate, frozen benchmark dataset, then explicitly provide an
-API key and run the evaluator:
+first create its separate, frozen benchmark dataset, then run the evaluator.
+`spatial_memory_camera.sh` automatically loads the Git-ignored `docker/.env`:
 
 ```bash
 docker/scripts/spatial_memory_camera.sh rerank-setup
@@ -149,9 +149,9 @@ docker/scripts/spatial_memory_camera.sh benchmark-eval \
   --adapter embodied_agent_vlm --recall-k 12 --top-k 3 --max-episodes 1
 ```
 
-This optional command requires `GEMINI_API_KEY` (or `GOOGLE_API_KEY`) in the
-current shell. Its readable report exposes VLM validity, fallback, original
-FAISS rank, confidence, and reasoning.
+This optional command requires `GEMINI_API_KEY` (or `GOOGLE_API_KEY`) in
+`docker/.env` or the current shell. Its readable report exposes VLM validity,
+fallback, original FAISS rank, confidence, and reasoning.
 
 For a no-API method comparison on the same frozen episodes, evaluate the
 `latest_only` and `embodied_agent_recency` adapters, then run:
@@ -163,6 +163,18 @@ docker/scripts/spatial_memory_camera.sh benchmark-compare \
 
 The comparison report enforces identical episodes, queries, labels, and Top-K
 before showing aggregate metrics with 95% confidence intervals.
+
+To run all three baselines, Gemini, and the final four-method comparison with
+one command on an existing frozen dataset, use:
+
+```bash
+docker/scripts/spatial_memory_camera.sh benchmark-suite \
+  --benchmark-name object_relocation_layout09_style09_seed42 \
+  --recall-k 12 --top-k 3
+```
+
+`benchmark-suite` is deliberately opt-in because it makes real multimodal API
+calls. The normal `benchmark` and `benchmark-eval` defaults remain VLM-free.
 
 ## Run the ROS container and bringup
 

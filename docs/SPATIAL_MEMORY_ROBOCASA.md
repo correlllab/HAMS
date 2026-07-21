@@ -119,17 +119,20 @@ That command performs the reproducible sequence `64-frame baseline -> one curren
 `kitchen_layout09_style09_seed42_rerank_benchmark` and refuses to replace an
 existing directory.
 
-Then provide a Gemini key in the current shell and run the evaluator:
+Store the Gemini key once in the local, Git-ignored environment file and run the
+evaluator:
 
 ```bash
-read -rsp "Gemini API key: " GEMINI_API_KEY
-export GEMINI_API_KEY
-echo
+cp docker/.env.example docker/.env  # first time only
+chmod 600 docker/.env
+# Edit docker/.env and replace the GEMINI_API_KEY placeholder.
 docker/scripts/spatial_memory_camera.sh rerank
 ```
 
-The key is forwarded to the container by environment-variable name; its value is
-not written to the repository or included in the Docker command line. The normal
+`spatial_memory_camera.sh` sources `docker/.env` automatically. The key is
+forwarded to the container by environment-variable name; its value is not
+written to the repository, report, or Docker command line. An explicitly
+exported key remains a fallback when `docker/.env` does not exist. The normal
 `all`, `live`, and `memory` commands remain VLM-free.
 
 The default benchmark freezes frames `mem_000000` through `mem_000072`, so later
@@ -199,13 +202,10 @@ docker/scripts/spatial_memory_camera.sh benchmark-eval
 ```
 
 The default evaluator returns FAISS Top K directly. To test the production-style
-two-stage path on the **same frozen episodes**, export a Gemini key and select the
-VLM adapter:
+two-stage path on the **same frozen episodes**, put the Gemini key in
+`docker/.env` as shown above and select the VLM adapter:
 
 ```bash
-read -rsp "Gemini API key: " GEMINI_API_KEY
-export GEMINI_API_KEY
-echo
 docker/scripts/spatial_memory_camera.sh benchmark-eval \
   --benchmark-name object_relocation_layout09_style09_seed42 \
   --adapter embodied_agent_vlm \
@@ -339,6 +339,22 @@ or oracle labels; consequently, a one-episode Gemini smoke run cannot silently b
 compared with a 20-episode baseline. Outputs are written below
 `comparisons/<run-id>/` as `comparison.html`, `comparison.md`, and
 `comparison.json`, with means and 95% confidence intervals across episodes.
+
+For the normal four-method evaluation, the separate evaluator commands can be
+replaced by one opt-in suite command:
+
+```bash
+docker/scripts/spatial_memory_camera.sh benchmark-suite \
+  --benchmark-name object_relocation_layout09_style09_seed42 \
+  --recall-k 12 --top-k 3
+```
+
+It runs `latest_only`, `embodied_agent`, `embodied_agent_recency`, and
+`embodied_agent_vlm` sequentially on the same frozen dataset, then generates a
+comparison containing all four. `--max-episodes` applies to every method, which
+is useful for a one-episode quota check. The suite requires the local key before
+starting, so a missing key cannot leave a partially completed no-VLM run. It is
+not the default because every streaming VLM query consumes API quota.
 
 To compare another method, implement
 `benchmarks.spatial_memory.adapter.MemoryAdapter` (`reset`, `ingest`, `query`,
