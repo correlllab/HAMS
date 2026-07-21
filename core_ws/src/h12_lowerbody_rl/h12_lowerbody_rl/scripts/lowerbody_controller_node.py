@@ -23,9 +23,13 @@ There are no per-policy start services — drive /cmd_vel (e.g. from nav2) and t
 controller stands or walks to match. Set ``auto_switch:=false`` to pin the robot to
 ``active_policy`` (pure stand or pure walk).
 
-A third, experimental policy ``almi`` (ALMI-Open LSTM) both stands at cmd=0 and
-locomotes, so it needs no switching: ``active_policy:=almi`` pins it regardless
-of ``auto_switch`` (the auto-switch only ever toggles fame<->walk).
+The stand side of the auto-switch is the startup policy when it can stand:
+``active_policy:=almi`` gives almi(stand) <-> walk(locomote), exactly like the
+default fame <-> walk. (ALMI can in principle locomote itself, but its
+from-stand gait engagement proved unreliable — envelope-tested 2026-07-20 — so
+under auto_switch it serves as the stand/manipulation policy and the proven
+walk policy handles velocity tracking.) ``auto_switch:=false`` pins the
+startup policy outright.
 
 Interfaces
 ----------
@@ -78,9 +82,15 @@ MOTOR_MODE_PR = 1
 # Policy registry keys (see LowerBodyControllerNode.__init__).
 FAME = "fame"   # RMA balance/stand policy (does not locomote)
 WALK = "walk"   # TorchScript walk policy (follows /cmd_vel)
-ALMI = "almi"   # ALMI LSTM policy (stands at cmd=0 AND follows /cmd_vel).
-                # Experimental: auto_switch only toggles fame<->walk, so an
-                # active "almi" is naturally pinned — it never auto-switches.
+ALMI = "almi"   # ALMI LSTM policy: superb stand (incl. under arm motion), but
+                # its from-stand gait engagement is unreliable (LSTM was only
+                # ever trained with the command present from episode start) —
+                # so under auto_switch it serves as a STAND policy and hands
+                # locomotion to walk, exactly like fame does.
+
+# Policies that can serve as the auto-switch stand side. The locomotion side
+# is always the walk policy (the proven velocity tracker).
+STAND_CAPABLE = (FAME, ALMI)
 
 # Pre-pose: before engaging the policy, PD-drive the legs to the incoming policy's
 # nominal crouch (band-held) and wait until they settle there. The RMA policy warms
@@ -130,12 +140,16 @@ class LowerBodyControllerNode(Node):
                     step=0.0)]))
         self.declare_parameter("default_height_cmd", 1.0)
         # Auto-switch stand<->walk from ||[vx, vy, wz]|| with hysteresis (rise > fall):
-        # engage walk above rise, fall back to FAME below fall. auto_switch:=false
-        # pins the robot to active_policy. rise sits at the handover gate's cmd_eps
-        # (0.10); fall below it so walk->FAME's stop gate can also pass.
+        # engage walk above rise, fall back to stand below fall. auto_switch:=false
+        # pins the robot to active_policy. rise lowered to 0.05 so the small
+        # velocity commands nav2 emits on fine approaches / gentle corrections
+        # still engage walking (at 0.10 the robot would hold the stand policy and
+        # not follow the path). fall kept below rise for hysteresis so it doesn't
+        # chatter near the boundary; both stay <= the handover gate's cmd_eps
+        # (0.10) so walk->stand's stop gate can still pass.
         self.declare_parameter("auto_switch", True)
-        self.declare_parameter("auto_switch_rise_norm", 0.10)
-        self.declare_parameter("auto_switch_fall_norm", 0.05)
+        self.declare_parameter("auto_switch_rise_norm", 0.05)
+        self.declare_parameter("auto_switch_fall_norm", 0.03)
         # Seconds to ramp the pre-pose target from the measured leg pose to the
         # policy's nominal (cosine blend; see the PREPOSE block above). Starting
         # at the measured pose means zero initial PD error, so full gains apply
@@ -195,6 +209,8 @@ class LowerBodyControllerNode(Node):
         self._frame_task_ready = not bool(self.get_parameter("band_wait_for_frame_task").value)
         self._band_cli = self.create_client(Trigger, "/elastic_band/toggle")
         self._awaiting_band_release = False  # policy committed, band not yet released
+        self._band_release_inflight = False  # a toggle call is dispatched, awaiting result
+        self._band_wait_warned = False       # rate-limit the "service not ready" warning
         self._request_time: float | None = None  # when the pending activation was asked
         self._prepose_pass = 0   # consecutive ticks the legs have held at nominal (pre-engage)
         self._prepose_ticks = 0  # total pre-pose ticks so far (ramp phase + settle timeout)
@@ -218,9 +234,15 @@ class LowerBodyControllerNode(Node):
         self._publish_active()
 
         self.create_timer(1.0 / control_hz, self._tick)
+        # Auto-switch sides: the startup policy is the stand side when it can
+        # stand (fame or almi); walk is always the locomotion side. A startup
+        # policy of "walk" gets fame as its stand side (legacy behavior).
+        self._stand_policy = startup_policy if startup_policy in STAND_CAPABLE else FAME
+
         self.get_logger().info(
             f"lowerbody_controller ready: policies={self._manager.names()}, "
-            f"auto_switch={self._auto_switch} (rise={self._auto_rise}, fall={self._auto_fall}), "
+            f"auto_switch={self._auto_switch} "
+            f"(stand={self._stand_policy!r} <-> walk, rise={self._auto_rise}, fall={self._auto_fall}), "
             f"control_hz={control_hz}. Policy follows /cmd_vel; no start services."
         )
 
@@ -310,19 +332,34 @@ class LowerBodyControllerNode(Node):
         self._cmd_pub.publish(cmd_msg)
 
     def _release_band(self, reason: str) -> None:
-        if self._band_released:
+        # Called every tick while awaiting release. Only mark the band released
+        # once the sim's toggle actually succeeds — NOT before the service check.
+        # The old code set _band_released=True up front, so if /elastic_band/toggle
+        # wasn't discovered yet (a startup race, likelier with the slower non-
+        # headless MuJoCo viewer) it gave up permanently and the robot hung from
+        # the band forever: it would even switch to walk on /cmd_vel but never
+        # move. Now it retries every tick until the service is ready and the call
+        # returns success.
+        if self._band_released or self._band_release_inflight:
             return
-        self._band_released = True
-        if not self._band_cli.service_is_ready() and not self._band_cli.wait_for_service(timeout_sec=1.0):
-            self.get_logger().warn("elastic band toggle service unavailable — band NOT released")
-            return
+        if not self._band_cli.service_is_ready():
+            if not self._band_wait_warned:
+                self.get_logger().warn(
+                    "elastic band toggle service not ready yet — retrying until it appears")
+                self._band_wait_warned = True
+            return  # do NOT mark released; retry on a later tick (non-blocking)
+        self._band_release_inflight = True
         self.get_logger().info(f"releasing elastic band ({reason})")
-        fut = self._band_cli.call_async(Trigger.Request())
-        fut.add_done_callback(
-            lambda f: self.get_logger().info(
-                f"elastic band toggle: {f.result().message}" if f.result() else "elastic band toggle call failed"
-            )
-        )
+        self._band_cli.call_async(Trigger.Request()).add_done_callback(self._on_band_toggled)
+
+    def _on_band_toggled(self, fut) -> None:
+        self._band_release_inflight = False
+        result = fut.result()
+        if result is None:
+            self.get_logger().warn("elastic band toggle call failed — will retry")
+            return  # leave _band_released False so the next tick retries
+        self._band_released = True
+        self.get_logger().info(f"elastic band toggle: {result.message}")
 
     def _state_from_lowstate(self, msg: LowState) -> RobotState:
         q = np.array([msg.motor_state[i].q for i in range(NUM_POLICY_JOINTS)], dtype=np.float32)
@@ -349,10 +386,10 @@ class LowerBodyControllerNode(Node):
         if self._auto_switch and not self._manager.is_idle() and not self._manager.is_pending():
             cmd_norm = float(np.linalg.norm(self._cmd))
             active = self._manager.active_name
-            if active == FAME and cmd_norm > self._auto_rise:
+            if active == self._stand_policy and cmd_norm > self._auto_rise:
                 self._request_policy(WALK, require_stop=False)
             elif active == WALK and cmd_norm < self._auto_fall:
-                self._request_policy(FAME, require_stop=True)
+                self._request_policy(self._stand_policy, require_stop=True)
 
         if self._manager.is_pending():
             if self._manager.is_idle():

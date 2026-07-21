@@ -395,6 +395,12 @@ class AlmiPolicy(Policy):
         cmd_norm = float(np.linalg.norm(cmd))
         if not self._walking and cmd_norm >= self.ONSET_RISE:
             self.reset(state)   # episode-start condition: memory zeroed, cmd present
+            # Use the freshly-seeded (full) command on this very tick: the
+            # LSTM's first post-reset step must see the command at full scale,
+            # exactly as at a training episode start — the smoother's stale
+            # pre-seed value here weakens the gait-commitment step.
+            cmd = self._cmd_filt.copy()
+            cmd_norm = float(np.linalg.norm(cmd))
         elif self._walking and cmd_norm < self.ONSET_FALL:
             self._walking = False
 
