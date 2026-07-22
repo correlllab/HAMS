@@ -67,6 +67,8 @@ h12_skills / its deps are missing (mirrors grasp_orchestrator.py's guarded-impor
 style).
 """
 
+import math
+
 import numpy as np
 import rclpy
 from rclpy.node import Node
