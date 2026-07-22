@@ -271,24 +271,12 @@ def _backward_dir(base_quat):
     return back / n if n > 1e-9 else np.array([-1.0, 0.0, 0.0])
 
 
-# Arm/gripper link-name fragments. When placing for a STATIC arm-only reach
-# (HAMS_SPAWN_ARMS_CLEAR), overlaps of these links are ignored during spawn
-# back-off: the arms are homed by bringup right after spawn, so their zero-pose
-# forward jut (~0.31 m into the counter) shouldn't shove the whole robot back and
-# out of the fixture's reach. Torso/pelvis/leg overlaps still push the base back.
-_ARM_SPAWN_IGNORE_KW = ('shoulder', 'elbow', 'wrist', '_grasp', 'graspgenx',
-                        'gripper', 'lg_', 'rg_', 'finger', 'rocker', 'crank', 'rubber')
-
-
-def _robot_env_contacts(model, data, prefixes=("robot0_", "gripper0_"), ignore_kw=()):
+def _robot_env_contacts(model, data, prefixes=("robot0_", "gripper0_")):
     """Penetrating contacts between a robot geom and a non-robot (environment)
     geom. 'Penetrating' = contact.dist < 0 (actual overlap, not merely within
     margin). Robot-vs-robot (self) and env-vs-env contacts are skipped — moving
     the base can't fix a self-collision. The floor is excluded implicitly:
-    place_robot_clear keeps the robot above it, so it never penetrates.
-
-    ignore_kw: skip robot<->env contacts whose ROBOT-side body name contains any
-    of these fragments (used to ignore the arm/gripper during a reach spawn)."""
+    place_robot_clear keeps the robot above it, so it never penetrates."""
     import mujoco
 
     out = []
@@ -300,17 +288,12 @@ def _robot_env_contacts(model, data, prefixes=("robot0_", "gripper0_"), ignore_k
         b2 = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_BODY, model.geom_bodyid[c.geom2]) or ""
         if b1.startswith(prefixes) == b2.startswith(prefixes):
             continue  # both robot or both env -> not a robot<->env collision
-        if ignore_kw:
-            rb = b1 if b1.startswith(prefixes) else b2   # the robot-side body
-            if any(k in rb for k in ignore_kw):
-                continue  # arm/gripper overlap — homed after spawn, don't back off for it
         out.append(c)
     return out
 
 
 def place_robot_collision_free(env, base_pos, base_quat, step=0.02, max_iters=25,
-                               clearance=0.02, extra_backoff=0.0,
-                               ignore_arm_geoms=False):
+                               clearance=0.02, extra_backoff=0.0):
     """Place the robot collision-free at spawn by backing it away from whatever it
     overlaps.
 
@@ -333,12 +316,11 @@ def place_robot_collision_free(env, base_pos, base_quat, step=0.02, max_iters=25
     back = _backward_dir(base_quat)
     model = env.sim.model._model
     data = env.sim.data._data
-    _ign = _ARM_SPAWN_IGNORE_KW if ignore_arm_geoms else ()
     pos = np.array(base_pos, dtype=float)
     best_pos, best_score = None, None
     for i in range(max_iters + 1):
         place_robot_clear(env, pos, base_quat, clearance)  # writes pose + z-fit + sim.forward()
-        contacts = _robot_env_contacts(model, data, ignore_kw=_ign)
+        contacts = _robot_env_contacts(model, data)
         score = (len(contacts), sum(-c.dist for c in contacts))
         if best_score is None or score < best_score:
             best_score, best_pos = score, pos.copy()
@@ -350,7 +332,7 @@ def place_robot_collision_free(env, base_pos, base_quat, step=0.02, max_iters=25
                 for _ in range(int(extra_backoff / step)):
                     pos[:2] += step * back[:2]
                     place_robot_clear(env, pos, base_quat, clearance)
-                    if _robot_env_contacts(model, data, ignore_kw=_ign):
+                    if _robot_env_contacts(model, data):
                         break
                     last_clear, moved = pos.copy(), moved + step
                 place_robot_clear(env, last_clear, base_quat, clearance)

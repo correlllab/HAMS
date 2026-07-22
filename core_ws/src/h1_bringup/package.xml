@@ -10,8 +10,7 @@
   <exec_depend>rviz2</exec_depend>
   <exec_depend>launch</exec_depend>
   <exec_depend>launch_ros</exec_depend>
-  <!-- estop: real-robot-only; dropped locally so the sim grasp workspace builds without the estop package (use_nav/real robot unaffected in canonical repo) -->
-  <!-- <exec_depend>estop</exec_depend> -->
+  <exec_depend>estop</exec_depend>
   <exec_depend>robot_state_publisher</exec_depend>
   <exec_depend>h12_ros2_controller</exec_depend>
   <exec_depend>h12_safety_layer</exec_depend>
@@ -22,8 +21,7 @@
   <exec_depend>python3-opencv</exec_depend>
   <exec_depend>python3-numpy</exec_depend>
   <exec_depend>python3-scipy</exec_depend>
-  <!-- fast_lio: SLAM (nav-only); dropped locally so the sim grasp workspace builds without livox/fast_lio (nav is off for the frozen-grasp runs) -->
-  <!-- <exec_depend>fast_lio</exec_depend> -->
+  <exec_depend>fast_lio</exec_depend>
   <exec_depend>tf2_ros</exec_depend>
   <exec_depend>pointcloud_to_laserscan</exec_depend>
   <exec_depend>slam_toolbox</exec_depend>
