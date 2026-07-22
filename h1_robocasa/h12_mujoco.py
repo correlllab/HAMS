@@ -392,6 +392,23 @@ def sim_loop(task, viewer=True, layout=None, style=None, seed=None, record_video
     # joints + the torso joint to their spawn pose every sim step (velocities
     # zeroed), so ONLY the 14 arm joints move. Default OFF preserves the sim's
     # shipped elastic-band behavior; this is opt-in and gated like HAMS_SIM_ODOM.
+    # Spawn-at-ready: HAMS_STATE_PATH points at a saved qpos/qvel snapshot of a
+    # CONVERGED standing state (written via /hams/save_state, paired with the
+    # controller's LSTM snapshot). Restoring it before the freeze/scene
+    # snapshots makes "ready" the spawn state itself: the freeze pin, the
+    # /hams/reset_scene restore point, and the policy warmup all inherit it.
+    _state_path = os.environ.get('HAMS_STATE_PATH', '').strip()
+    _state_save = {'req': False}
+    if _state_path and os.path.isfile(_state_path):
+        try:
+            _snap = np.load(_state_path)
+            data.qpos[:] = _snap['qpos']
+            data.qvel[:] = _snap['qvel']
+            mujoco.mj_forward(model, data)
+            print(f"[h12_mujoco] STATE RESTORED from {_state_path} (spawn-at-ready)", flush=True)
+        except Exception as e:
+            print(f"[h12_mujoco] state restore failed ({e}); normal spawn", flush=True)
+
     _freeze_body = os.environ.get('HAMS_FREEZE_BODY', '0').strip().lower() \
         not in ('0', 'off', 'false', 'no', '')
     _frz_base_qadr = _frz_base_dof = -1
@@ -417,6 +434,13 @@ def sim_loop(task, viewer=True, layout=None, style=None, seed=None, record_video
     except Exception as e:
         print(f"[h12_mujoco] freeze setup failed, staying dynamic: {e}")
         _freeze_body = False
+
+    # Full-scene snapshot for the in-place trial reset (/hams/reset_scene):
+    # restoring qpos/qvel to the spawn state puts the door, objects, AND robot
+    # back exactly where a fresh env would — without a container rebuild or a
+    # policy cold-start. Applied under the freeze pin by the main loop.
+    _scene_qpos0 = data.qpos.copy()
+    _scene_reset = {'req': False}
 
     # Reliable between-trial ARM RESET for the grasp sweep. The upper-body
     # differential-IK controller can leave the arm in a raised config it cannot
@@ -452,12 +476,19 @@ def sim_loop(task, viewer=True, layout=None, style=None, seed=None, record_video
     # RGBD camera rendering (3x 256x256 offscreen renders per frame) is the
     # heaviest per-step cost on CPU. HAMS_CAMERAS=0 drops them to speed the sim up
     # for locomotion/SLAM (lidar + odom are unaffected).
-    _cameras_on = os.environ.get('HAMS_CAMERAS', '1').strip().lower() not in ('0', 'off', 'false', 'no')
-    _cameras = [
+    # HAMS_CAMERAS: '1' (default) = all three RGBD cams, '0' = none,
+    # 'head' = head only — the offscreen renders are the heaviest per-step
+    # cost, and GT-perception grasp sweeps only consume the head camera, so
+    # dropping the two hand cams roughly halves the per-step render bill.
+    _cam_mode = os.environ.get('HAMS_CAMERAS', '1').strip().lower()
+    _cameras_on = _cam_mode not in ('0', 'off', 'false', 'no')
+    _cameras = ([
+        (f"{pfx}head_cam",          "head",       "camera_color_optical_frame"),
+    ] if _cam_mode == 'head' else [
         (f"{pfx}head_cam",          "head",       "camera_color_optical_frame"),
         ("gripper0_left_hand_cam",  "left_hand",  "left_hand_camera_color_optical_frame"),
         ("gripper0_right_hand_cam", "right_hand", "right_hand_camera_color_optical_frame"),
-    ] if _cameras_on else []
+    ]) if _cameras_on else []
     print(f"[h12_mujoco] RGBD cameras {'ON' if _cameras_on else 'OFF (HAMS_CAMERAS=0)'}")
     ros_bridge = RosSensorBridge(
         model, data,
@@ -472,8 +503,14 @@ def sim_loop(task, viewer=True, layout=None, style=None, seed=None, record_video
         # MID-360 fidelity: 360x56 @ 10Hz ~= 201k pts/s (real ~200k), 0.1m near /
         # 40m far range, per-point offset_time for FAST-LIO deskew. el_rays/rate
         # are the knobs to dial back if the ray cast (main thread) hurts RTF.
-        lidar_az_rays=360, lidar_el_rays=56,
-        lidar_rate_hz=10.0, lidar_max_range=40.0, lidar_min_range=0.1,
+        # HAMS_LIDAR=0: grasp-sweep mode — no SLAM/nav consumer exists, and the
+        # 360x56 @ 10 Hz raycast (~201k rays/s) runs on the MAIN sim thread. A
+        # token 4x2 @ 0.2 Hz keeps the topics/publishers alive (surface intact)
+        # at effectively zero step cost. Default 1 = full MID-360 fidelity.
+        lidar_az_rays=(360 if os.environ.get('HAMS_LIDAR', '1') != '0' else 4),
+        lidar_el_rays=(56 if os.environ.get('HAMS_LIDAR', '1') != '0' else 2),
+        lidar_rate_hz=(10.0 if os.environ.get('HAMS_LIDAR', '1') != '0' else 0.2),
+        lidar_max_range=40.0, lidar_min_range=0.1,
         lidar_body=f"{pfx}livox_link",
         lidar_exclude_body=f"{pfx}torso_link",
         imu_quat_sensor=f"{pfx}livox_imu_quat",
@@ -517,6 +554,16 @@ def sim_loop(task, viewer=True, layout=None, style=None, seed=None, record_video
     reset_node.create_subscription(
         _BoolMsg, '/hams/freeze_body',
         lambda m: _frz_toggle.__setitem__('req', bool(m.data)), 10)
+    # In-place trial reset: restore the ENTIRE spawn state (door + objects +
+    # robot) under the freeze pin — replaces a container rebuild. Main-loop
+    # applied. Send while frozen; the pin is re-snapshotted to the spawn pose.
+    reset_node.create_subscription(
+        _EmptyMsg, '/hams/reset_scene',
+        lambda _m: _scene_reset.__setitem__('req', True), 10)
+    # Write the CURRENT qpos/qvel to HAMS_STATE_PATH (spawn-at-ready capture).
+    reset_node.create_subscription(
+        _EmptyMsg, '/hams/save_state',
+        lambda _m: _state_save.__setitem__('req', True), 10)
 
     # Background executor serves the gripper services/timers/action + the band
     # toggle service. ros_bridge.tick() is driven from the main loop instead (its
@@ -615,6 +662,32 @@ def sim_loop(task, viewer=True, layout=None, style=None, seed=None, record_video
                         print(f"[h12_mujoco] body RELEASED at t={data.time:.2f}s "
                               "(runtime toggle)", flush=True)
                     _frz_toggle['on'] = _rq
+                # In-place scene reset (under the pin): full spawn-state restore.
+                # Re-snapshots the freeze pin to the spawn pose so the frozen
+                # robot is teleported home (fallen/wandered robots recover
+                # without a rebuild). Forces the freeze ON — the caller releases
+                # it via /hams/freeze_body once its policy is ready.
+                if _state_save['req']:
+                    _state_save['req'] = False
+                    if _state_path:
+                        try:
+                            np.savez(_state_path, qpos=data.qpos.copy(), qvel=data.qvel.copy())
+                            print(f"[h12_mujoco] STATE SAVED to {_state_path} at t={data.time:.2f}s", flush=True)
+                        except Exception as e:
+                            print(f"[h12_mujoco] state save failed: {e}", flush=True)
+                if _scene_reset['req']:
+                    _scene_reset['req'] = False
+                    data.qpos[:] = _scene_qpos0
+                    data.qvel[:] = 0.0
+                    if _frz_base_qadr >= 0:
+                        _frz_base_qpos = data.qpos[_frz_base_qadr:_frz_base_qadr + 7].copy()
+                        _frz_lower_qpos = data.qpos[_frz_lower_qidx].copy()
+                    _frz_toggle['on'] = True
+                    _frz_toggle['req'] = None
+                    _fall_logged = False        # re-arm the fall logger
+                    mujoco.mj_forward(model, data)
+                    print(f"[h12_mujoco] SCENE RESET to spawn state at t={data.time:.2f}s "
+                          "(frozen; release via /hams/freeze_body)", flush=True)
                 # Between-trial arm reset window (works FROZEN OR NOT): pin the 14
                 # arm joints to home and overwrite their PD setpoint, so a stuck
                 # controller command can't drag the arm back off home while the
