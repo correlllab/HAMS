@@ -148,7 +148,11 @@ TARGET_FRAME = 'graspgenx_target_frame'
 # drift correction to settle within tolerance. The iter-0 unreachable fast-fail
 # in servo_frame_to_world still bails genuinely out-of-reach candidates quickly,
 # so the extra budget is only spent on poses that are actually close to reachable.
-SERVO_DURATION_SEC = 15   # primary (iter-0) approach/contact IK move budget [s]
+# Primary (iter-0) approach/contact IK move budget [s]. Env-tunable: on a
+# DYNAMIC base (standing policy) a longer duration = slower, less impulsive arm
+# motion = fewer balance-recovery steps (harness sets HAMS_SERVO_DURATION=22
+# for the almi tier; default 15 elsewhere).
+SERVO_DURATION_SEC = float(os.environ.get('HAMS_SERVO_DURATION', '15') or 15)
 # World-frame refinement passes per pose. Env-tunable: on a DYNAMIC base
 # (standing policy) sustained pulling at a marginal candidate torques the base
 # over — fewer passes = brief correction then move on (harness sets

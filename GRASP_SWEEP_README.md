@@ -362,3 +362,96 @@ Figures: `sweep*/viz/{<method>_grasp.png, comparison_grid.png, success_rates.png
 Per-trial JSON/log/head-cam in `sweep*/<method>/`. Validation: all 160 records
 parse; no timeout stubs; no falls during unfrozen trials; success labels
 consistent with gripper telemetry.
+
+## 17. Standing tier (ALMI RL policy) — the third base condition
+
+**Protocol (freeze-hold):** spawn pinned in the ALMI nominal crouch
+(`HAMS_STANCE=almi`, `HAMS_FREEZE_BODY=1`), pre-home the arm + open the gripper
+UNDER the pin, engage `lowerbody_controller_node` (`active_policy:=almi`)
+against the pinned body, wait **40 SIM-seconds** (`almi_engage.py`; the headless
+sim runs ~5% realtime — wall-clock waits release before the LSTM stabilizes and
+the robot topples), verify upright, release, confirm 15 sim-s, settle-gate
+(<5 cm drift) before every trial. Between trials: re-freeze (pin captures the
+current pose), reset arm/gripper under the pin, verify station/door/gripper,
+re-engage. Perception: mentor's quota-free GT crop with a fixed world point on
+the handle bar (`HAMS_GRASP_BOX_SOURCE=gt`, `HAMS_GRASP_GT_WORLD=3.5365,-2.889,1.235`,
+vertical-capsule crop r=5.5 cm) for ALL methods — perception removed as a
+variable. Execution: world-anchored servo (camera_init via `HAMS_SIM_ODOM=1` +
+static TF), `HAMS_SERVO_MAX_ITER=4`, `HAMS_SERVO_DURATION=22`,
+`HAMS_SERVO_FASTFAIL_LIN=0.08`, `HAMS_GRASP_OFFSET=0.06` (compensates the
+drift-equilibrium: ALMI micro-retreats during arm moves, leaving a systematic
+~65 mm shortfall along the approach — measured against the commanded-pose
+cluster of the 83 stable-base successes), `HAMS_ATTEMPT_PAUSE=6`,
+`HAMS_NO_SIM_ARM_RESET=1` (a trial-time sim qpos pin — even ramped — catapults
+a free base ~2.5 m via the PD-handoff mismatch; the frozen/hanging tiers never
+saw this because their bases can't move).
+
+**Result (n=20/method, strict contact grading identical to the other tiers):**
+
+| method | frozen | hanging | standing (ALMI) |
+|---|---|---|---|
+| centroid | 0/20 | 4/20 | 0/20 |
+| pca (topdown_antipodal) | 0/20 | 19/20 | 0/20 |
+| graspgenx (raw) | 13/20 | 12/20 | 0/20 |
+| **skill (wrist-aware ranked)** | **16/20** | **17/20** | **12/20** |
+
+**Standing-tier failure decomposition** (bag-verified): skill — 12 success,
+4 contact-unstable, 2 wander, 2 wander+fall; graspgenx — 12 contact-unstable,
+4 miss, 2 wander, 2 wander+fall; centroid — 19 contact-unstable (door-edge
+clamps), 1 miss; pca — 20 wander (its deep targets = longest reaches = most
+base excitation; the base walks off before contact).
+
+**Regrade audit:** the in-run 2-sample stability check samples at +1/+3 s
+wall-clock (≈0.05/0.15 sim-s on this tier). All 80 trials were re-graded from
+the recorded rosbags at true sim-time (`bag_regrade.py`: final in-band hold
+segment, ≤8 mm spread over 2 sim-s). Outcome: zero flips — the graspgenx
+"contacts" show 30+ mm aperture churn or <1 sim-s holds (genuinely unstable
+under sway), and every skill success shows ≤0.2 mm spread. The strict table
+stands.
+
+**Key findings:** (1) an actively-balancing base costs the best method 4-5
+successes/20 vs stable bases — and kills candidate-spray methods entirely:
+graspgenx drops 13→0 because its diagonal holds cannot settle on a swaying
+base and its candidate cycling excites wander; (2) ALMI has NO station-keeping
+below its 0.1 m/s command threshold — recovery steps accumulate under arm
+interaction and walk the robot off-station (the dominant failure for pca);
+(3) grasp-target compensation must account for the policy's drift-equilibrium
+(~65 mm here), which iteration alone cannot close (moving equilibrium).
+
+**Sim/protocol hazards catalogued for replication** (each cost a debugging
+cycle): wall-clock vs sim-clock stabilization; GT origins inside object bodies
+(door_obj → 0 cloud points; use a world-point crop); model-server load spikes
+starving the sim → spontaneous policy wander (wait for ALL server ready lines);
+in-sim qpos teleports (arm reset OR its PD handoff) catapulting free bases;
+double-harness container races. Figures: `figures/three_tier_success.png`,
+`figures/almi_pelvis_traces.png`. Full per-trial data: `sweep_almi/<method>/`
+(JSON + telemetry CSV + rosbag + skills-log + head snapshot).
+
+### 17.1 Interpretation caveat: selection vs execution
+
+`skill` is the DEPLOYED pipeline (ranked wrist-feasible candidates + staged
+approach + world-anchored drift-compensated servo + anchored hold); the other
+three methods are raw synthesis modes driven by the benchmark's simpler
+executor (`--no-plan`, pelvis-frame hold after close). On stable bases the
+asymmetry is minor (raw ggx 13/20 vs skill 16/20); on the standing base
+execution dominates, so the standing column compares SYSTEMS, not synthesis
+algorithms in isolation. Mechanistic support: ggx reached bar contact 12/20
+standing but every hold churned 30+ mm (pelvis-held grip sheared by sway,
+vs ≤0.2 mm for the skill's anchored holds). Decomposing control (future
+work): run UNRANKED ggx candidates through the skill executor (n=20) to
+separate candidate selection from execution robustness.
+
+### 17.2 Data audit + one flagged uniformity
+
+Audit (2026-07-22): 240/240 trials present (20×4×3); all 68 standing
+non-successes carry machine-readable failure reasons; 24 wander flags
+cross-validated against telemetry with 0 contradictions; 80/80 standing trials
+have JSON+telemetry+bag+servo-log (28 head JPGs absent — exactly the
+wander/fall-killed trials, where the post-trial grab never ran; head video
+remains in the bags; 3 bags unreadable from a teardown race).
+
+Flagged: pca's 20/20-wander uniformity is mechanistically plausible (deepest
+targets → longest reaches → most excitation) but entangled with the uniform
+HAMS_GRASP_OFFSET=0.06, which was calibrated on the skill's measured
+drift-shortfall and further deepens pca's already-deepest targets. Bounding
+control (future work): pca standing at offset 0, n=20.

@@ -22,12 +22,18 @@ SP=/tmp/claude-1001/-home-guest-Downloads-HAMS-test-grasping/9645ef6d-75d8-4b70-
 # Tier knobs (defaults keep the hanging tier byte-identical to its final run)
 if [ -n "$POLICY" ]; then
   ATTEMPT_PAUSE=6; BRIGHT_MIN=140; DEPTH_MAX=0.75
-  FF_LIN=0.08; FF_ANG=0.35; SRV_ITER=2
+  FF_LIN=0.08; FF_ANG=0.35; SRV_ITER=4; SRV_DUR=22
 else
   ATTEMPT_PAUSE=0; BRIGHT_MIN=0; DEPTH_MAX=0
-  FF_LIN=0.05; FF_ANG=0.20; SRV_ITER=6
+  FF_LIN=0.05; FF_ANG=0.20; SRV_ITER=6; SRV_DUR=15
 fi
-TRIAL_ENV="HAMS_ATTEMPT_PAUSE=$ATTEMPT_PAUSE HAMS_MASK_BRIGHTNESS_MIN=$BRIGHT_MIN HAMS_TARGET_MAX_DEPTH=$DEPTH_MAX HAMS_SERVO_FASTFAIL_LIN=$FF_LIN HAMS_SERVO_FASTFAIL_ANG=$FF_ANG HAMS_SERVO_MAX_ITER=$SRV_ITER"
+GT_WORLD="3.5365,-2.889,1.235"   # fridge-handle bar centre (world frame)
+# NO_PIN=1 on the policy tier (v7-validated): a trial-time sim pin — even
+# ramped — hands off mid-named_config with a PD setpoint mismatch that yanks
+# the free base (2.3 m catapult). The arm is instead PRE-HOMED UNDER FREEZE in
+# fresh_env/retether, so go_home's named_config starts from home = trivial.
+if [ -n "$POLICY" ]; then NO_PIN=1; G_OFF=0.06; else NO_PIN=0; G_OFF=0.0; fi
+TRIAL_ENV="HAMS_GRASP_OFFSET=$G_OFF HAMS_NO_SIM_ARM_RESET=$NO_PIN HAMS_GRASP_GT_WORLD=$GT_WORLD HAMS_ATTEMPT_PAUSE=$ATTEMPT_PAUSE HAMS_MASK_BRIGHTNESS_MIN=$BRIGHT_MIN HAMS_TARGET_MAX_DEPTH=$DEPTH_MAX HAMS_SERVO_FASTFAIL_LIN=$FF_LIN HAMS_SERVO_FASTFAIL_ANG=$FF_ANG HAMS_SERVO_MAX_ITER=$SRV_ITER HAMS_SERVO_DURATION=$SRV_DUR"
 
 sudo_do() { echo "$PW" | sudo -S "$@" 2>/dev/null; }
 in_ros()  { sudo_do docker exec hams_ros bash -lc "source /opt/ros/humble/setup.bash; source /home/code/core_ws/install/setup.bash; $1"; }
@@ -61,7 +67,7 @@ sys.exit(1 if (d>$1 or yaw>$2) else 0)
 PY"
 }
 robot_drifted() { _drift_val 0.12 12.0; [ $? -eq 1 ]; }
-hard_drift()    { _drift_val 0.20 25.0; [ $? -eq 1 ]; }
+hard_drift()    { _drift_val 0.32 30.0; [ $? -eq 1 ]; }
 
 door_closed() {
   in_ros "python3 - << 'PY'
@@ -112,9 +118,11 @@ engage_policy() {  # start lowerbody node, wait engaged, release the pin, verify
   sudo_do docker exec hams_ros bash -c "rm -f /tmp/lowerbody.log /tmp/almi_ref.txt" 2>/dev/null
   in_ros_d "ros2 run h12_lowerbody_rl lowerbody_controller_node --ros-args -p use_sim_time:=true -p active_policy:=$POLICY -p engage_wait_for_confirm:=false -p disable_elastic_band:=false > /tmp/lowerbody.log 2>&1"
   for k in $(seq 1 40); do sudo_do docker exec hams_ros bash -c "grep -q 'committed None' /tmp/lowerbody.log 2>/dev/null" && break; sleep 3; done
-  sleep 10
-  in_ros "ros2 topic pub --once /hams/freeze_body std_msgs/msg/Bool '{data: false}' >/dev/null 2>&1"
-  sleep 20
+  # SIM-TIME settle-and-release: wait 40 SIM-sec pinned (verified: policy reaches
+  # upright=1.0, holds after release), verify vertical, release, confirm it stays
+  # up. Wall-clock sleeps failed because the ~5%-realtime sim gave <4 sim-sec to
+  # stabilize before release -> topple. Returns nonzero if it can't hold.
+  if ! in_ros "STAB_SIM=40 CONFIRM_SIM=15 python3 /tmp/almi_engage.py"; then return 1; fi
   # no ref file yet -> drift is measured vs the STATION, catching settle-walks
   if robot_fell || robot_drifted; then return 1; fi
   capture_ref
@@ -129,10 +137,12 @@ fresh_env() {
     sed -i 's/^HAMS_STANCE=.*/HAMS_STANCE=almi/' docker/.env
     sed -i 's/^HAMS_FREEZE_BODY=.*/HAMS_FREEZE_BODY=1/' docker/.env
     sed -i 's/^HAMS_SIM_ODOM=.*/HAMS_SIM_ODOM=1/' docker/.env
+    sed -i 's/^HAMS_ARM_RESET_RAMP=.*/HAMS_ARM_RESET_RAMP=1.5/' docker/.env
   else
     sed -i 's/^HAMS_STANCE=.*/HAMS_STANCE=/' docker/.env
     sed -i 's/^HAMS_FREEZE_BODY=.*/HAMS_FREEZE_BODY=0/' docker/.env
     sed -i 's/^HAMS_SIM_ODOM=.*/HAMS_SIM_ODOM=0/' docker/.env
+    sed -i 's/^HAMS_ARM_RESET_RAMP=.*/HAMS_ARM_RESET_RAMP=0/' docker/.env
   fi
   echo "$PW" | sudo -S -E bash docker/scripts/docker_run.sh robocasa --task OpenFridge --seed 42 > /tmp/sim_batch.log 2>&1 &
   for k in $(seq 1 60); do sudo_do docker logs hams_sim_robocasa 2>&1 | grep -q "ROS bridges up" && break; sleep 3; done
@@ -140,12 +150,31 @@ fresh_env() {
   for k in $(seq 1 40); do sudo_do docker ps --format '{{.Names}}' | grep -q hams_ros && break; sleep 2; done
   sudo_do docker cp /tmp/grab_head.py hams_ros:/tmp/grab_head.py
   sudo_do docker cp $SP/trial_recorder.py hams_ros:/tmp/trial_recorder.py
-  sudo_do docker exec -d hams_ros bash -lc "export HAMS_MAX_GRASP_ATTEMPTS=40 $TRIAL_ENV; source /opt/ros/humble/setup.bash && source /home/code/core_ws/install/setup.bash && ros2 launch h1_bringup h1_sim_bringup.launch.py use_rviz:=false use_nav:=false use_mjpc:=false > /tmp/bringup.log 2>&1"
-  for k in $(seq 1 80); do sudo_do docker exec hams_ros bash -c "grep -q 'h12_skills ready' /tmp/bringup.log 2>/dev/null" && break; sleep 3; done
+  sudo_do docker cp $SP/almi_engage.py hams_ros:/tmp/almi_engage.py
+  # HAMS_GRASP_BOX_SOURCE=gt makes the skill path (/skill/grasp) skip Gemini+SAM
+  # and crop the object cloud around the GT centroid (mentor's quota-free GT
+  # perception) -> removes the perception confound so grasps are fast/reliable
+  # and can finish inside ALMI's ~25 s stable window before the base wanders.
+  sudo_do docker exec -d hams_ros bash -lc "export HAMS_MAX_GRASP_ATTEMPTS=40 HAMS_GRASP_BOX_SOURCE=gt HAMS_GRASP_GT_NAME=door_obj HAMS_GRASP_GT_WORLD=$GT_WORLD $TRIAL_ENV; source /opt/ros/humble/setup.bash && source /home/code/core_ws/install/setup.bash && ros2 launch h1_bringup h1_sim_bringup.launch.py use_rviz:=false use_nav:=false use_mjpc:=false > /tmp/bringup.log 2>&1"
+  # Wait for ALL model servers + skills (GPU model loads can take minutes; a
+  # trial started mid-load starves the sim -> ALMI control-loop instability ->
+  # spontaneous wander). Abort + retry the env rather than proceed unready.
+  READY=0
+  for k in $(seq 1 200); do
+    if sudo_do docker exec hams_ros bash -c "grep -q 'h12_skills ready' /tmp/bringup.log 2>/dev/null && grep -q 'graspgen_server ready' /tmp/bringup.log 2>/dev/null && grep -q 'sam_server ready' /tmp/bringup.log 2>/dev/null && grep -q 'gemini_server ready' /tmp/bringup.log 2>/dev/null"; then READY=1; break; fi
+    sleep 3
+  done
+  if [ $READY -ne 1 ]; then echo "[env] bringup NOT ready after 600s — retry env"; fresh_env; return; fi
   sleep 3
   if [ -n "$POLICY" ]; then
     # world anchor for drift-compensated servoing (camera_init -> odom identity)
     in_ros_d "ros2 run tf2_ros static_transform_publisher --frame-id camera_init --child-frame-id odom --x 0 --y 0 --z 0 > /dev/null 2>&1"
+    # Pre-home the arm + open the gripper UNDER THE FREEZE PIN, so the FIRST
+    # trial starts with the arm already home and the benchmark go_home is a
+    # no-op — un-pinned mid-trial homing is a stochastic fall hazard (flaky
+    # named_config from awkward poses destabilizes the standing policy).
+    in_ros "ros2 topic pub --once /hams/reset_arm std_msgs/msg/Empty '{}' >/dev/null 2>&1; sleep 4
+ros2 service call /right/gripper/open std_srvs/srv/Trigger >/dev/null 2>&1; sleep 2"
     if ! engage_policy; then echo "[env] engage FAILED (fell/displaced) — retry"; fresh_env; return; fi
   fi
   echo "[env] ready (policy='${POLICY:-band}') $(date +%H:%M:%S)"
@@ -172,7 +201,7 @@ run_trial() {  # $1=method $2=trial-id
 for attempt in 1 2 3; do
   ros2 service call /right/gripper/open std_srvs/srv/Trigger >/dev/null 2>&1; sleep 2
   env $TRIAL_ENV timeout 400 ros2 run h12_skills grasp_benchmark --method $M \
-    --object 'vertical fridge handle' --gt-name door_obj --arm right \
+    --object 'vertical fridge handle' --gt-name door_obj --arm right --box-source gt \
     --success-mode contact $EXTRA --out $OUTROOT/$M/trial_$T.json > $OUTROOT/$M/trial_$T.log 2>&1
   [ \$? -eq 124 ] && [ ! -s $OUTROOT/$M/trial_$T.json ] && python3 -c \"import json;json.dump({'method':'$M','success':False,'executed':False,'error':'harness timeout'},open('$OUTROOT/$M/trial_$T.json','w'),indent=2)\"
   P=\$(python3 -c \"import json;d=json.load(open('$OUTROOT/$M/trial_$T.json'));l=(str(d.get('chosen_label',''))+' '+str(d.get('error',''))).lower();print(1 if any(k in l for k in ('no mask','no box','no grasp planned','no candidate','synthesis produced no')) else 0)\" 2>/dev/null)
@@ -229,6 +258,17 @@ for M in $METHODS; do
       if robot_fell; then echo "[unfrozen] fell -> rebuild"; fresh_env; fi
       if ! gripper_ok; then echo "[unfrozen] gripper damaged -> rebuild"; fresh_env; fi
     fi
+    if [ -n "$POLICY" ]; then
+      # settle gate: don't start a trial on a still-transient base
+      SETTLED=0
+      for g in 1 2 3; do
+        if _drift_val 0.05 8.0; then SETTLED=1; break; fi
+        echo "[unfrozen] settle-gate: transient drift, waiting"; sleep 12
+      done
+      if [ $SETTLED -ne 1 ]; then
+        if ! retether_and_verify; then echo "[unfrozen] settle-gate rebuild"; fresh_env; fi
+      fi
+    fi
     echo "[unfrozen] === $M trial $T $(date +%H:%M:%S) ==="
     # --- telemetry + playback bag ---
     in_ros_d "python3 /tmp/trial_recorder.py > /tmp/trial_telemetry.csv 2>/dev/null"
@@ -255,6 +295,9 @@ for M in $METHODS; do
     fi
     # --- stop + stash telemetry ---
     sudo_do docker exec hams_ros bash -c "pkill -TERM -f trial_recorder.py; pkill -INT -f 'ros2 bag record'" 2>/dev/null
+    # snapshot the skills-node log (servo/gt-point diagnostics live there, and
+    # /tmp/bringup.log dies with every env rebuild)
+    in_ros "grep -E 'gt-point|servo\[|camera_init err|unreachable|grasp' /tmp/bringup.log 2>/dev/null | tail -400 > $OUTROOT/$M/trial_${T}_skillslog.txt; true" 
     sleep 2
     in_ros "cp -f /tmp/trial_telemetry.csv $OUTROOT/$M/trial_${T}_telemetry.csv 2>/dev/null; rm -rf $OUTROOT/$M/trial_${T}_bag; cp -r /tmp/trial_bag $OUTROOT/$M/trial_${T}_bag 2>/dev/null; true"
     if robot_fell; then

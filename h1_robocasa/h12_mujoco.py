@@ -430,7 +430,9 @@ def sim_loop(task, viewer=True, layout=None, style=None, seed=None, record_video
     _arm_cidx = np.asarray(resolver.motor_ctrl[NUM_LEG_JOINTS + 1:])
     _arm_home_q = np.asarray(INIT_ARM_POS[1:], dtype=float)           # skip torso[0]
     _arm_reset_hold = float(os.environ.get('HAMS_ARM_RESET_HOLD', '2.5') or 2.5)
-    _arm_reset = {'until': -1.0}
+    # Ramp duration (sim-s) for the reset motion; 0 = legacy one-step snap.
+    _arm_reset_ramp = float(os.environ.get('HAMS_ARM_RESET_RAMP', '0') or 0.0)
+    _arm_reset = {'until': -1.0, 'from_q': None}
     # Runtime freeze toggle (/hams/freeze_body, std_msgs/Bool). Enables the
     # freeze-hold handover protocol for standing-policy experiments: hold the
     # robot rigidly pinned through setup (cannot fall or sway, unlike the elastic
@@ -508,7 +510,8 @@ def sim_loop(task, viewer=True, layout=None, style=None, seed=None, record_video
     reset_node = rclpy.create_node('hams_arm_reset')
     reset_node.create_subscription(
         _EmptyMsg, '/hams/reset_arm',
-        lambda _m: _arm_reset.__setitem__('until', float(data.time) + _arm_reset_hold), 10)
+        lambda _m: (_arm_reset.__setitem__('from_q', None),
+                    _arm_reset.__setitem__('until', float(data.time) + _arm_reset_hold)), 10)
     # Runtime body-freeze toggle: True = pin (re-capturing the CURRENT pose as
     # the pin), False = release. Applied by the main loop (race-free).
     reset_node.create_subscription(
@@ -616,11 +619,31 @@ def sim_loop(task, viewer=True, layout=None, style=None, seed=None, record_video
                 # arm joints to home and overwrite their PD setpoint, so a stuck
                 # controller command can't drag the arm back off home while the
                 # window is open. Unfrozen, the lower body keeps its own dynamics.
+                # HAMS_ARM_RESET_RAMP > 0 (sim-s) interpolates qpos to home over
+                # the ramp window instead of snapping in one step: on a FREE
+                # dynamic base the instantaneous 14-joint teleport is a violent
+                # impulse that launches the robot; the ramp keeps the reset
+                # deterministic but quasi-static. Default 0 = legacy snap.
                 _arm_pinned = float(data.time) < _arm_reset['until']
                 if _arm_pinned:
-                    data.qpos[_arm_qidx] = _arm_home_q
-                    data.qvel[_arm_vidx] = 0.0
-                    data.ctrl[_arm_cidx] = _arm_home_q
+                    if _arm_reset_ramp > 0.0:
+                        _t_left = _arm_reset['until'] - float(data.time)
+                        _t_in = (_arm_reset_hold - _t_left)
+                        if _t_in <= 1e-9:                     # window just opened
+                            _arm_reset['from_q'] = data.qpos[_arm_qidx].copy()
+                        _a = min(1.0, max(0.0, _t_in / _arm_reset_ramp))
+                        _from = _arm_reset.get('from_q')
+                        if _from is None:
+                            _from = data.qpos[_arm_qidx].copy()
+                            _arm_reset['from_q'] = _from
+                        _q_t = (1.0 - _a) * _from + _a * _arm_home_q
+                        data.qpos[_arm_qidx] = _q_t
+                        data.qvel[_arm_vidx] = 0.0
+                        data.ctrl[_arm_cidx] = _q_t
+                    else:
+                        data.qpos[_arm_qidx] = _arm_home_q
+                        data.qvel[_arm_vidx] = 0.0
+                        data.ctrl[_arm_cidx] = _arm_home_q
                 if _frz_toggle['on']:
                     # Re-pin the pelvis + legs + torso to the pin pose after the
                     # step so the body is perfectly static; only the arm DOFs

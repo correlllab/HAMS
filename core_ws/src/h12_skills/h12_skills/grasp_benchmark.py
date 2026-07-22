@@ -246,6 +246,16 @@ class GraspBenchmark(SkillsBase):
         self.arm = arm
         self._gt_name = gt_name
         self._box_source = box_source
+        # Optional fixed WORLD point for the GT crop (HAMS_GRASP_GT_WORLD="x,y,z"):
+        # used instead of the object's GT origin when that origin sits inside the
+        # body but the graspable feature (handle bar) protrudes elsewhere.
+        self._gt_point = None
+        _gw = os.environ.get('HAMS_GRASP_GT_WORLD', '').strip()
+        if _gw:
+            try:
+                self._gt_point = [float(v) for v in _gw.split(',')[:3]]
+            except ValueError:
+                self.get_logger().warn(f'bad HAMS_GRASP_GT_WORLD={_gw!r}; ignoring')
         # Whether the benchmark's own arm moves go through the OMPL planner
         # (do_plan=True) or drive the frame_task IK directly (False). The deployed
         # skill plans its pre-grasp, so True matches it; False isolates whether the
@@ -354,12 +364,20 @@ class GraspBenchmark(SkillsBase):
         # already home it converges immediately and latches the home JOINT target,
         # so the controller setpoint stays home after the sim reset window closes
         # (otherwise the arm drifts back to the stuck pose and the next grasp fails).
-        self._reset_arm_pub.publish(Empty())
-        time.sleep(0.4)
+        # HAMS_NO_SIM_ARM_RESET=1 skips the in-sim qpos pin: overwriting 14 arm
+        # joints in one step is an instantaneous teleport — fine on a frozen or
+        # band-held base, but on a FREE dynamic base (standing policy) the
+        # discontinuity is a violent impulse that launches the robot ~2.5 m and
+        # fells it. The named_config action below homes the arm smoothly instead.
+        _sim_pin = os.environ.get('HAMS_NO_SIM_ARM_RESET', '0') != '1'
+        if _sim_pin:
+            self._reset_arm_pub.publish(Empty())
+            time.sleep(0.4)
         goal = NamedConfig.Goal()
         goal.config_name = 'home'
         goal.duration.sec = int(duration_sec)
-        self._reset_arm_pub.publish(Empty())   # keep the pin open across the call
+        if _sim_pin:
+            self._reset_arm_pub.publish(Empty())   # keep the pin open across the call
         resp = self._send_action(self.named_config_cli, goal,
                                  result_timeout=duration_sec + 15.0)
         ok = resp is not None and resp.result.success
@@ -729,7 +747,7 @@ class GraspBenchmark(SkillsBase):
         # the handle is a tall bar: crop a vertical capsule, not a ball
         dxy = np.linalg.norm(scene[:, :2] - c[None, :2], axis=1)
         dz = np.abs(scene[:, 2] - c[2])
-        obj = scene[(dxy <= 0.09) & (dz <= 0.35)]
+        obj = scene[(dxy <= 0.055) & (dz <= 0.35)]
         self.get_logger().info(
             f'[gt-point] {len(obj)}/{len(scene)} pts around handle '
             f'(pelvis {c[0]:.3f},{c[1]:.3f},{c[2]:.3f})')
@@ -775,6 +793,12 @@ class GraspBenchmark(SkillsBase):
         pelvis cloud. Shared by ALL FOUR methods so they differ only in how they
         synthesize a grasp, not in how the object is perceived."""
         if self._box_source == 'gt':
+            # HAMS_GRASP_GT_WORLD="x,y,z" targets a FIXED world point (e.g. the
+            # handle-bar centre) instead of the object's GT origin — needed when
+            # the origin sits inside the body (door_obj: 0 cloud pts within the
+            # crop ball) while the graspable feature protrudes elsewhere.
+            if self._gt_point is not None:
+                return self._gt_point_cloud()
             return self._gt_cloud()
         box = self._gemini_box(obj_text)
         mask = self.segment(text=obj_text, positive_boxes=box)

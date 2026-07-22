@@ -82,6 +82,7 @@ services:
       - HAMS_STANCE=${HAMS_STANCE:-}
       # ground-truth odom -> pelvis TF (sim stand-in for FAST-LIO odometry)
       - HAMS_SIM_ODOM=${HAMS_SIM_ODOM:-0}
+      - HAMS_ARM_RESET_RAMP=${HAMS_ARM_RESET_RAMP:-0}
     volumes:
       - /tmp/.X11-unix:/tmp/.X11-unix:rw
       - ${XAUTHORITY:-$HOME/.Xauthority}:/root/.Xauthority:ro

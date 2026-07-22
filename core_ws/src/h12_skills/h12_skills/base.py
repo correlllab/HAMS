@@ -644,6 +644,45 @@ class SkillsBase(Node):
             self.get_logger().error(
                 f'_gt_object_cloud: only pelvis frame supported, got {target_frame!r}')
             return None
+        # HAMS_GRASP_GT_WORLD="x,y,z" targets a FIXED world point (handle-bar
+        # centre) instead of the object's GT origin — needed when the origin sits
+        # inside the body (door_obj: 0 pts within the crop) while the graspable
+        # bar protrudes ~40 cm away. Mirrors grasp_benchmark._gt_point_cloud.
+        gt_world = None
+        _gw = os.environ.get('HAMS_GRASP_GT_WORLD', '').strip()
+        if _gw:
+            try:
+                gt_world = [float(v) for v in _gw.split(',')[:3]]
+            except ValueError:
+                self.get_logger().warn(f'bad HAMS_GRASP_GT_WORLD={_gw!r}; ignoring')
+        if gt_world is not None:
+            pel = self._obj_poses.get('__pelvis__')
+            if not pel:
+                self.get_logger().error('_gt_object_cloud: no __pelvis__ GT pose')
+                return None
+            p = np.array(pel[:3], dtype=float)
+            qw, qx, qy, qz = (float(v) for v in pel[3:7])
+            R = np.array([
+                [1 - 2 * (qy * qy + qz * qz), 2 * (qx * qy - qz * qw), 2 * (qx * qz + qy * qw)],
+                [2 * (qx * qy + qz * qw), 1 - 2 * (qx * qx + qz * qz), 2 * (qy * qz - qx * qw)],
+                [2 * (qx * qz - qy * qw), 2 * (qy * qz + qx * qw), 1 - 2 * (qx * qx + qy * qy)],
+            ])
+            c = R.T @ (np.asarray(gt_world, dtype=float) - p)
+            scene = self.scene_to_cloud(target_frame='pelvis')
+            if scene is None:
+                return None
+            # the handle is a tall bar: crop a vertical capsule, not a ball
+            dxy = np.linalg.norm(scene[:, :2] - c[None, :2], axis=1)
+            dz = np.abs(scene[:, 2] - c[2])
+            obj = scene[(dxy <= 0.055) & (dz <= 0.35)]
+            self.get_logger().info(
+                f'[gt-point] {len(obj)}/{len(scene)} pts around world '
+                f'{gt_world} (pelvis {c[0]:.3f},{c[1]:.3f},{c[2]:.3f})')
+            if len(obj) < MIN_GRASP_POINTS:
+                self.get_logger().warn(
+                    f'_gt_object_cloud: only {len(obj)} points (< {MIN_GRASP_POINTS})')
+                return None
+            return obj.astype(np.float32)
         c = self.gt_pos_pelvis(name)
         if c is None:
             self.get_logger().error(
