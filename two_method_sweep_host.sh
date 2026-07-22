@@ -27,6 +27,9 @@
 #   UNFROZEN_N=30 UNFROZEN_OUT=/home/code/core_ws/benchmark_results/sweep_almi \
 #     bash two_method_sweep_host.sh          # e.g. top-up sweep_almi to N=30
 #   UNFROZEN_POLICY=""  -> hanging tier instead of the ALMI standing tier
+#   UNFROZEN_RAND=1     -> randomized-START standing tier: fresh env per trial
+#                          at a spawn sampled around the tuned position (see
+#                          the RAND block below); ~11-12 min/trial
 set -o pipefail
 
 HELPER_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"   # this branch worktree
@@ -57,6 +60,29 @@ PW="${HAMS_SUDO_PW:-Unitreeh12}"
 N="${UNFROZEN_N:-20}"
 METHODS="${UNFROZEN_METHODS:-skill graspgenx topdown_irl}"
 POLICY="${UNFROZEN_POLICY-almi}"
+
+# UNFROZEN_RAND=1 (standing tier only): randomized-START condition. EVERY trial
+# gets its own FRESH env spawned at a position sampled around the tuned spawn —
+# /hams/reset_scene restores a fixed snapshot, so warm resets cannot move the
+# base; a rebuild per trial is the only spawn-randomizing mechanism the sim
+# offers without code changes (which the live checkout forbids). Sampling:
+# Gaussian, clipped at +/-2 sigma, POSITION ONLY (the sim has no spawn-yaw
+# knob). Defaults are the walking-endpoint scatter sigmas from the reference
+# figure (longitudinal 6.83 cm, lateral 11.43 cm) — pending confirmation from
+# the paper, override with UNFROZEN_RAND_SIG_LONG / UNFROZEN_RAND_SIG_LAT.
+# Deterministic per (method, trial) so the sweep is replicable; each trial's
+# sampled spawn is logged next to its JSON as trial_NN_spawn.json.
+RAND="${UNFROZEN_RAND:-0}"
+RAND_SIG_LONG="${UNFROZEN_RAND_SIG_LONG:-0.0683}"   # sigma along the approach [m]
+RAND_SIG_LAT="${UNFROZEN_RAND_SIG_LAT:-0.1143}"     # sigma lateral [m]
+if [ "$RAND" = "1" ] && [ -z "$POLICY" ]; then
+  echo "[2method] UNFROZEN_RAND=1 requires the standing tier (UNFROZEN_POLICY=almi)"; exit 1
+fi
+BASE_FWD=0.18
+BASE_LAT=$(grep '^HAMS_SPAWN_LATERAL=' docker/.env 2>/dev/null | head -1 | cut -d= -f2)
+BASE_LAT="${BASE_LAT:-0.10}"
+SPAWN_FWD_VAL="$BASE_FWD"; SPAWN_LAT_VAL=""
+HOST_OUT="${OUTROOT/\/home\/code/$LIVE_REPO}"   # host view of the results dir
 
 # Tier knobs (defaults keep each tier byte-identical to the campaign's runs)
 if [ -n "$POLICY" ]; then
@@ -201,7 +227,10 @@ ros2 topic pub --times 8 --rate 5 /hams/save_lstm std_msgs/msg/Empty '{}' >/dev/
 fresh_env() {
   echo "[env] recreating env $(date +%H:%M:%S)"
   sudo_do docker rm -f hams_ros hams_sim_robocasa >/dev/null; sleep 4
-  sed -i 's/^HAMS_SPAWN_FORWARD=.*/HAMS_SPAWN_FORWARD=0.18/' docker/.env
+  sed -i "s/^HAMS_SPAWN_FORWARD=.*/HAMS_SPAWN_FORWARD=${SPAWN_FWD_VAL:-0.18}/" docker/.env
+  # SPAWN_LAT_VAL is only ever non-empty in RAND mode — the plain tiers leave
+  # the tuned .env lateral untouched, keeping their behavior byte-identical.
+  [ -n "$SPAWN_LAT_VAL" ] && sed -i "s/^HAMS_SPAWN_LATERAL=.*/HAMS_SPAWN_LATERAL=$SPAWN_LAT_VAL/" docker/.env
   if [ -n "$POLICY" ]; then
     sed -i 's/^HAMS_STANCE=.*/HAMS_STANCE=almi/' docker/.env
     sed -i 's/^HAMS_FREEZE_BODY=.*/HAMS_FREEZE_BODY=1/' docker/.env
@@ -371,7 +400,26 @@ for M in $METHODS; do
       echo "[2method] skip $M/$T"; i=$((i+1)); continue
     fi
     # --- controlled start ---
-    if [ -n "$POLICY" ]; then
+    if [ "$RAND" = "1" ]; then
+      # Randomized-start: sample this trial's spawn (deterministic seed = the
+      # cell/trial id, so a resumed or re-run sweep reproduces the same spawns)
+      # and rebuild the env there. QA re-runs of the same trial re-sample the
+      # SAME spawn by construction.
+      read -r SPAWN_FWD_VAL SPAWN_LAT_VAL <<< "$(python3 -c "
+import random
+r = random.Random('$M/$T/rand-v1')
+s1, s2 = $RAND_SIG_LONG, $RAND_SIG_LAT
+f = max(-2*s1, min(2*s1, r.gauss(0.0, s1)))
+l = max(-2*s2, min(2*s2, r.gauss(0.0, s2)))
+print(round($BASE_FWD+f, 4), round($BASE_LAT+l, 4))")"
+      echo "[2method] $M/$T randomized spawn: fwd=$SPAWN_FWD_VAL lat=$SPAWN_LAT_VAL (base $BASE_FWD/$BASE_LAT)"
+      FIRST=0
+      fresh_env
+      mkdir -p "$HOST_OUT/$M"
+      printf '{"spawn_forward_m": %s, "spawn_lateral_m": %s, "base_forward_m": %s, "base_lateral_m": %s, "sigma_long_m": %s, "sigma_lat_m": %s, "clip": "2sigma", "seed": "%s"}\n' \
+        "$SPAWN_FWD_VAL" "$SPAWN_LAT_VAL" "$BASE_FWD" "$BASE_LAT" "$RAND_SIG_LONG" "$RAND_SIG_LAT" "$M/$T/rand-v1" \
+        > "$HOST_OUT/$M/trial_${T}_spawn.json"
+    elif [ -n "$POLICY" ]; then
       if [ $FIRST -eq 1 ]; then
         FIRST=0
       elif ! retether_and_verify; then
@@ -442,6 +490,10 @@ for M in $METHODS; do
     i=$((i+1))
   done
 done
+if [ "$RAND" = "1" ]; then   # leave the TUNED spawn in .env, not the last sample
+  sed -i "s/^HAMS_SPAWN_FORWARD=.*/HAMS_SPAWN_FORWARD=$BASE_FWD/" docker/.env
+  sed -i "s/^HAMS_SPAWN_LATERAL=.*/HAMS_SPAWN_LATERAL=$BASE_LAT/" docker/.env
+fi
 echo "[2method] COMPLETE $(date +%H:%M:%S)"
 echo "[2method] aggregate with (the study copy — the live aggregate.py ignores topdown_irl):"
 echo "  sudo docker cp $HELPER_DIR/aggregate_2method.py hams_ros:/tmp/aggregate_2method.py && \\"

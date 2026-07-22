@@ -34,6 +34,23 @@ graph. If a reviewer wants them: N=20 data already exists in
 `core_ws/benchmark_results/sweep_almi_ablation/` (standing) and
 `sweep_unfrozen/` (hanging).
 
+## The paper grid (2026-07-22, supersedes the single-tier plan)
+
+Final figure = the 3 methods above x 3 conditions, N=30 per cell:
+
+| condition | protocol | collected by |
+|---|---|---|
+| hanging | band mode (`UNFROZEN_POLICY=""`) | `paper_grid_host.sh` (all 3 methods) |
+| standing | ALMI tier | skill+graspgenx REUSED from campaign `sweep_almi/` (identical protocol, N=30); only `topdown_irl` collected new |
+| standing, randomized start | ALMI tier + fresh env per trial at a spawn sampled around the tuned stance (fwd 0.18 / lat 0.10): Gaussian, sigma_long 6.83 cm / sigma_lat 11.43 cm (the reference figure's endpoint-scatter sigmas), clipped +/-2 sigma, position only (sim has no spawn-yaw knob), deterministic per-trial seeds, each trial's spawn logged as `trial_NN_spawn.json` | `paper_grid_host.sh` (all 3 methods, runs LAST — sigmas still pending confirmation from the paper; override with `UNFROZEN_RAND_SIG_LONG/LAT`) |
+
+`paper_grid_host.sh` sequences the 7 collected cells (hanging x3 -> standing
+topdown_irl -> randomized x3, ~23 h total; the randomized tier alone is ~17 h
+because every trial rebuilds the env — `/hams/reset_scene` restores a fixed
+snapshot, so a rebuild is the only way to move the spawn without sim-code
+changes). Everything resumes per cell. The auto-start launcher runs this
+driver when the campaign completes cleanly.
+
 ## How to run (AFTER the current campaign sweep finishes)
 
 The currently-running orchestrator (`unfrozen_sweep_host.sh`, ALMI tier, N=30,
