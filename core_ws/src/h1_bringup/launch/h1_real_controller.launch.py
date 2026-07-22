@@ -1,7 +1,9 @@
 import os
 
 from launch import LaunchDescription
-from launch.actions import TimerAction
+from launch.actions import TimerAction, DeclareLaunchArgument
+from launch.conditions import IfCondition
+from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 
 
@@ -21,6 +23,11 @@ def generate_launch_description():
     sim_time_param = {'use_sim_time': False}
 
     return LaunchDescription([
+        # use_frame_task:=false disables the Pinocchio-IK frame_task_server so the
+        # upper-body MPC (launched on the desktop side, arm_backend:=upper_mpc) can
+        # own rows 12..26 of rt/safety/lowcmd_upper_in without two writers. Default
+        # true keeps the existing almi+frametask stack byte-identical.
+        DeclareLaunchArgument('use_frame_task', default_value='true'),
         Node(
             package='estop',
             executable='estop_node',
@@ -65,6 +72,7 @@ def generate_launch_description():
                     arguments=['--config', 'safety_split.yaml'],
                     parameters=[sim_time_param],
                     output='screen',
+                    condition=IfCondition(LaunchConfiguration('use_frame_task')),
                 ),
             ],
         ),

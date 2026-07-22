@@ -1,9 +1,10 @@
 import os
 
-from ament_index_python.packages import get_package_share_directory
+from ament_index_python.packages import get_package_prefix, get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import (
     DeclareLaunchArgument,
+    ExecuteProcess,
     IncludeLaunchDescription,
     TimerAction,
 )
@@ -30,6 +31,15 @@ def generate_launch_description():
     # on the onboard PC (h1_real_controller.launch.py), not here.
     bringup_share = get_package_share_directory('h1_bringup')
     default_rviz = os.path.join(bringup_share, 'rviz', 'sim.rviz')
+    mjpc_real_yaml = os.path.join(bringup_share, 'config', 'mjpc_real.yaml')
+    # arm_backend:=upper_mpc launches the upper-body MPC (nu=15 torso+arms) as the
+    # split-stack ARM executor in place of frame_task_server. Direct gflags binary
+    # (NOT ros2 run -- that zeros the IMU calib); installed to lib/h12_deploy_mjpc.
+    upperbody_bin = os.path.join(
+        get_package_prefix('h12_deploy_mjpc'), 'lib', 'h12_deploy_mjpc',
+        'mjpc_upperbody_core')
+    upper_model = ('/home/code/mujoco_mpc/build/mjpc/tasks/'
+                   'humanoid_bench/upper/Upper_H12_Magpie.xml')
 
     # Real robot runs on wall-clock time (no MuJoCo /clock), so use_sim_time is
     # False; all nodes below share this parameter.
@@ -65,6 +75,18 @@ def generate_launch_description():
         # node additionally holds at the pre-pose crouch until the operator
         # confirms:  ros2 service call /lowerbody/confirm_engage std_srvs/srv/Trigger
         DeclareLaunchArgument('lowerbody', default_value='almi'),
+        # Which controller drives the ARMS. 'frametask' (default) = the existing
+        # Pinocchio-IK frame_task_server (launched on the robot side). 'upper_mpc'
+        # = the sampling-MPC upper-body controller (nu=15 torso+arms) + the
+        # upper_frame_bridge that serves /frame_task+/named_config -> IK -> gRPC
+        # Goal J0..J14. Pair with use_frame_task:=false on the robot controller
+        # launch so only one writer feeds rt/safety/lowcmd_upper_in.
+        DeclareLaunchArgument('arm_backend', default_value='frametask'),
+        # The upper-body MPC task (used when arm_backend:=upper_mpc). Default
+        # 'Upper H12 Magpie' (nu=15 torso+arms joint-goal) -- the intended task;
+        # overridable at launch (arm_task:=...) but the binary is hardwired nu=15
+        # so only 15-DOF upper tasks are valid.
+        DeclareLaunchArgument('arm_task', default_value='Upper H12 Magpie'),
         DeclareLaunchArgument('use_skills', default_value='true'),
         DeclareLaunchArgument('model_logging', default_value='true'),
         DeclareLaunchArgument('model_visualization', default_value='true'),
@@ -226,6 +248,59 @@ def generate_launch_description():
         #             ["'", LaunchConfiguration('lowerbody'), "' == 'mjpc'"]),
         #     )),
         # ),
+
+        # ---- SPLIT arm backend: upper-body MPC (arm_backend:=upper_mpc) ---------
+        # Launches ONLY when start_position_verified AND arm_backend=='upper_mpc'.
+        # Replaces frame_task_server as the arm executor (disable it on the robot
+        # side with use_frame_task:=false so one writer owns lowcmd_upper_in). ALMI
+        # keeps the legs. base estimator: synthesises rt/sportmodestate from
+        # proprioception so the leg-aware upper MPC can retarget its pelvis weld.
+        Node(
+            package='h12_deploy_mjpc',
+            executable='estimator_node',
+            name='h12_deploy_mjpc_estimator',   # MUST match the yaml key
+            parameters=[sim_time_param, mjpc_real_yaml],
+            output='screen',
+            condition=IfCondition(AndSubstitution(
+                LaunchConfiguration('start_position_verified'),
+                PythonExpression(
+                    ["'", LaunchConfiguration('arm_backend'), "' == 'upper_mpc'"]),
+            )),
+        ),
+        # the upper-body MPC (nu=15). DRIVE24-validated flags; joint-goal task; its
+        # OWN bring-up ramp brings the arms measured->home (no frame_task settle).
+        # gRPC :10001 = the Goal J0..J14 ingest seam the bridge writes to.
+        ExecuteProcess(
+            cmd=[upperbody_bin,
+                 '--task', LaunchConfiguration('arm_task'),
+                 '--gravity_ff', '0.85', '--twin_dt', '0.001',
+                 '--imu_pitch_offset_deg', '0.0', '--imu_roll_offset_deg', '1.3',
+                 '--grpc_port', '10001'],
+            additional_env={'MJPC_TASKS_DIR': '/home/code/mujoco_mpc/build/mjpc/tasks'},
+            output='screen',
+            condition=IfCondition(AndSubstitution(
+                LaunchConfiguration('start_position_verified'),
+                PythonExpression(
+                    ["'", LaunchConfiguration('arm_backend'), "' == 'upper_mpc'"]),
+            )),
+        ),
+        # the FrameTask->joint-goal bridge: serves the SAME /frame_task +
+        # /named_config actions GraspSkill calls, runs IK (torso+arm) on the upper
+        # model, and pushes Goal J0..J14 to the MPC over gRPC. GraspSkill unmodified.
+        Node(
+            package='h12_deploy_mjpc',
+            executable='upper_frame_bridge',
+            name='upper_frame_bridge',
+            parameters=[sim_time_param,
+                        {'grpc_addr': 'localhost:10001',
+                         'upper_model_path': upper_model}],
+            output='screen',
+            condition=IfCondition(AndSubstitution(
+                LaunchConfiguration('start_position_verified'),
+                PythonExpression(
+                    ["'", LaunchConfiguration('arm_backend'), "' == 'upper_mpc'"]),
+            )),
+        ),
 
         Node(
             package='rviz2',
