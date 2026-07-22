@@ -542,3 +542,10 @@ RUN BIN=/usr/local/lib/python3.10/dist-packages/mujoco_mpc/mjpc/agent_server; \
 b = pathlib.Path(mujoco_mpc.__file__).parent / 'mjpc' / 'agent_server'; \
 assert b.exists(), f'agent_server binary missing at {b}'; \
 print('MJPC OK — mujoco', mujoco.__version__, '| agent_server:', b)"
+
+# Spatial-memory skill. Keep this final so the optional EmbodiedAgent backend
+# does not invalidate the large controller/vision build layers above. --no-deps
+# preserves the image's carefully pinned numpy<2 environment.
+RUN pip install --no-cache-dir --no-deps \
+        "faiss-cpu==1.14.3" \
+        "sentencepiece==0.2.1"

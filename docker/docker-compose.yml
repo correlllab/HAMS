@@ -109,6 +109,9 @@ services:
       # Gemini API key for the vision pipeline's gemini backbone + h12_skills.
       # Passed through from the host shell: export GEMINI_API_KEY before running.
       - GEMINI_API_KEY=${GEMINI_API_KEY:-}
+      # Optional mentor-maintained backend used by h12_skills/spatial_memory.
+      - EMBODIED_AGENT_ROOT=/opt/EmbodiedAgent
+      - HF_HOME=/cache/huggingface
       # GraspGenX released checkpoints ship in the repo (git-LFS) and reach the
       # container via the core_ws bind mount below. The image's
       # GRASPGENX_CHECKPOINT_DIR defaults to an empty /opt staging dir, so point
@@ -121,6 +124,11 @@ services:
       - /tmp/.X11-unix:/tmp/.X11-unix:rw
       - ${XAUTHORITY:-$HOME/.Xauthority}:/root/.Xauthority:ro
       - ../core_ws:/home/code/core_ws
+      # Do not vendor EmbodiedAgent into HAMS. Mount the sibling checkout read-only
+      # and persist only captured memories / model downloads in container_cache.
+      - ${EMBODIED_AGENT_ROOT:-../../EmbodiedAgent}:/opt/EmbodiedAgent:ro
+      - ../container_cache/h12_spatial_memory:/data/spatial_memory:rw
+      - ../container_cache/huggingface:/cache/huggingface:rw
       # CycloneDDS tuning config (see CYCLONEDDS_URI above). core_ws is already
       # mounted, but bind the file explicitly and read-only so the setting is
       # obvious and can't be clobbered from inside the container.
