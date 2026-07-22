@@ -59,6 +59,14 @@ install(PROGRAMS ${PROJECT_NAME}/grasp_orchestrator.py
 install(PROGRAMS ${PROJECT_NAME}/graspgen_pose_adapter.py
         DESTINATION lib/${PROJECT_NAME}
         RENAME graspgen_pose_adapter)
+# Upper-body-MPC FrameTask bridge (2026-07-21): serves the SAME /frame_task +
+# /named_config actions GraspSkill calls, runs MuJoCo-native DLS IK (torso+arm) on
+# the upper model, and pushes joint goals to h12_upper_body_controller over gRPC
+# (Goal Active/Sec/J0..J14 :10001). Replaces frame_task_server on the ALMI+upper
+# split (RL legs + MPC arms); GraspSkill unmodified. Plan U1.
+install(PROGRAMS ${PROJECT_NAME}/upper_frame_bridge.py
+        DESTINATION lib/${PROJECT_NAME}
+        RENAME upper_frame_bridge)
 
 # ---- shared resources ----
 install(DIRECTORY config DESTINATION share/${PROJECT_NAME})
@@ -173,7 +181,28 @@ if(H12_BUILD_CONTROLLER AND EXISTS "${MJPC_BUILD}" AND unitree_sdk2_FOUND)
     INSTALL_RPATH "/usr/local/lib;${MJPC_BUILD}/lib;${_dds_libdir}")
   install(TARGETS mjpc_fullbody_core DESTINATION lib/${PROJECT_NAME})
 
-  message(STATUS "h12_deploy_mjpc: mjpc_lowerbody_core + mjpc_fullbody_core ENABLED "
+  # UPPER-BODY core (h12_upper_body_controller.cc, nu=15 torso+arms, "Upper H12
+  # Magpie" joint-goal task) -- SAME deploy_common + link recipe, other thin main.
+  # Writes rows 12..26 -> rt/safety/lowcmd_upper_in (split-mode UPPER channel);
+  # goal-ingest gRPC :10001 (Goal Active/Sec/J0..J14). The arm executor for the
+  # ALMI(RL legs) + upper-MPC(arms) split grasp stack (replaces frame_task_server).
+  add_executable(mjpc_upperbody_core
+    "${MJPC_ROOT}/mjpc/deploy/h12_upper_body_controller.cc"
+    "${MJPC_ROOT}/mjpc/deploy/deploy_common.cc")
+  target_include_directories(mjpc_upperbody_core PRIVATE ${MJPC_INCLUDE_DIRS})
+  target_link_libraries(mjpc_upperbody_core
+    -Wl,--start-group ${MJPC_LIBRARIES} -Wl,--end-group
+    "${MUJOCO_LIBRARY}" unitree_sdk2 Threads::Threads ${CMAKE_DL_LIBS})
+  if(EXISTS "/usr/bin/ld.lld-13")
+    target_link_options(mjpc_upperbody_core PRIVATE -fuse-ld=/usr/bin/ld.lld-13)
+  endif()
+  set_target_properties(mjpc_upperbody_core PROPERTIES
+    BUILD_RPATH "/usr/local/lib;${MJPC_BUILD}/lib;${_dds_libdir}"
+    INSTALL_RPATH "/usr/local/lib;${MJPC_BUILD}/lib;${_dds_libdir}")
+  install(TARGETS mjpc_upperbody_core DESTINATION lib/${PROJECT_NAME})
+
+  message(STATUS "h12_deploy_mjpc: mjpc_lowerbody_core + mjpc_fullbody_core + "
+                 "mjpc_upperbody_core ENABLED "
                  "(MJPC build tree ${MJPC_BUILD}; unitree_sdk2 dds at ${_dds_libdir})")
 else()
   message(STATUS "h12_deploy_mjpc: mjpc_lowerbody_core SKIPPED "
