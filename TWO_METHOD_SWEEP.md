@@ -77,6 +77,38 @@ Decisions + caveats to carry into the paper:
   known by construction); for dose-response, fit a logistic on offset
   magnitude rather than binning.
 
+### Mechanism ruling (paper-holding Claude, 2026-07-22) + obligations
+
+The paper is **silent** on trial initialization (its 20 nav trials were
+real-robot walks — nothing to deviate from). Ruling: **warm teleport
+(mechanism B) is the more defensible realization**, not a speed compromise:
+(1) walking the offsets in would double-count uncertainty (sampled sigma +
+our sim's walking drift) AND substitute sim drift the paper explicitly
+disclaims dynamic fidelity for; (2) cold-spawn-per-trial (A) would change the
+init pipeline relative to the other conditions, confounding offset with
+mechanism — B holds the warm reset pipeline constant everywhere; (3) the LSTM
+re-seed at pin release is the policy's trained episode-start condition.
+Implemented as `/hams/place_base` + `UNFROZEN_RAND_WARM=1` (62f138c).
+
+Obligations this creates (paper text + follow-ups):
+- **Claim wording**: "grasping under randomized stance OFFSET, offsets drawn
+  from measured post-navigation endpoint statistics" — NOT "grasping after
+  navigation" (teleport gives a settled static stance: no residual base
+  velocity/rocking/gait phase/yaw).
+- **Fidelity disclaimer**: report the three methods' RANKING under increasing
+  offset, not absolute rates as hardware predictions (contact-rich = exactly
+  what the twin disclaims).
+- **Independence evidence**: per-trial spawn json logs commanded vs settled
+  start pose (sequence-invariance check); optional zero-offset A-vs-B arm =
+  ~20-30 fresh-env trials at offset 0 compared against sweep_almi (which IS
+  mechanism B at offset 0) — bounds mechanism effects (~20 pp power at N=30),
+  Adam's call whether to spend the ~4 h.
+- **Record + hold fixed**: lower-body variant (active_policy almi, pinned —
+  constant across all cells); note the safety layer's limit trips as a
+  principled divergence signal alongside the 0.6 m/60 deg watchdog.
+- **Trial-count sentence**: nav n=20 vs ours n=30 — one sentence of
+  justification ready for a reviewer.
+
 `paper_grid_host.sh` sequences the 7 collected cells (hanging x3 -> standing
 topdown_irl -> randomized x3, ~23 h total; the randomized tier alone is ~17 h
 because every trial rebuilds the env — `/hams/reset_scene` restores a fixed
