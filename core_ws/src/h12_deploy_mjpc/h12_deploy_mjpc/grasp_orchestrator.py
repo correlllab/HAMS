@@ -167,7 +167,9 @@ class GraspOrchestrator(Node):
         self.declare_parameter("grasp_pose_topic", "/graspgen/grasp_pose")
         self.declare_parameter("grpc_addr", "localhost:10000")   # full-body node monitor
         self.declare_parameter("stream_hz", 50.0)
-        self.declare_parameter("approach_speed", 0.10)   # m/s  <- the velocity CAP (P3)
+        self.declare_parameter("approach_speed", 0.05)   # m/s  <- the velocity CAP (P3);
+        # halved from 0.10 -> 0.05 for gentler momentum (arm SPEED is what tips the
+        # reach; slower = safer for balance + more precise seating). Tune per run.
         self.declare_parameter("standoff_m", 0.10)       # back along approach axis
         self.declare_parameter("dwell_err_m", 0.03)      # settle threshold
         self.declare_parameter("dwell_time_s", 0.4)      # sustained-below-thresh to advance
