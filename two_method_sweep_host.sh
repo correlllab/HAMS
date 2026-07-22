@@ -82,6 +82,22 @@ POLICY="${UNFROZEN_POLICY-almi}"
 RAND="${UNFROZEN_RAND:-0}"
 RAND_SIG_LONG="${UNFROZEN_RAND_SIG_LONG:-0.1143}"   # sigma along the approach [m]
 RAND_SIG_LAT="${UNFROZEN_RAND_SIG_LAT:-0.0683}"     # sigma lateral [m]
+# UNFROZEN_RAND_WARM=1: realize each sampled start WARM (mechanism B, reviewed
+# against the reference paper 2026-07-22 — holding the warm init pipeline
+# constant across conditions keeps the offset manipulation unconfounded, and
+# the LSTM re-seed at pin release is the policy's trained episode start):
+# ONE env for the whole cell; per trial the validated warm retether restores
+# the scene and /hams/place_base repins the base at the sampled offset before
+# re-engage (~5 min/trial vs ~12). Needs the sim container to run THIS
+# branch's h12_mujoco (the live sim has no /hams/place_base), so the sim
+# container is launched from HAMS_SIM_REPO (the worktree) while hams_ros
+# stays on the live checkout's built workspace — h1_robocasa is plain mounted
+# source, no rebuild anywhere. If the mixed-source env fails to come up
+# twice, we FALL BACK automatically to the slow fresh-env-per-trial path on
+# the live sim (mechanism A) and log it loudly.
+RAND_WARM="${UNFROZEN_RAND_WARM:-0}"
+SIM_REPO="${HAMS_SIM_REPO:-$LIVE_REPO}"   # sim-container source (worktree for warm-rand)
+FRESH_FAILS=0
 if [ "$RAND" = "1" ] && [ -z "$POLICY" ]; then
   echo "[2method] UNFROZEN_RAND=1 requires the standing tier (UNFROZEN_POLICY=almi)"; exit 1
 fi
@@ -255,7 +271,11 @@ fresh_env() {
     sed -i 's/^HAMS_LIDAR=.*/HAMS_LIDAR=1/' docker/.env
     sed -i 's|^HAMS_STATE_PATH=.*|HAMS_STATE_PATH=|' docker/.env
   fi
-  echo "$PW" | sudo -S -E bash docker/scripts/docker_run.sh robocasa --task OpenFridge --seed 42 > /tmp/sim_batch.log 2>&1 &
+  # Sim container from $SIM_REPO (== live checkout except warm-rand, where it
+  # is this worktree for /hams/place_base); its docker/.env mirrors the sed'd
+  # live one so both containers share identical knobs + DDS domain.
+  [ "$SIM_REPO" != "$LIVE_REPO" ] && cp -f docker/.env "$SIM_REPO/docker/.env"
+  echo "$PW" | sudo -S -E bash -c "cd '$SIM_REPO' && bash docker/scripts/docker_run.sh robocasa --task OpenFridge --seed 42" > /tmp/sim_batch.log 2>&1 &
   for k in $(seq 1 60); do sudo_do docker logs hams_sim_robocasa 2>&1 | grep -q "ROS bridges up" && break; sleep 3; done
   echo "$PW" | sudo -S -E bash docker/scripts/docker_run.sh ros sleep infinity > /tmp/ros_batch.log 2>&1 &
   for k in $(seq 1 40); do sudo_do docker ps --format '{{.Names}}' | grep -q hams_ros && break; sleep 2; done
@@ -281,7 +301,15 @@ fresh_env() {
     fi
     sleep 3
   done
-  if [ $READY -ne 1 ]; then echo "[env] bringup NOT ready after 600s — retry env"; fresh_env; return; fi
+  if [ $READY -ne 1 ]; then
+    FRESH_FAILS=$((FRESH_FAILS+1))
+    if [ "$RAND_WARM" = "1" ] && [ "$FRESH_FAILS" -ge 2 ] && [ "$SIM_REPO" != "$LIVE_REPO" ]; then
+      echo "[env] mixed-source env failed ${FRESH_FAILS}x — FALLBACK: live sim + slow fresh-env randomization (mechanism A)"
+      SIM_REPO="$LIVE_REPO"; RAND_WARM=0
+    fi
+    echo "[env] bringup NOT ready after 600s — retry env"; fresh_env; return
+  fi
+  FRESH_FAILS=0
   sleep 3
   if [ -n "$POLICY" ]; then
     # world anchor for drift-compensated servoing (camera_init -> odom identity)
@@ -304,10 +332,18 @@ retether_and_verify() {
   # the pin -> short pinned re-conditioning + release + upright confirm (warm
   # policy: no LSTM cold-start settle) -> verify. Cold re-engage only if the
   # warm confirm fails; env rebuild only if THAT fails (caller handles).
+  # Optional $1=$2=[fwd_m lat_m]: warm-randomized start — after the scene
+  # reset, /hams/place_base repins the base at spawn+offset (absolute target,
+  # burst-publish safe) before the arm home + re-engage.
+  local PB_F="${1:-}" PB_L="${2:-}"
   in_ros "ros2 topic pub --times 8 --rate 5 /hams/freeze_body std_msgs/msg/Bool '{data: true}' >/dev/null 2>&1"
   sleep 2
   in_ros "ros2 topic pub --times 8 --rate 5 /hams/reset_scene std_msgs/msg/Empty '{}' >/dev/null 2>&1"
   sleep 2
+  if [ -n "$PB_F" ]; then
+    in_ros "ros2 topic pub --times 8 --rate 5 /hams/place_base std_msgs/msg/Float64MultiArray \"{data: [$PB_F, $PB_L]}\" >/dev/null 2>&1"
+    sleep 2
+  fi
   in_ros "ros2 topic pub --times 8 --rate 5 /hams/reset_arm std_msgs/msg/Empty '{}' >/dev/null 2>&1
 # Latch the upper-body controller's setpoint HOME while the sim pin holds the
 # arm there (mentor's go_home trick): otherwise the stale frame_task target
@@ -339,6 +375,10 @@ ros2 service call /right/gripper/open std_srvs/srv/Trigger >/dev/null 2>&1; slee
     sleep 2
     in_ros "ros2 topic pub --times 8 --rate 5 /hams/reset_scene std_msgs/msg/Empty '{}' >/dev/null 2>&1"
     sleep 2
+    if [ -n "$PB_F" ]; then
+      in_ros "ros2 topic pub --times 8 --rate 5 /hams/place_base std_msgs/msg/Float64MultiArray \"{data: [$PB_F, $PB_L]}\" >/dev/null 2>&1"
+      sleep 2
+    fi
     mark_fell_baseline
   done
   # in-session COLD re-engage reliably falls (0.55 upright, unexplained) — skip
@@ -408,23 +448,45 @@ for M in $METHODS; do
     fi
     # --- controlled start ---
     if [ "$RAND" = "1" ]; then
-      # Randomized-start: sample this trial's spawn (deterministic seed = the
-      # cell/trial id, so a resumed or re-run sweep reproduces the same spawns)
-      # and rebuild the env there. QA re-runs of the same trial re-sample the
-      # SAME spawn by construction.
-      read -r SPAWN_FWD_VAL SPAWN_LAT_VAL <<< "$(python3 -c "
+      # Randomized-start: sample this trial's spawn offset (deterministic
+      # seed = the cell/trial id, so a resumed or re-run sweep reproduces the
+      # same spawns; QA re-runs re-sample the SAME spawn by construction).
+      read -r S_ABS_F S_ABS_L S_OFF_F S_OFF_L <<< "$(python3 -c "
 import random
 r = random.Random('$M/$T/rand-v2')
 s1, s2 = $RAND_SIG_LONG, $RAND_SIG_LAT
 f = max(-3*s1, min(3*s1, r.gauss(0.0, s1)))
 l = max(-3*s2, min(3*s2, r.gauss(0.0, s2)))
-print(round($BASE_FWD+f, 4), round($BASE_LAT+l, 4))")"
-      echo "[2method] $M/$T randomized spawn: fwd=$SPAWN_FWD_VAL lat=$SPAWN_LAT_VAL (base $BASE_FWD/$BASE_LAT)"
-      FIRST=0
-      fresh_env
+print(round($BASE_FWD+f, 4), round($BASE_LAT+l, 4), round(f, 4), round(l, 4))")"
+      echo "[2method] $M/$T randomized spawn: fwd=$S_ABS_F lat=$S_ABS_L (offset $S_OFF_F/$S_OFF_L; mech=$([ "$RAND_WARM" = "1" ] && echo warm || echo fresh))"
+      if [ "$RAND_WARM" = "1" ]; then
+        # Mechanism B: one env per cell; warm retether + /hams/place_base
+        # repins the base at the sampled offset before re-engage.
+        if [ $FIRST -eq 1 ]; then FIRST=0; fresh_env; fi
+        if [ "$RAND_WARM" = "1" ]; then   # fresh_env may have cleared it (fallback)
+          if ! retether_and_verify "$S_OFF_F" "$S_OFF_L"; then
+            echo "[2method] warm randomized retether FAILED -> rebuild"; fresh_env
+            [ "$RAND_WARM" = "1" ] && { retether_and_verify "$S_OFF_F" "$S_OFF_L" || \
+              echo "[2method] placed retether still failing after rebuild — flagged"; }
+          fi
+        fi
+      fi
+      if [ "$RAND_WARM" != "1" ]; then
+        # Mechanism A (fallback / UNFROZEN_RAND_WARM=0): fresh env per trial,
+        # spawn sed'd to the sampled absolute position.
+        SPAWN_FWD_VAL="$S_ABS_F"; SPAWN_LAT_VAL="$S_ABS_L"
+        FIRST=0
+        fresh_env
+      fi
       mkdir -p "$HOST_OUT/$M"
-      printf '{"spawn_forward_m": %s, "spawn_lateral_m": %s, "base_forward_m": %s, "base_lateral_m": %s, "sigma_long_m": %s, "sigma_lat_m": %s, "clip": "3sigma", "seed": "%s"}\n' \
-        "$SPAWN_FWD_VAL" "$SPAWN_LAT_VAL" "$BASE_FWD" "$BASE_LAT" "$RAND_SIG_LONG" "$RAND_SIG_LAT" "$M/$T/rand-v2" \
+      # Log commanded vs settled start (the sequence-invariance / carryover
+      # evidence the mechanism review asked for) + full sampling provenance.
+      SETTLED_XY=$(sudo_do docker exec hams_ros cat /tmp/almi_ref.txt 2>/dev/null | tail -1)
+      printf '{"spawn_forward_m": %s, "spawn_lateral_m": %s, "offset_forward_m": %s, "offset_lateral_m": %s, "base_forward_m": %s, "base_lateral_m": %s, "sigma_long_m": %s, "sigma_lat_m": %s, "clip": "3sigma", "mechanism": "%s", "settled_ref_xy": "%s", "seed": "%s"}\n' \
+        "$S_ABS_F" "$S_ABS_L" "$S_OFF_F" "$S_OFF_L" "$BASE_FWD" "$BASE_LAT" \
+        "$RAND_SIG_LONG" "$RAND_SIG_LAT" \
+        "$([ "$RAND_WARM" = "1" ] && echo warm_teleport || echo fresh_env)" \
+        "$SETTLED_XY" "$M/$T/rand-v2" \
         > "$HOST_OUT/$M/trial_${T}_spawn.json"
     elif [ -n "$POLICY" ]; then
       if [ $FIRST -eq 1 ]; then

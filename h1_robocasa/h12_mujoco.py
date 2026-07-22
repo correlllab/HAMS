@@ -456,6 +456,21 @@ def sim_loop(task, viewer=True, layout=None, style=None, seed=None, record_video
     # policy cold-start. Applied under the freeze pin by the main loop.
     _scene_qpos0 = data.qpos.copy()
     _scene_reset = {'req': False}
+    # Warm base-teleport (/hams/place_base, std_msgs/Float64MultiArray
+    # [fwd_m, lat_m]): place the PINNED base at the SPAWN pose shifted fwd
+    # along the spawn facing and lat to its left, then re-snapshot the freeze
+    # pin there. ABSOLUTE semantics (target = spawn + offset), so the DDS
+    # burst-publish pattern (--times 8) is idempotent. Applied by the main
+    # loop only while frozen — an unfrozen teleport is an impulse. Together
+    # with /hams/reset_scene this gives the randomized-start tier its warm
+    # per-trial spawn (reset -> place -> re-engage; no container rebuild).
+    # Mechanism reviewed against the reference paper 2026-07-22: keeping the
+    # warm init pipeline IDENTICAL across conditions is what leaves the
+    # stance-offset manipulation unconfounded (a cold-spawn variant would
+    # change two things at once).
+    _scene_base0 = (data.qpos[_frz_base_qadr:_frz_base_qadr + 7].copy()
+                    if _frz_base_qadr >= 0 else None)
+    _place_base = {'req': None}
 
     # Reliable between-trial ARM RESET for the grasp sweep. The upper-body
     # differential-IK controller can leave the arm in a raised config it cannot
@@ -607,6 +622,12 @@ def sim_loop(task, viewer=True, layout=None, style=None, seed=None, record_video
     reset_node.create_subscription(
         _EmptyMsg, '/hams/save_state',
         lambda _m: _state_save.__setitem__('req', True), 10)
+    # Warm base-teleport: [fwd_m, lat_m] offsets from the SPAWN pose (absolute
+    # target — idempotent under burst publish). Main-loop applied, frozen-only.
+    from std_msgs.msg import Float64MultiArray as _F64Arr
+    reset_node.create_subscription(
+        _F64Arr, '/hams/place_base',
+        lambda m: _place_base.__setitem__('req', [float(v) for v in m.data][:2]), 10)
 
     # Background executor serves the gripper services/timers/action + the band
     # toggle service. ros_bridge.tick() is driven from the main loop instead (its
@@ -731,6 +752,35 @@ def sim_loop(task, viewer=True, layout=None, style=None, seed=None, record_video
                     mujoco.mj_forward(model, data)
                     print(f"[h12_mujoco] SCENE RESET to spawn state at t={data.time:.2f}s "
                           "(frozen; release via /hams/freeze_body)", flush=True)
+                # Warm base-teleport (under the pin): place the frozen base at
+                # spawn + [fwd, lat] in the SPAWN pose's facing frame, re-pin.
+                if _place_base['req'] is not None:
+                    _off = _place_base['req']
+                    _place_base['req'] = None
+                    if (_frz_toggle['on'] and _frz_base_qadr >= 0
+                            and _scene_base0 is not None and len(_off) >= 2):
+                        _fwd3 = np.zeros(3)
+                        mujoco.mju_rotVecQuat(_fwd3, np.array([1.0, 0.0, 0.0]),
+                                              _scene_base0[3:7])
+                        _fwd3[2] = 0.0
+                        _n = float(np.linalg.norm(_fwd3))
+                        if _n > 1e-9:
+                            _fwd3 /= _n
+                            _left3 = np.cross(np.array([0.0, 0.0, 1.0]), _fwd3)
+                            _tgt = (_scene_base0[:2]
+                                    + _off[0] * _fwd3[:2] + _off[1] * _left3[:2])
+                            data.qpos[_frz_base_qadr:_frz_base_qadr + 2] = _tgt
+                            data.qvel[:] = 0.0
+                            _frz_base_qpos = data.qpos[_frz_base_qadr:_frz_base_qadr + 7].copy()
+                            _frz_lower_qpos = data.qpos[_frz_lower_qidx].copy()
+                            mujoco.mj_forward(model, data)
+                            print(f"[h12_mujoco] BASE PLACED at spawn"
+                                  f"{_off[0]:+.3f}fwd {_off[1]:+.3f}lat -> "
+                                  f"({_tgt[0]:.3f}, {_tgt[1]:.3f}) at t={data.time:.2f}s "
+                                  "(pin re-snapshotted)", flush=True)
+                    else:
+                        print("[h12_mujoco] /hams/place_base ignored — freeze the "
+                              "body first (unfrozen teleport = impulse)", flush=True)
                 # Between-trial arm reset window (works FROZEN OR NOT): pin the 14
                 # arm joints to home and overwrite their PD setpoint, so a stuck
                 # controller command can't drag the arm back off home while the

@@ -44,5 +44,10 @@ run_cell() {  # $1=tier-name $2=policy $3=rand $4=methods
 
 run_cell hanging       ""     0 "skill graspgenx topdown_irl"
 run_cell standing      "almi" 0 "topdown_irl"
-run_cell standing_rand "almi" 1 "skill graspgenx topdown_irl"
+# Randomized tier: WARM mechanism (B) per the 2026-07-22 paper review — sim
+# container from this worktree (for /hams/place_base), hams_ros stays on the
+# live workspace; auto-falls back to the slow fresh-env path if the mixed env
+# won't come up. ~7.5 h warm vs ~17 h fallback.
+UNFROZEN_RAND_WARM=1 HAMS_SIM_REPO="$HERE" \
+  run_cell standing_rand "almi" 1 "skill graspgenx topdown_irl"
 echo "[grid] ALL CELLS COMPLETE $(date +%H:%M:%S)"
