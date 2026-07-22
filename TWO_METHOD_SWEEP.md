@@ -138,6 +138,30 @@ method) + per-method grasp-line overlay PNGs into `sweep_2method/viz/`.
 Missing method dirs are skipped automatically, so any subset is fine (it also
 aggregates `sweep_almi`-style dirs).
 
+## Battery workcell (screw pickup) — sim integration status
+
+The NEXT comparison target ("picking the nail" = the `Screw` parts from the
+ARPA cell's screw row). Status 2026-07-22:
+
+- **DONE (commit b896ed8):** the sim on this branch loads the battery scene —
+  `python3 h12_mujoco.py --task BatteryWorkcell` (from THIS worktree's
+  containers; the live checkout stays frozen). `battery_env.py` duck-types the
+  env surface; all bridges (DDS lowstate/lowcmd, head+hand cameras, gripper
+  services, `/robocasa/object_poses` GT with 36 screws + battery_link, freeze/
+  reset machinery) wire to the raw model's names. Static checks pass in the
+  sim image; worktree `CL_Assets` populated at the c727cc6 pin.
+- **Pieces that already existed:** YOLO battery weights + server queries,
+  the deployed battery grasp path in the skills (YOLO box -> raw box cloud ->
+  top-down), CL_Assets scene + meshes.
+- **DELIBERATELY NOT DONE YET (needs the first live session, after the paper
+  grid):** dynamic smoke test (bringup against BatteryWorkcell, policy/band
+  behavior in the new scene); stance/spawn placement for the cell (screw row
+  is at world ~(1.66, -0.86, 0.87) vs the fridge stance); the sweep script's
+  battery protocol variant — `--success-mode lift` + screw GT name + aperture
+  band for the screw head + trial env values. The armed paper grid runs the
+  UNCHANGED validated script; battery knobs get added fresh at tuning time
+  rather than risking the overnight grid.
+
 ## Safety rails baked into the script
 
 - `flock` single-instance lock + refusal while other orchestrators/trials run
