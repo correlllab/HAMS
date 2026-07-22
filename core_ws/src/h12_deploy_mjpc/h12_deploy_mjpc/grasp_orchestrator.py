@@ -204,7 +204,11 @@ class GraspOrchestrator(Node):
         # P3 virtual table: pelvis-frame Z of the table top. < 0 (default) = no table
         # (self-collision only). Set it (e.g. from the perceived object/plate height)
         # to steer the reach AROUND the table instead of through it.
-        self.declare_parameter("table_height_m", -1.0)
+        # Real ARPA battery-cell surface = 0.87 m (measured). Baked as the default so
+        # the mink virtual table sits at the real height when collision-avoidance is on.
+        # (The ARPA model puts the screw-mounting surface ~0.84 m; 0.87 is the measured
+        # value -- verify the pelvis-frame Z on the crane before trusting it.) -1 = off.
+        self.declare_parameter("table_height_m", 0.87)
         self.declare_parameter("table_center_xy", [0.45, -0.15])  # table box centre (pelvis xy)
         # P4 path mode: stream the mink collision-free waypoints (not the straight
         # ramp) whenever they deviate from the straight line by > this [m]. 0/neg =
