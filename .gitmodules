@@ -30,6 +30,7 @@
 [submodule "CL_Assets"]
 	path = CL_Assets
 	url = git@github.com:correlllab/CL_Assets.git
+	branch = test/grasping
 [submodule "unitree_sdk2_python"]
 	path = unitree_sdk2_python
 	url = git@github.com:Oya-Tomo/unitree_sdk2_python.git
