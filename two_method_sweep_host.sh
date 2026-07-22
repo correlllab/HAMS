@@ -1,12 +1,18 @@
 #!/bin/bash
-# TWO-METHOD grasp sweep for the paper graph: new(skill) vs graspgenx-normal.
-#   skill     -> the deployed /skill/grasp path (heuristic matching selection:
-#                envelope -> Y-up re-roll -> tiers -> diversity -> IK fallback)
-#   graspgenx -> the same GraspGenX server/candidates executed strictly
-#                best-first by raw model score (no heuristic selection)
-# Both hit the identical server + sampling config, so the delta isolates the
-# heuristic-matching layer. pca(topdown_antipodal)/centroid deliberately omitted
-# for this graph (ablation data exists in sweep_almi_ablation / sweep_unfrozen).
+# Grasp sweep for the paper graph: new(skill) vs graspgenx-normal vs the real
+# robot's top-down.
+#   skill       -> the deployed /skill/grasp path (heuristic matching selection:
+#                  envelope -> Y-up re-roll -> tiers -> diversity -> IK fallback)
+#   graspgenx   -> the same GraspGenX server/candidates executed strictly
+#                  best-first by raw model score (no heuristic selection)
+#   topdown_irl -> HAMS main's DEPLOYED goal.top_down grasp, verbatim (one
+#                  synthetic 80-deg-below-horizontal candidate on the cloud
+#                  mean; see grasp_benchmark_topdown.py) — runs via this
+#                  branch's wrapper, NO rebuild of the live checkout.
+# skill/graspgenx hit the identical server + sampling config, so that delta
+# isolates the heuristic-matching layer; topdown_irl is the as-deployed IRL
+# baseline. pca(topdown_antipodal)/centroid deliberately omitted for this graph
+# (ablation data exists in sweep_almi_ablation / sweep_unfrozen).
 #
 # This is a faithful snapshot of the validated unfrozen_sweep_host.sh protocol
 # (ALMI standing tier by default: strict grading, telemetry CSV + rosbag, QA,
@@ -49,7 +55,7 @@ fi
 OUTROOT="${UNFROZEN_OUT:-/home/code/core_ws/benchmark_results/sweep_2method}"
 PW="${HAMS_SUDO_PW:-Unitreeh12}"
 N="${UNFROZEN_N:-20}"
-METHODS="${UNFROZEN_METHODS:-skill graspgenx}"
+METHODS="${UNFROZEN_METHODS:-skill graspgenx topdown_irl}"
 POLICY="${UNFROZEN_POLICY-almi}"
 
 # Tier knobs (defaults keep each tier byte-identical to the campaign's runs)
@@ -220,6 +226,8 @@ fresh_env() {
   sudo_do docker cp "$HELPER_DIR/grab_head.py" hams_ros:/tmp/grab_head.py
   sudo_do docker cp "$HELPER_DIR/trial_recorder.py" hams_ros:/tmp/trial_recorder.py
   sudo_do docker cp "$HELPER_DIR/almi_engage.py" hams_ros:/tmp/almi_engage.py
+  sudo_do docker cp "$HELPER_DIR/grasp_benchmark_topdown.py" hams_ros:/tmp/grasp_benchmark_topdown.py
+  sudo_do docker cp "$HELPER_DIR/aggregate_2method.py" hams_ros:/tmp/aggregate_2method.py
   # HAMS_GRASP_BOX_SOURCE=gt makes the skill path (/skill/grasp) skip Gemini+SAM
   # and crop the object cloud around the GT centroid (mentor's quota-free GT
   # perception) -> removes the perception confound so grasps are fast/reliable
@@ -307,10 +315,15 @@ run_trial() {  # $1=method $2=trial-id
   local M=$1 T=$2
   local EXTRA=""
   [ "$M" != "skill" ] && EXTRA="--max-attempts ${MAXATT:-20} --no-plan"
+  # topdown_irl is this branch's verbatim port of main's goal.top_down; it runs
+  # through the wrapper fresh_env copied to /tmp (same CLI, defers to the
+  # INSTALLED grasp_benchmark for everything else -> no live-checkout rebuild).
+  local RUNNER="ros2 run h12_skills grasp_benchmark"
+  [ "$M" = "topdown_irl" ] && RUNNER="python3 /tmp/grasp_benchmark_topdown.py"
   in_ros "mkdir -p $OUTROOT/$M
 for attempt in 1 2 3; do
   ros2 service call /right/gripper/open std_srvs/srv/Trigger >/dev/null 2>&1; sleep 2
-  env $TRIAL_ENV timeout 400 ros2 run h12_skills grasp_benchmark --method $M \
+  env $TRIAL_ENV timeout 400 $RUNNER --method $M \
     --object 'vertical fridge handle' --gt-name door_obj --arm right --box-source gt \
     --success-mode contact $EXTRA --out $OUTROOT/$M/trial_$T.json > $OUTROOT/$M/trial_$T.log 2>&1
   [ \$? -eq 124 ] && [ ! -s $OUTROOT/$M/trial_$T.json ] && python3 -c \"import json;json.dump({'method':'$M','success':False,'executed':False,'error':'harness timeout'},open('$OUTROOT/$M/trial_$T.json','w'),indent=2)\"
@@ -430,5 +443,6 @@ for M in $METHODS; do
   done
 done
 echo "[2method] COMPLETE $(date +%H:%M:%S)"
-echo "[2method] aggregate with:"
-echo "  sudo docker exec hams_ros bash -lc 'source /opt/ros/humble/setup.bash; source /home/code/core_ws/install/setup.bash; python3 /home/code/aggregate.py $OUTROOT'"
+echo "[2method] aggregate with (the study copy — the live aggregate.py ignores topdown_irl):"
+echo "  sudo docker cp $HELPER_DIR/aggregate_2method.py hams_ros:/tmp/aggregate_2method.py && \\"
+echo "  sudo docker exec hams_ros bash -lc 'source /opt/ros/humble/setup.bash; source /home/code/core_ws/install/setup.bash; python3 /tmp/aggregate_2method.py $OUTROOT'"

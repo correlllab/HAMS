@@ -1,22 +1,33 @@
-# Two-method grasp sweep — new(skill) vs graspgenx-normal
+# Paper-graph grasp sweep — new(skill) vs graspgenx-normal vs topdown(irl)
 
 Branch `grasp-2method-comparison` (worktree `/home/guest/HAMS-grasp-2method`).
-Everything for the paper's 2-point graph lives HERE; the live checkout at
+Everything for the paper graph lives HERE; the live checkout at
 `/home/guest/Downloads/HAMS-test-grasping` (branch `test/grasping`) is never
 modified, switched, or rebuilt — this branch only *drives* its docker setup.
 
-## The two points
+## The graph cells
 
-| harness method | aggregate.py label | what it is |
+| harness method | aggregate label | what it is |
 |---|---|---|
 | `skill` | `new(skill)` | the deployed `/skill/grasp` path: GraspGenX + heuristic matching (envelope → Y-up re-roll → priority tiers → diversity → IK fallback) |
 | `graspgenx` | `graspgenx-normal` | the SAME GraspGenX server + sampling config, executed strictly best-first by raw model score (no heuristic selection) |
+| `topdown_irl` | `topdown(irl)` | HAMS main's DEPLOYED `goal.top_down` grasp, verbatim: ONE synthetic candidate on the object-cloud MEAN, tier-1 orientation (approach in the pelvis XZ plane, fingers along pelvis +Y) pitched 80° below horizontal, gripper base 0.1146 m back along the approach so the finger contact lands exactly on the centroid. No GraspGenX call, no orientation gates, no fallback pool. |
 
-Both methods share one candidate generator (same server, same post-fe8a252
-sampling config: 2048 candidates, 72 yaws, disabled server envelope), so the
+skill/graspgenx share one candidate generator (same server, same post-fe8a252
+sampling config: 2048 candidates, 72 yaws, disabled server envelope), so that
 delta cleanly isolates the heuristic-matching layer. This is a *cleaner*
 ablation than the old-PC plan of replaying the pre-fe8a252 client on the new
 pool — no sampling-config caveat needed in the paper.
+
+`topdown_irl` is the as-deployed real-robot baseline — the exact code path a
+`goal.top_down` grasp runs on HAMS main, ported verbatim (constants, mean
+centroid, single candidate) in `grasp_benchmark_topdown.py`. Fidelity note
+from main's own comments: 80° is still far past the H1-2 wrist's ~26.5°
+practical pitch, so main itself says to "expect best-effort convergence from
+the servo" — a low success rate here is the honest deployed-baseline result,
+not a porting bug. The wrapper registers the method on the INSTALLED
+`h12_skills.grasp_benchmark` at runtime (copied to the container's /tmp by the
+sweep script), so the live checkout still needs no rebuild.
 
 `pca` (= `topdown_antipodal`) and `centroid` are deliberately NOT run for this
 graph. If a reviewer wants them: N=20 data already exists in
@@ -33,7 +44,9 @@ refuses to start while it (or any `grasp_benchmark` trial) is alive.
 # 1. check nothing is running (should print nothing):
 pgrep -af 'sweep_host|baselines_host|grasp_benchmar[k]'
 
-# 2. run the 2-method sweep (20 trials x {skill, graspgenx}, ALMI standing tier):
+# 2. run the sweep (N trials x {skill, graspgenx, topdown_irl}, ALMI standing
+#    tier; N defaults to 20 — the armed auto-start uses UNFROZEN_N=30 -> 90
+#    trials). UNFROZEN_METHODS="skill graspgenx" drops the topdown cell.
 bash /home/guest/HAMS-grasp-2method/two_method_sweep_host.sh
 ```
 
@@ -60,15 +73,20 @@ clean re-run / top-up tool.
 
 ## Aggregate → graph numbers
 
+Use this branch's `aggregate_2method.py` — the live checkout's `aggregate.py`
+iterates a fixed method list and silently IGNORES a `topdown_irl` dir:
+
 ```bash
+sudo docker cp /home/guest/HAMS-grasp-2method/aggregate_2method.py hams_ros:/tmp/aggregate_2method.py
 sudo docker exec hams_ros bash -lc \
   'source /opt/ros/humble/setup.bash; source /home/code/core_ws/install/setup.bash; \
-   python3 /home/code/aggregate.py /home/code/core_ws/benchmark_results/sweep_2method'
+   python3 /tmp/aggregate_2method.py /home/code/core_ws/benchmark_results/sweep_2method'
 ```
 
 Writes `summary.json` (success/exec rates, grip mm, force, exec time per
 method) + per-method grasp-line overlay PNGs into `sweep_2method/viz/`.
-Missing method dirs are skipped automatically, so the 2-method subset is fine.
+Missing method dirs are skipped automatically, so any subset is fine (it also
+aggregates `sweep_almi`-style dirs).
 
 ## Safety rails baked into the script
 
