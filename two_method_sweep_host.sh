@@ -275,7 +275,12 @@ fresh_env() {
   # is this worktree for /hams/place_base); its docker/.env mirrors the sed'd
   # live one so both containers share identical knobs + DDS domain.
   [ "$SIM_REPO" != "$LIVE_REPO" ] && cp -f docker/.env "$SIM_REPO/docker/.env"
-  echo "$PW" | sudo -S -E bash -c "cd '$SIM_REPO' && bash docker/scripts/docker_run.sh robocasa --task OpenFridge --seed 42" > /tmp/sim_batch.log 2>&1 &
+  # Third-person mp4 of the WHOLE env epoch (streamed, fragmented — survives
+  # the docker rm between envs; VideoRecorder failure just disables video,
+  # never the sim). One file per env, timestamped, next to the trial data.
+  VIDEO_PATH="$OUTROOT/sim_$(date +%m%d_%H%M%S).mp4"
+  echo "$PW" | sudo -S -E bash -c "cd '$SIM_REPO' && bash docker/scripts/docker_run.sh robocasa --task OpenFridge --seed 42 --record-video '$VIDEO_PATH'" > /tmp/sim_batch.log 2>&1 &
+  echo "[env] third-person video -> $VIDEO_PATH"
   for k in $(seq 1 60); do sudo_do docker logs hams_sim_robocasa 2>&1 | grep -q "ROS bridges up" && break; sleep 3; done
   echo "$PW" | sudo -S -E bash docker/scripts/docker_run.sh ros sleep infinity > /tmp/ros_batch.log 2>&1 &
   for k in $(seq 1 40); do sudo_do docker ps --format '{{.Names}}' | grep -q hams_ros && break; sleep 2; done
