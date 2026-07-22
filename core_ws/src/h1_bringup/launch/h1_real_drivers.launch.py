@@ -67,12 +67,15 @@ def generate_launch_description():
             'port': '/dev/serial/by-id/usb-ROBOTIS_OpenRB-150_B0935A515157375037202020FF101F14-if00',
             'use_eflesh': False,
             # Finger angle limits (degrees), per-gripper calibration.
-            'finger1theta_min': 86.8,
-            'finger1theta_max': 164.52,
-            'finger1theta_90': 138.02,
-            'finger2theta_min': 130.5,
-            'finger2theta_max': 210.56,
-            'finger2theta_90': 157.0,
+            # Recalibrated 2026-07-21 after gripper repair. min/max are the
+            # measured servo angles at the open/closed stops; theta_90
+            # (parallel-jaw ref) scaled from the prior parallel fraction.
+            'finger1theta_min': 87.98,
+            'finger1theta_max': 162.4,
+            'finger1theta_90': 135.71,
+            'finger2theta_min': 130.6,
+            'finger2theta_max': 209.09,
+            'finger2theta_90': 157.89,
         }],
     )
 
