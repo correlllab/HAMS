@@ -2,8 +2,8 @@
 
 Flow (see _exec_generic_grasp, the orchestrator):
 
-    t_pose -> box -> object cloud -> candidates -> pre-grasp approach
-           -> contact -> force close
+    prep -> box -> object cloud -> candidates -> pre-grasp approach
+         -> contact -> force close
 
 With goal.visual_servo the last two steps become a hand-camera loop instead:
 align on the object at VISUAL_SERVO_DEPTH_M and close there (_visual_servo_refine).
@@ -128,8 +128,8 @@ TOP_DOWN_PITCH_DEG = 80.0
 # grasp does not leave the hand sitting in the parts where the next attempt — or
 # a person — has to work around it. Larger than the visual servo's own 5 cm
 # reacquire hop: that one is trying to keep servoing, this one is leaving.
-# Excluded on purpose from the t_pose failure, which fires before the skill has
-# moved the arm itself.
+# Excluded on purpose from the prep-config failure, which fires before the
+# skill has moved the arm itself.
 FAILURE_RETRACT_M = 0.15
 FAILURE_RETRACT_SEC = 3.0
 
@@ -376,6 +376,13 @@ VISUAL_SERVO_MIN_DEPTH_M = 0.04
 # in servo_frame_to_world still bails genuinely out-of-reach candidates quickly,
 # so the extra budget is only spent on poses that are actually close to reachable.
 SERVO_DURATION_SEC = 15   # primary (iter-0) approach/contact IK move budget [s]
+# [s] timeout for the pre-grasp approach move (per candidate, per servo
+# iteration). Deliberately generous so a long transit into the workspace is
+# never cut off mid-move. It is a TIMEOUT, not a commanded trajectory time:
+# reachable moves finish and return as soon as they converge, and dead
+# candidates are rejected at plan time in well under a second, so the full
+# budget is only ever consumed by motion that is genuinely in progress.
+APPROACH_DURATION_SEC = 180.0
 SERVO_MAX_ITER = 6        # world-frame servo refinement passes per pose
 # Convergence tolerances for the grasp servo, relaxed from base.py's defaults
 # (5 mm / ~1.15 deg). Real-robot IK + pelvis drift rarely settle a 6-DOF grasp
@@ -482,20 +489,21 @@ class GraspSkill:
         obj = goal.target_object
 
         # --- detect: box (gemini or yolo) -> object cloud (sam or raw box) ----
-        if not run.phase('detect', 0.0):
+        if not run.phase('detect_object', 0.0):
             return run.result
-        # Arms to t_pose FIRST, before the detection image is grabbed, so they
-        # are clear of the head camera's view (an arm across the object
-        # corrupts the box/mask/cloud). PLANNED (plan=True): the arms start
-        # wherever the last skill left them — often near the workspace or each
-        # other — so this long opening move goes through the planner rather than
-        # a direct IK descent that can sweep the arms through obstacles.
-        if not self.goto_named_config('t_pose', plan=True, outer_gh=gh):
+        # Arms to the 'prep' config FIRST, before the detection image is
+        # grabbed, so they are clear of the head camera's view (an arm across
+        # the object corrupts the box/mask/cloud). PLANNED (plan=True): the
+        # arms start wherever the last skill left them — often near the
+        # workspace or each other — so this long opening move goes through the
+        # planner rather than a direct IK descent that can sweep the arms
+        # through obstacles.
+        if not self.goto_named_config('prep', plan=True, outer_gh=gh):
             # The ONLY failure that does not retract: this one fires before the
-            # skill has moved the arm anywhere of its own, and a t_pose that
+            # skill has moved the arm anywhere of its own, and a prep pose that
             # could not be reached is exactly the case where commanding another
             # motion on top is the wrong move.
-            return run.abort("move to 't_pose' before detection failed")
+            return run.abort("move to 'prep' before detection failed")
 
         def fail(message):
             """Abort, but lift the hand clear of the workspace first. Every
@@ -519,7 +527,7 @@ class GraspSkill:
             arm = self._closest_arm(centroid_p)
 
         # --- plan: build the ranked candidate list -----------------------------
-        if not run.phase('approach', 0.4):
+        if not run.phase('approach_grasp', 0.4):
             return run.result
         if goal.top_down:
             cands = self._top_down_candidates(obj, centroid_p)
@@ -568,7 +576,7 @@ class GraspSkill:
             input(f'at pre-grasp for {obj!r} — press Enter to execute the grasp ')
 
         # --- grasp: move to contact + force close ----------------------------
-        if not run.phase('grasp', 0.75):
+        if not run.phase('close_gripper', 0.75):
             return run.result
         if servo_pose_p is not None:
             # Already parked by the visual servo — close where we stand.
@@ -782,9 +790,14 @@ class GraspSkill:
         """Walk the candidates strictly tier-major (1..7), highest GraspGenX
         confidence first within a tier, servoing GRASP_FRAMES[arm] to each
         pre-grasp until one is reachable (the top candidate can be
-        IK-unreachable, hence the fallback). Returns (index, None) of the
-        committed candidate, or (None, abort-reason) on cancel/timeout or when
-        every candidate is unreachable."""
+        IK-unreachable, hence the fallback). The approach moves run on the
+        generous APPROACH_DURATION_SEC timeout so a long transit into the
+        workspace is never cut off mid-move. Dead candidates still fail fast:
+        these are PLANNED moves, and a rejected plan (z-floor, unreachable
+        goal) returns well before the timeout.
+        Returns (index, None) of the committed candidate, or
+        (None, abort-reason) on cancel/timeout or when every candidate is
+        unreachable."""
         order = sorted(range(len(cands.grasps)),
                        key=lambda i: (cands.tiers[i], -cands.scores[i]))
         width_mm = cands.gripper_width * 1000.0
@@ -798,7 +811,8 @@ class GraspSkill:
                     GRASP_FRAMES[arm],
                     targets.approaches_w[i] if targets.have_world else None,
                     targets.approaches_p[i], outer_gh=gh,
-                    duration_sec=SERVO_DURATION_SEC, max_iter=SERVO_MAX_ITER,
+                    duration_sec=APPROACH_DURATION_SEC,
+                    max_iter=SERVO_MAX_ITER,
                     lin_tol=SERVO_LIN_TOL, ang_tol=SERVO_ANG_TOL):
                 return i, None
             if gh.is_cancel_requested or run.remaining() <= 0.0:

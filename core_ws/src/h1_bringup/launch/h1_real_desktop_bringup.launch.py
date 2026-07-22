@@ -173,23 +173,25 @@ def generate_launch_description():
             )),
         ),
 
-        # Read-only sim-vs-real gap diagnostic for the RL controller above --
-        # watches /safety/lowcmd_lower_in, /lowstate, /lowcmd for control-loop
-        # timing gaps, safety-layer clamp deltas, and tracking error. Waits
-        # for the operator's /lowerbody/confirm_engage arming step itself
-        # (see sim2real_gap_monitor's docstring), so it's safe to bring up
-        # alongside the controller rather than after it's armed.
-        Node(
-            package='h12_lowerbody_rl',
-            executable='sim2real_gap_monitor',
-            name='sim2real_gap_monitor',
-            output='screen',
-            condition=IfCondition(AndSubstitution(
-                LaunchConfiguration('start_position_verified'),
-                PythonExpression(
-                    ["'", LaunchConfiguration('lowerbody'), "' != 'mjpc'"]),
-            )),
-        ),
+        # DISABLED. Read-only sim-vs-real gap diagnostic for the RL controller
+        # above -- watches /safety/lowcmd_lower_in, /lowstate, /lowcmd for
+        # control-loop timing gaps, safety-layer clamp deltas, and tracking
+        # error. Waits for the operator's /lowerbody/confirm_engage arming step
+        # itself (see sim2real_gap_monitor's docstring), so it is safe to bring
+        # up alongside the controller rather than after it is armed.
+        # Purely diagnostic -- nothing in the control path reads it, so leaving
+        # it out changes no robot behaviour. Uncomment to get the gap report back.
+        # Node(
+        #     package='h12_lowerbody_rl',
+        #     executable='sim2real_gap_monitor',
+        #     name='sim2real_gap_monitor',
+        #     output='screen',
+        #     condition=IfCondition(AndSubstitution(
+        #         LaunchConfiguration('start_position_verified'),
+        #         PythonExpression(
+        #             ["'", LaunchConfiguration('lowerbody'), "' != 'mjpc'"]),
+        #     )),
+        # ),
 
 
         # Node(

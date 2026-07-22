@@ -12,7 +12,11 @@ Flow (one _Run budget across every phase):
             picks the arm nearest the object and everything after the grasp
             follows outcome.arm.
   carry   — lift straight up in LIFT_STEP increments, then transit to a
-            standoff directly ABOVE the commanded release pose.
+            standoff directly ABOVE the release pose, walking a short list of
+            candidate place ORIENTATIONS (executed grasp orientation first,
+            then the tier-style heuristic fan — see below) until one standoff
+            is IK-reachable, the same fallback shape as the grasp skill's
+            tier-major candidate walk.
   place   — descend vertically until the held object's centroid sits
             rest_height above the place target's top face. The descent is
             grasp-agnostic — the OBJECT always arrives from above, whatever the
@@ -22,17 +26,24 @@ Flow (one _Run budget across every phase):
             an explicit above-the-object pick when the caller asks for one. A
             stall NEAR the release pose still releases (early touchdown); a
             distant stall aborts.
-  release — open the gripper, back the fingers out along the reverse grasp
-            approach so they can't catch the placed object, then rise clear.
+  release — open the gripper, back the fingers out along the reverse of the
+            committed place orientation's approach so they can't catch the
+            placed object, then rise clear.
 
 Placement math: the gripper->object offset o_g = R^T (c - p), measured at grasp
 time from the SAME pelvis snapshot as the executed grasp, is constant while the
-object is held. Keeping the executed grasp's world orientation R through
-carry/place keeps the object level (it lands in its pick-time orientation), so
-only position is commanded: frame target = desired_centroid - R @ o_g. The
-object's rest height (centroid above its own bottom, measured while it sat on
-the table) is exactly how high its centroid must sit above the place target's
-top face when it comes to rest there.
+object is held — it lives in the GRIPPER frame. Only position is therefore
+solved, per candidate orientation R': frame target = desired_centroid - R' @ o_g,
+which holds for ANY R', so the object does not have to land in its pick-time
+orientation. The executed grasp orientation is still tried FIRST (the object
+stays level and lands as picked, making the rest-height math exact); the
+heuristic fallback orientations (_heuristic_place_orientations — the grasp
+skill's forward/diagonal/center azimuth tiers at a level wrist, pitched into
+their preferred 20-45 deg band) reorient the held object, leaving rest_height
+approximate, which the slow, stall-tolerant descent absorbs. The object's rest
+height (centroid above its own bottom, measured while it sat on the table) is
+exactly how high its centroid must sit above the place target's top face when
+it comes to rest there in its pick-time orientation.
 
 Commanded frame: every post-grasp motion drives the arm's pinch-point
 {left,right}_grasp_frame through /frame_task (PLACE_FRAMES — the frame the
@@ -43,6 +54,7 @@ graspgenx->grasp-frame offset (_place_frame_offset) before being sent.
 """
 
 import copy
+import math
 from dataclasses import replace
 
 import numpy as np
@@ -81,6 +93,19 @@ LIFT_STEP = 0.05
 # full SERVO_DURATION_SEC the 12 cm one-shot lift used).
 LIFT_STEP_DURATION_SEC = 4.0
 PRE_PLACE_DIST = 0.10    # [m] pre-place standoff straight above the release pose
+# Synthetic place-orientation fan — the fallback candidates tried behind the
+# executed grasp orientation when its pre-place standoff is IK-unreachable.
+# Approach azimuths in "toward center" degrees, mirrored per hand exactly like
+# the grasp skill's _grasp_priority_tier classes (forward, diagonal, deeper
+# center fan), each pitched PLACE_HEURISTIC_PITCH_DEG below horizontal (inside
+# the grasp tiers' preferred TIER_PITCH_MIN..MAX band) with a level wrist.
+# Ordered like the tiers: forward first.
+PLACE_HEURISTIC_AZ_DEG = (0.0, 45.0, 70.0, 90.0)
+PLACE_HEURISTIC_PITCH_DEG = 30.0
+# Heuristic candidates closer (geodesic) than this to the executed grasp
+# orientation are dropped: they would fail IK the same way the grasp
+# orientation just did and waste a full planned servo attempt.
+PLACE_ORIENT_DUP_DEG = 10.0
 # [m] Height of the GRASPGENX FRAME ITSELF above the place target's top face for
 # a top_down place (goal.top_down mirrors the pick: released from above rather
 # than lowered onto the stack). Purely geometric — it deliberately ignores
@@ -96,7 +121,7 @@ TOP_DOWN_PLACE_HEIGHT = 0.25
 # servo's convergence tolerance (SERVO_LIN_TOL, 25 mm): a tolerance larger than
 # the clearance can eat it and press the object into the stack before release.
 PLACE_CLEARANCE = 0.03
-RETRACT_DIST = 0.15      # [m] post-release finger back-off along the reverse grasp approach
+RETRACT_DIST = 0.15      # [m] post-release finger back-off along the reverse place approach
 # Descent stalls within this distance of the release pose still release — early
 # touchdown on the stack (rest_height is a single-view estimate); stalls farther
 # away abort with the object still held rather than dropping it off-target.
@@ -146,7 +171,7 @@ class PickPlaceSkill:
             return run.abort(message)
 
         # --- detect: place-target top face, world-anchored ---------------------
-        if not run.phase('detect', 0.0):
+        if not run.phase('detect_place_target', 0.0):
             return run.result
         place_cloud, _, err = self.detect_object_cloud(place, run, gh)
         if err:
@@ -167,7 +192,7 @@ class PickPlaceSkill:
             f'world anchor {"ok" if top_w is not None else "UNAVAILABLE"}')
 
         # --- grasp: in-process /skill/grasp -------------------------------------
-        if not run.phase('grasp', 0.2):
+        if not run.phase('grasp_object', 0.2):
             return run.result
         outcome, err = self._grasp_via_skill(goal, obj, arm, run, gh)
         if err:
@@ -209,29 +234,42 @@ class PickPlaceSkill:
         o_g = R.T @ (outcome.centroid - p)   # gripper->object, constant while held
         rest_h = (outcome.rest_height if outcome.rest_height > 0.005
                   else FALLBACK_REST_HEIGHT)
-        T_place = np.eye(4)
-        T_place[:3, :3] = R
+        # Candidate place ORIENTATIONS, best-first. o_g is fixed in the GRIPPER
+        # frame while the object is held, so the position solve below
+        # (target = c_release - R' @ o_g) holds for ANY orientation R' — the
+        # object does not have to land in its pick-time orientation. The
+        # executed grasp orientation still goes first (object stays level,
+        # rest-height math exact); behind it comes the tier-style heuristic fan
+        # (PLACE_HEURISTIC_AZ_DEG), so an IK-unreachable pre-place falls back
+        # through reorientations instead of failing the skill. A reoriented
+        # candidate tilts/yaws the held object and turns rest_height into an
+        # approximation — the slow descent and the early-touchdown stall
+        # release below absorb that error.
+        cand_orients = [('grasp orientation', R)]
+        for lbl, R_p in _heuristic_place_orientations(arm):
+            R_c = self._rot_to_working_frame(R_p, world_ok)
+            if R_c is None or _rot_angle_deg(R, R_c) < PLACE_ORIENT_DUP_DEG:
+                continue
+            cand_orients.append((lbl, R_c))
+        c_release = top + [0.0, 0.0, rest_h + PLACE_CLEARANCE]
         if goal.top_down:
-            # Top-down place mirrors the top-down pick: park the GRASPGENX frame
-            # a fixed height straight above the place point and open there. No
-            # rest_height / gripper->object math — the object is released from
-            # above, not lowered onto the surface.
-            T_place[:3, 3] = top + [0.0, 0.0, TOP_DOWN_PLACE_HEIGHT]
             self.get_logger().info(
                 f'pick_place: top-down place — {GRASP_FRAMES[arm]} to '
                 f'{TOP_DOWN_PLACE_HEIGHT * 100:.0f}cm above {place!r}, then release')
-        else:
-            c_release = top + [0.0, 0.0, rest_h + PLACE_CLEARANCE]
-            T_place[:3, 3] = c_release - R @ o_g
-        place_pose = matrix_to_pose(T_place)
-        # Standoff straight ABOVE the release pose (same orientation): the place
-        # descent is vertical, so any grasp orientation delivers the object from
-        # above instead of driving it sideways into the stack.
-        pre_place = copy.deepcopy(place_pose)
-        pre_place.position.z += PRE_PLACE_DIST
-        self.publish_tf(_approach_target_tf(
-            WORLD_FRAME if world_ok else 'pelvis', place_pose,
-            self.get_clock().now().to_msg(), child=PLACE_TARGET_FRAME))
+
+        def _place_pose_for(R_c):
+            """Release Pose (working frame) putting the held object at its rest
+            spot with the gripper at orientation R_c. A top_down goal keeps its
+            purely geometric fixed-height release — park the GRASPGENX frame
+            TOP_DOWN_PLACE_HEIGHT above the place point and open there, no
+            rest_height / gripper->object math (the object is dropped from
+            above, not lowered onto the surface)."""
+            T_place = np.eye(4)
+            T_place[:3, :3] = R_c
+            T_place[:3, 3] = (top + [0.0, 0.0, TOP_DOWN_PLACE_HEIGHT]
+                              if goal.top_down else c_release - R_c @ o_g)
+            return matrix_to_pose(T_place)
+
         # From here on, motions COMMAND the pinch-point grasp frame, not the
         # graspgenx frame the targets above are computed for: fetch the fixed
         # URDF offset between the two once and re-express every target with it.
@@ -266,9 +304,34 @@ class PickPlaceSkill:
         self.get_logger().info(
             f'pick_place: lifted {LIFT_HEIGHT * 100:.0f}cm in {n_rungs} x '
             f'{LIFT_STEP * 100:.0f}cm increments')
-        if not self._servo_pose(place_frame, to_place(pre_place), world_ok, gh,
+        # Walk the candidate orientations at the pre-place standoff (straight
+        # ABOVE each candidate's release pose — the descent is vertical, so
+        # every candidate delivers the object from above) until one is
+        # reachable, mirroring the grasp skill's tier-major IK fallback walk.
+        place_pose = orient_lbl = None
+        for lbl, R_c in cand_orients:
+            cand_pose = _place_pose_for(R_c)
+            pre_place = copy.deepcopy(cand_pose)
+            pre_place.position.z += PRE_PLACE_DIST
+            self.publish_tf(_approach_target_tf(
+                WORLD_FRAME if world_ok else 'pelvis', cand_pose,
+                self.get_clock().now().to_msg(), child=PLACE_TARGET_FRAME))
+            if self._servo_pose(place_frame, to_place(pre_place), world_ok, gh,
                                 do_plan=True):
-            return fail('pre-place pose unreachable')
+                place_pose, orient_lbl = cand_pose, lbl
+                if lbl != cand_orients[0][0]:
+                    self.get_logger().info(
+                        f'pick_place: placing with the {lbl} instead of the '
+                        'executed grasp orientation')
+                break
+            if gh.is_cancel_requested or run.remaining() <= 0.0:
+                return fail('canceled or timed out during carry')
+            self.get_logger().warn(
+                f'pick_place: pre-place unreachable with the {lbl}; trying '
+                'the next candidate orientation')
+        if place_pose is None:
+            return fail('pre-place pose unreachable with every candidate '
+                        f'orientation ({len(cand_orients)} tried)')
 
         # --- place: descend vertically onto the stack ----------------------------
         if not run.phase('place', 0.75):
@@ -301,9 +364,10 @@ class PickPlaceSkill:
             return run.result
         if not self.open_gripper(arm):
             return fail('gripper open failed')
-        # Two-step retreat: back the open fingers out along the reverse grasp
-        # approach so they can't catch the just-placed object, THEN rise clear of
-        # the stack. Best-effort — the object is already placed.
+        # Two-step retreat: back the open fingers out along the reverse of the
+        # COMMITTED place orientation's approach axis so they can't catch the
+        # just-placed object, THEN rise clear of the stack. Best-effort — the
+        # object is already placed.
         # Both retreat legs run slow: the open fingers are still inside the
         # just-placed object's footprint, so a fast withdrawal is what knocks it
         # off the stack.
@@ -320,7 +384,7 @@ class PickPlaceSkill:
             f'placed {obj!r} on {place!r} ('
             + (f'top-down release {TOP_DOWN_PLACE_HEIGHT * 100:.0f}cm up'
                if goal.top_down else f'rest height {rest_h * 100:.1f}cm')
-            + f', grasp score {outcome.score:.2f})')
+            + f', {orient_lbl}, grasp score {outcome.score:.2f})')
 
     def _grasp_via_skill(self, goal, obj, arm, run, gh):
         """Send an in-process /skill/grasp goal for `obj` and return
@@ -330,7 +394,8 @@ class PickPlaceSkill:
         pick_place grasp behaves exactly like the same direct /skill/grasp call.
         `arm` is None for auto: the inner goal
         carries "" and the grasp skill picks, reporting back in outcome.arm.
-        Inner feedback is proxied into this skill's 'grasp' phase; a cancel of
+        Inner feedback is proxied into this skill's 'grasp_object' phase; a
+        cancel of
         the outer goal cancels the in-flight inner goal (via _send_action's
         outer_gh plumbing)."""
         inner_timeout = max(10.0, run.remaining() - PLACE_RESERVE_SEC)
@@ -356,7 +421,7 @@ class PickPlaceSkill:
                 sec=whole, nanosec=int(round((inner_timeout - whole) * 1e9)))
 
         def _proxy(feedback_msg):
-            run.feedback.phase = 'grasp'
+            run.feedback.phase = 'grasp_object'
             run.feedback.progress = (
                 0.2 + 0.35 * float(feedback_msg.feedback.progress))
             gh.publish_feedback(run.feedback)
@@ -400,6 +465,24 @@ class PickPlaceSkill:
             lin_tol=SERVO_LIN_TOL, ang_tol=SERVO_ANG_TOL, do_plan=do_plan,
             slow_mode=slow_mode)
 
+    def _rot_to_working_frame(self, R_p, world_ok):
+        """Rotation R_p (3x3, LIVE pelvis axes) re-expressed in the working
+        frame the placement math runs in: world when `world_ok`, else the
+        pelvis frame unchanged. The heuristic place orientations are defined
+        against the pelvis (forward / toward-center azimuths), so in world
+        mode they must be rotated once through the current pelvis->world
+        attitude — the robot stands still through carry/place, so a single
+        conversion at candidate-build time holds. None when the TF is
+        unavailable (that candidate is skipped)."""
+        if not world_ok:
+            return R_p
+        T = np.eye(4)
+        T[:3, :3] = R_p
+        pose_w = self._transform_pose(matrix_to_pose(T), 'pelvis', WORLD_FRAME)
+        if pose_w is None:
+            return None
+        return pose_to_matrix(pose_w)[:3, :3]
+
     def _place_frame_offset(self, arm):
         """Fixed rigid transform (4x4) of the arm's pinch-point grasp frame
         (PLACE_FRAMES) expressed in its graspgenx frame — both are fixed URDF
@@ -429,6 +512,43 @@ class PickPlaceSkill:
         return float(np.linalg.norm([t.x - pose.position.x,
                                      t.y - pose.position.y,
                                      t.z - pose.position.z]))
+
+
+def _heuristic_place_orientations(arm):
+    """[(label, R)] of the synthetic fallback place orientations for `arm`, in
+    LIVE pelvis axes (z-up, +X forward, +Y left), best-first: the grasp skill's
+    tier-style azimuth fan (PLACE_HEURISTIC_AZ_DEG, "toward center" degrees
+    mirrored per hand exactly like _grasp_priority_tier), each pitched
+    PLACE_HEURISTIC_PITCH_DEG below horizontal with a level wrist (+Y as close
+    to up as the pitch allows — the same wrist _top_down_pose builds). These
+    are GRASPGENX-convention orientations (+Z approach, +X finger closing),
+    interchangeable with the executed grasp orientation they stand in for."""
+    pitch = math.radians(PLACE_HEURISTIC_PITCH_DEG)
+    out = []
+    for az_center in PLACE_HEURISTIC_AZ_DEG:
+        azim = math.radians(az_center if arm == 'right' else -az_center)
+        # +Z (approach): pitched down, swung `azim` from pelvis +X toward the
+        # body's center line.
+        z_axis = np.array([math.cos(pitch) * math.cos(azim),
+                           math.cos(pitch) * math.sin(azim),
+                           -math.sin(pitch)])
+        # +X (fingers): horizontal and perpendicular to the approach, signed so
+        # +Y = Z x X comes out with a positive up-component (level wrist). At
+        # zero azimuth this is exactly _top_down_pose's pelvis +Y choice.
+        x_axis = np.cross([0.0, 0.0, 1.0], z_axis)
+        x_axis /= np.linalg.norm(x_axis)
+        y_axis = np.cross(z_axis, x_axis)
+        out.append((f'heuristic orientation (az {az_center:.0f}deg)',
+                    np.column_stack((x_axis, y_axis, z_axis))))
+    return out
+
+
+def _rot_angle_deg(Ra, Rb):
+    """Geodesic angle [deg] between rotations Ra and Rb (3x3):
+    arccos((trace(Ra^T Rb) - 1) / 2). Used to drop heuristic place candidates
+    that near-duplicate the executed grasp orientation."""
+    cos = (float(np.trace(Ra.T @ Rb)) - 1.0) / 2.0
+    return math.degrees(math.acos(float(np.clip(cos, -1.0, 1.0))))
 
 
 def _top_face_point(cloud):
