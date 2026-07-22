@@ -65,6 +65,12 @@ class NameResolver:
         for i, ros_name in enumerate(ROS_MOTOR_ORDER):
             sim_joint = robot_prefix + LEG_JOINT_RENAME.get(ros_name, ros_name)
             jid = _id(model, mujoco.mjtObj.mjOBJ_JOINT, sim_joint)
+            if jid < 0 and ros_name in LEG_JOINT_RENAME:
+                # Raw (non-robosuite) combined models — e.g. the battery scene's
+                # h1_2_magpie.xml — keep the plain ROS leg names; only the
+                # robosuite H1_2 class inserts the 'leg' substring.
+                sim_joint = robot_prefix + ros_name
+                jid = _id(model, mujoco.mjtObj.mjOBJ_JOINT, sim_joint)
             if jid < 0:
                 raise KeyError(f"joint not found in model: {sim_joint}")
             self.motor_qpos[i] = model.jnt_qposadr[jid]

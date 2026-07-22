@@ -238,15 +238,27 @@ def sim_loop(task, viewer=True, layout=None, style=None, seed=None, record_video
     drives it; RoboCasa's _check_success/reward/lang are read off the shared env.
     """
 
-    create_kwargs = {}
-    if layout is not None:
-        create_kwargs["layout_ids"] = layout
-    if style is not None:
-        create_kwargs["style_ids"] = style
-    if seed is not None:
-        create_kwargs["seed"] = seed
+    # BatteryWorkcell: not a RoboCasa kitchen env — a self-contained MuJoCo
+    # scene (raw h1_2_magpie robot + ARPA battery cell) loaded directly and
+    # duck-typed to the same env surface (see battery_env.py). Raw model =
+    # NO robosuite name prefixes; `pfx` below comes out '' and every
+    # f"{pfx}..." lookup resolves the raw names. layout/style/seed are
+    # kitchen-only and ignored here (the scene is fully authored).
+    _battery = (task == 'BatteryWorkcell')
+    if _battery:
+        import battery_env
+        env = battery_env.BatteryWorkcellEnv(
+            os.environ.get('HAMS_BATTERY_XML', '').strip() or None)
+    else:
+        create_kwargs = {}
+        if layout is not None:
+            create_kwargs["layout_ids"] = layout
+        if style is not None:
+            create_kwargs["style_ids"] = style
+        if seed is not None:
+            create_kwargs["seed"] = seed
 
-    env = h1_2_robosuite.make_kitchen_env(task, **create_kwargs)
+        env = h1_2_robosuite.make_kitchen_env(task, **create_kwargs)
 
     # robosuite.make() constructs but does NOT reset; reset() builds env.sim, runs
     # _load_model + _reset_internal (placement patch fires here, sets ep_meta /
@@ -255,7 +267,10 @@ def sim_loop(task, viewer=True, layout=None, style=None, seed=None, record_video
 
     model = env.sim.model._model
     data = env.sim.data._data
-    resolver = NameResolver(model)  # ROS<->sim name map for the DDS / sensor bridges
+    # ROS<->sim name map for the DDS / sensor bridges. The battery scene's raw
+    # model carries no robosuite prefixes, which NameResolver supports by design.
+    resolver = (NameResolver(model, robot_prefix="") if _battery
+                else NameResolver(model))
 
     # Clean, contact-free initial state. RoboCasa's zero-action settling loop
     # perturbs the pose during reset, so restore a baked-in bent-knee stance,
@@ -482,12 +497,17 @@ def sim_loop(task, viewer=True, layout=None, style=None, seed=None, record_video
     # dropping the two hand cams roughly halves the per-step render bill.
     _cam_mode = os.environ.get('HAMS_CAMERAS', '1').strip().lower()
     _cameras_on = _cam_mode not in ('0', 'off', 'false', 'no')
+    # Hand-camera MuJoCo names: robosuite prefixes the (identical) gripper MJCFs
+    # as gripper0_<side>_hand_cam; the raw battery-scene model keeps the gripper
+    # files' own names — right hand 'hand_cam', left hand 'leftg_hand_cam'.
+    _lh_cam, _rh_cam = (("leftg_hand_cam", "hand_cam") if _battery else
+                        ("gripper0_left_hand_cam", "gripper0_right_hand_cam"))
     _cameras = ([
         (f"{pfx}head_cam",          "head",       "camera_color_optical_frame"),
     ] if _cam_mode == 'head' else [
         (f"{pfx}head_cam",          "head",       "camera_color_optical_frame"),
-        ("gripper0_left_hand_cam",  "left_hand",  "left_hand_camera_color_optical_frame"),
-        ("gripper0_right_hand_cam", "right_hand", "right_hand_camera_color_optical_frame"),
+        (_lh_cam,  "left_hand",  "left_hand_camera_color_optical_frame"),
+        (_rh_cam, "right_hand", "right_hand_camera_color_optical_frame"),
     ]) if _cameras_on else []
     print(f"[h12_mujoco] RGBD cameras {'ON' if _cameras_on else 'OFF (HAMS_CAMERAS=0)'}")
     ros_bridge = RosSensorBridge(
@@ -530,11 +550,34 @@ def sim_loop(task, viewer=True, layout=None, style=None, seed=None, record_video
         sim_lock=sim_lock,
     )
 
-    # Gripper bridges (gripper0_<side>_ prefixed actuators/sensors).
-    hand_right = MagpieHandBridge(model, data, side="right", sim_lock=sim_lock,
-                                  name_prefix="gripper0_right_")
-    hand_left = MagpieHandBridge(model, data, side="left", sim_lock=sim_lock,
-                                 name_prefix="gripper0_left_")
+    # Gripper bridges. Kitchen envs: robosuite-prefixed gripper0_<side>_ names.
+    # Battery scene (raw combined XML): the right hand keeps the gripper file's
+    # unprefixed actuator names but the left hand's were renamed with an _L
+    # suffix (joints leftg_*) to coexist in one flat model, and BOTH sides'
+    # sensors were renamed <side>_hand_* — so each side gets an explicit name
+    # map instead of a prefix.
+    if _battery:
+        _rh_names = {
+            "act_left": "left_finger_actuator", "act_right": "right_finger_actuator",
+            "pos_left": "right_hand_left_finger_pos", "pos_right": "right_hand_right_finger_pos",
+            "vel_left": "right_hand_left_finger_vel", "vel_right": "right_hand_right_finger_vel",
+            "trq_left": "right_hand_left_finger_torque", "trq_right": "right_hand_right_finger_torque",
+        }
+        _lh_names = {
+            "act_left": "left_finger_actuator_L", "act_right": "right_finger_actuator_L",
+            "pos_left": "left_hand_left_finger_pos", "pos_right": "left_hand_right_finger_pos",
+            "vel_left": "left_hand_left_finger_vel", "vel_right": "left_hand_right_finger_vel",
+            "trq_left": "left_hand_left_finger_torque", "trq_right": "left_hand_right_finger_torque",
+        }
+        hand_right = MagpieHandBridge(model, data, side="right", sim_lock=sim_lock,
+                                      names=_rh_names)
+        hand_left = MagpieHandBridge(model, data, side="left", sim_lock=sim_lock,
+                                     names=_lh_names)
+    else:
+        hand_right = MagpieHandBridge(model, data, side="right", sim_lock=sim_lock,
+                                      name_prefix="gripper0_right_")
+        hand_left = MagpieHandBridge(model, data, side="left", sim_lock=sim_lock,
+                                     name_prefix="gripper0_left_")
 
     measurement = MeasurementBridge(env, elastic_band=band, task_name=task)
     print(f"[h12_mujoco] task goal: {measurement.publish_goal()!r}")
@@ -886,6 +929,10 @@ if __name__ == "__main__":
     if task is None:
         task = _random_task(seed=args.seed)
         print(f"[h12_mujoco] no --task given; randomly selected {task!r}")
+    elif task == 'BatteryWorkcell':
+        # Not a RoboCasa registry env — resolved by sim_loop via battery_env.
+        print("[h12_mujoco] BatteryWorkcell: loading the self-contained "
+              "battery scene (no RoboCasa)")
     else:
         task = _resolve_task(task, seed=args.seed)
 

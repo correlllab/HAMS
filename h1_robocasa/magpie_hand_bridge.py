@@ -96,7 +96,7 @@ class MagpieHandBridge(Node):
     }
 
     def __init__(self, model, data, side: str, sim_lock: threading.Lock,
-                 publish_rate_hz: float = 10.0, name_prefix=""):
+                 publish_rate_hz: float = 10.0, name_prefix="", names=None):
         if side not in ("right", "left"):
             raise ValueError(f"side must be 'left' or 'right', got {side!r}")
         super().__init__(f"magpie_hand_{side}")
@@ -105,7 +105,11 @@ class MagpieHandBridge(Node):
         self.data = data
         self.sim_lock = sim_lock
         self.side = side
-        names = {k: name_prefix + v for k, v in self._NAMES.items()}
+        # `names` overrides the prefix scheme wholesale — used by the battery
+        # scene's raw combined model, whose actuator/sensor names don't follow
+        # a per-side prefix (see h12_mujoco's battery gripper block).
+        names = dict(names) if names else {k: name_prefix + v
+                                           for k, v in self._NAMES.items()}
 
         self.act_left  = self._actuator_id(names["act_left"])
         self.act_right = self._actuator_id(names["act_right"])
