@@ -11,8 +11,8 @@
 #   3. standing_rand:  skill graspgenx topdown_irl   (ALMI, randomized spawn,
 #                      fresh env per trial, ~17 h) — LAST on purpose: the
 #                      sampling sigmas (UNFROZEN_RAND_SIG_LONG/LAT, default
-#                      6.83/11.43 cm) can still be corrected from the paper
-#                      before this tier starts.
+#                      11.43/6.83 cm long/lat per the plotted Fig. 3 scatter)
+#                      can still be corrected once the raw endpoints arrive.
 # Everything is resumable: re-running skips existing trial_NN.json per cell.
 #
 # Output tree (host: Downloads/HAMS-test-grasping/core_ws/benchmark_results/):

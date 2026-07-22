@@ -65,16 +65,23 @@ POLICY="${UNFROZEN_POLICY-almi}"
 # gets its own FRESH env spawned at a position sampled around the tuned spawn —
 # /hams/reset_scene restores a fixed snapshot, so warm resets cannot move the
 # base; a rebuild per trial is the only spawn-randomizing mechanism the sim
-# offers without code changes (which the live checkout forbids). Sampling:
-# Gaussian, clipped at +/-2 sigma, POSITION ONLY (the sim has no spawn-yaw
-# knob). Defaults are the walking-endpoint scatter sigmas from the reference
-# figure (longitudinal 6.83 cm, lateral 11.43 cm) — pending confirmation from
-# the paper, override with UNFROZEN_RAND_SIG_LONG / UNFROZEN_RAND_SIG_LAT.
+# offers without code changes (which the live checkout forbids). Sampling
+# (spec reviewed against the paper 2026-07-22): the paper (Sec IV-A / Fig 3)
+# states NO initialization spec — its "noisy initialization" is the
+# localization prior, not a spawn perturbation. These sigmas are the MEASURED
+# endpoint scatter of its 6 m walk-to-goal on this platform (n=19), used here
+# as a post-navigation stance-uncertainty prior. Axis assignment follows the
+# PLOTTED data, not the figure annotation (which is very likely swapped: the
+# plotted longitudinal spread ~50 cm ~ sigma 11.4, lateral ~21 cm ~ sigma 6.8):
+# sigma_long 11.43 cm, sigma_lat 6.83 cm. Clip +/-3 sigma (2-sigma truncation
+# would shrink realized sigma ~12%). POSITION ONLY — no spawn-yaw knob exists;
+# flag as a limitation in the paper. Gaussian, independent axes; if Adam gets
+# the raw 19 endpoints from the authors, switch to the full sample covariance.
 # Deterministic per (method, trial) so the sweep is replicable; each trial's
 # sampled spawn is logged next to its JSON as trial_NN_spawn.json.
 RAND="${UNFROZEN_RAND:-0}"
-RAND_SIG_LONG="${UNFROZEN_RAND_SIG_LONG:-0.0683}"   # sigma along the approach [m]
-RAND_SIG_LAT="${UNFROZEN_RAND_SIG_LAT:-0.1143}"     # sigma lateral [m]
+RAND_SIG_LONG="${UNFROZEN_RAND_SIG_LONG:-0.1143}"   # sigma along the approach [m]
+RAND_SIG_LAT="${UNFROZEN_RAND_SIG_LAT:-0.0683}"     # sigma lateral [m]
 if [ "$RAND" = "1" ] && [ -z "$POLICY" ]; then
   echo "[2method] UNFROZEN_RAND=1 requires the standing tier (UNFROZEN_POLICY=almi)"; exit 1
 fi
@@ -407,17 +414,17 @@ for M in $METHODS; do
       # SAME spawn by construction.
       read -r SPAWN_FWD_VAL SPAWN_LAT_VAL <<< "$(python3 -c "
 import random
-r = random.Random('$M/$T/rand-v1')
+r = random.Random('$M/$T/rand-v2')
 s1, s2 = $RAND_SIG_LONG, $RAND_SIG_LAT
-f = max(-2*s1, min(2*s1, r.gauss(0.0, s1)))
-l = max(-2*s2, min(2*s2, r.gauss(0.0, s2)))
+f = max(-3*s1, min(3*s1, r.gauss(0.0, s1)))
+l = max(-3*s2, min(3*s2, r.gauss(0.0, s2)))
 print(round($BASE_FWD+f, 4), round($BASE_LAT+l, 4))")"
       echo "[2method] $M/$T randomized spawn: fwd=$SPAWN_FWD_VAL lat=$SPAWN_LAT_VAL (base $BASE_FWD/$BASE_LAT)"
       FIRST=0
       fresh_env
       mkdir -p "$HOST_OUT/$M"
-      printf '{"spawn_forward_m": %s, "spawn_lateral_m": %s, "base_forward_m": %s, "base_lateral_m": %s, "sigma_long_m": %s, "sigma_lat_m": %s, "clip": "2sigma", "seed": "%s"}\n' \
-        "$SPAWN_FWD_VAL" "$SPAWN_LAT_VAL" "$BASE_FWD" "$BASE_LAT" "$RAND_SIG_LONG" "$RAND_SIG_LAT" "$M/$T/rand-v1" \
+      printf '{"spawn_forward_m": %s, "spawn_lateral_m": %s, "base_forward_m": %s, "base_lateral_m": %s, "sigma_long_m": %s, "sigma_lat_m": %s, "clip": "3sigma", "seed": "%s"}\n' \
+        "$SPAWN_FWD_VAL" "$SPAWN_LAT_VAL" "$BASE_FWD" "$BASE_LAT" "$RAND_SIG_LONG" "$RAND_SIG_LAT" "$M/$T/rand-v2" \
         > "$HOST_OUT/$M/trial_${T}_spawn.json"
     elif [ -n "$POLICY" ]; then
       if [ $FIRST -eq 1 ]; then

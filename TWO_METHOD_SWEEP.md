@@ -42,7 +42,40 @@ Final figure = the 3 methods above x 3 conditions, N=30 per cell:
 |---|---|---|
 | hanging | band mode (`UNFROZEN_POLICY=""`) | `paper_grid_host.sh` (all 3 methods) |
 | standing | ALMI tier | skill+graspgenx REUSED from campaign `sweep_almi/` (identical protocol, N=30); only `topdown_irl` collected new |
-| standing, randomized start | ALMI tier + fresh env per trial at a spawn sampled around the tuned stance (fwd 0.18 / lat 0.10): Gaussian, sigma_long 6.83 cm / sigma_lat 11.43 cm (the reference figure's endpoint-scatter sigmas), clipped +/-2 sigma, position only (sim has no spawn-yaw knob), deterministic per-trial seeds, each trial's spawn logged as `trial_NN_spawn.json` | `paper_grid_host.sh` (all 3 methods, runs LAST — sigmas still pending confirmation from the paper; override with `UNFROZEN_RAND_SIG_LONG/LAT`) |
+| standing, randomized start | ALMI tier + fresh env per trial at a spawn sampled around the tuned stance (fwd 0.18 / lat 0.10): independent Gaussians, sigma_long 11.43 cm / sigma_lat 6.83 cm, clipped +/-3 sigma, position only, deterministic per-trial seeds (`rand-v2`), each trial's spawn logged as `trial_NN_spawn.json` | `paper_grid_host.sh` (all 3 methods, runs LAST — axis assignment still pending the raw endpoints; override with `UNFROZEN_RAND_SIG_LONG/LAT`) |
+
+### Randomized-start: framing + limitations (paper text material)
+
+Spec review against the reference paper (2026-07-22): the paper has **no
+initialization-noise spec** — "noisy initialization" in the Fig. 3 caption is
+the localization prior, not a spawn perturbation. What we sample from is the
+paper's **measured endpoint scatter of a 6 m walk-to-goal** on this platform
+(Sec. IV-A, n=19), used as a proxy for post-navigation stance uncertainty.
+Decisions + caveats to carry into the paper:
+
+- **Axis swap**: the figure annotation (sigma_x=6.83 longitudinal,
+  sigma_y=11.43 lateral) contradicts the plotted spreads (~50 cm longitudinal,
+  ~21 cm lateral). We follow the PLOTTED data: sigma_long 11.43, sigma_lat
+  6.83. **TODO (Adam): get the raw 19 endpoints from the authors** (Correll is
+  an author) — that settles the swap, enables a full sample-covariance
+  sampler (drift correlates the axes; independent axes throw that away), and
+  reveals whether endpoints were ground truth or self-estimate.
+- **Clip +/-3 sigma**, not 2: 2-sigma truncation shrinks realized sigma ~12%.
+- **Position only, no yaw** — hard tooling constraint (the sim has no
+  spawn-yaw knob and is frozen for the study). Flag explicitly: heading error
+  plausibly *generates* much of the walking scatter, and base yaw moves the
+  handle in the arm's workspace more than translation does.
+- Magnitude caveats: it is a 6 m approach (drift scales with distance);
+  n=19 puts ~17% relative standard error on each sigma.
+- This condition models the ~95% nominal-navigation case only; the paper's
+  1/20 gross failure ("veered several meters off") is NOT represented.
+- **Reporting**: success rate over ALL 30 trials is the primary number;
+  divergent trials are *graded* failed by the 0.6 m / 60 deg watchdog (never
+  dropped), but scatter statistics use non-divergent trials only — mirroring
+  the paper's own 19/20 convention. The informative figure is the sampled
+  start offsets colored by grasp outcome (the start distribution itself is
+  known by construction); for dose-response, fit a logistic on offset
+  magnitude rather than binning.
 
 `paper_grid_host.sh` sequences the 7 collected cells (hanging x3 -> standing
 topdown_irl -> randomized x3, ~23 h total; the randomized tier alone is ~17 h
