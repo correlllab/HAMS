@@ -5,10 +5,12 @@ Flow (one _Run budget across every phase):
   detect  — gemini box -> sam mask -> place-target cloud; its top-face point is
             anchored in WORLD_FRAME so pelvis drift during the (long) grasp
             does not move the goal.
-  grasp   — in-process /skill/grasp goal; the executed grasp pose and
-            held-object geometry come back through _last_grasp_outcome (see
-            skills/grasp.py — the action messages are unchanged), and the
-            reached gripper aperture confirms an object is actually held.
+  grasp   — in-process /skill/grasp goal; the executed grasp pose, the arm that
+            ran it and held-object geometry come back through
+            _last_grasp_outcome (see skills/grasp.py — the grasp RESULT message
+            is unchanged). goal.arm may be "" / "none": the grasp skill then
+            picks the arm nearest the object and everything after the grasp
+            follows outcome.arm.
   carry   — lift straight up in LIFT_STEP increments, then transit to a
             standoff directly ABOVE the commanded release pose.
   place   — descend vertically until the held object's centroid sits
@@ -16,8 +18,10 @@ Flow (one _Run budget across every phase):
             grasp-agnostic — the OBJECT always arrives from above, whatever the
             grasp orientation — so no downward-pitch bias is imposed on the
             grasp anymore (the old approach-axis drive-in needed pitched-down
-            grasps and starved the candidate pool). A stall NEAR the release
-            pose still releases (early touchdown); a distant stall aborts.
+            grasps and starved the candidate pool); goal.top_down still forwards
+            an explicit above-the-object pick when the caller asks for one. A
+            stall NEAR the release pose still releases (early touchdown); a
+            distant stall aborts.
   release — open the gripper, back the fingers out along the reverse grasp
             approach so they can't catch the placed object, then rise clear.
 
@@ -66,7 +70,7 @@ from .grasp import (get_approach_pose, _approach_target_tf, _pose_at,
 # re-expressed through the fixed URDF offset (_place_frame_offset).
 PLACE_FRAMES = {'left': 'left_grasp_frame', 'right': 'right_grasp_frame'}
 
-LIFT_HEIGHT = 0.30       # [m] total straight-up lift after the grasp closes
+LIFT_HEIGHT = 0.10       # [m] total straight-up lift after the grasp closes
 # [m] per-waypoint increment of that lift: the rise is commanded as a ladder of
 # LIFT_STEP moves instead of one LIFT_HEIGHT move, so the arm clears the pick
 # site in short committed hops that stay interruptible. Each waypoint is an
@@ -77,6 +81,17 @@ LIFT_STEP = 0.05
 # full SERVO_DURATION_SEC the 12 cm one-shot lift used).
 LIFT_STEP_DURATION_SEC = 4.0
 PRE_PLACE_DIST = 0.10    # [m] pre-place standoff straight above the release pose
+# [m] Height of the GRASPGENX FRAME ITSELF above the place target's top face for
+# a top_down place (goal.top_down mirrors the pick: released from above rather
+# than lowered onto the stack). Purely geometric — it deliberately ignores
+# rest_height and the gripper->object offset the normal place solves for, so the
+# object is DROPPED the remaining distance rather than set down.
+#
+# NB this is the frame height, not the object's: the fingers sit
+# GRIPPER_BASE_TO_CONTACT_M (0.1146 m) down the approach from the graspgenx
+# origin, which at the 80 deg top-down approach is ~0.113 m of that height. So
+# at 0.25 the held object is released ~0.137 m above the target.
+TOP_DOWN_PLACE_HEIGHT = 0.25
 # [m] release the object this far above its rest pose. Keep it >= the place
 # servo's convergence tolerance (SERVO_LIN_TOL, 25 mm): a tolerance larger than
 # the clearance can eat it and press the object into the stack before release.
@@ -86,9 +101,6 @@ RETRACT_DIST = 0.15      # [m] post-release finger back-off along the reverse gr
 # touchdown on the stack (rest_height is a single-view estimate); stalls farther
 # away abort with the object still held rather than dropping it off-target.
 PLACE_STALL_MAX_M = 0.05
-# Reached gripper aperture at or below this after the grasp's close means the
-# fingers met each other — nothing is held, so there is nothing to place.
-MIN_HELD_APERTURE_MM = 5.0
 # z-band below the place cloud's top percentile counted as its top face when
 # averaging the drop point (excludes side-face points that would skew it).
 TOP_FACE_BAND = 0.015
@@ -107,22 +119,38 @@ PLACE_TARGET_FRAME = 'pick_place_target_frame'
 class PickPlaceSkill:
     def _exec_pick_place(self, gh):
         """detect (place target) -> grasp (in-process /skill/grasp) -> carry ->
-        place -> release."""
+        place -> release.
+
+        Optional goal fields (see SkillPickPlace.action; zero/empty = off):
+          arm — "" or "none" leaves the pick arm to the grasp skill, which takes
+            the one nearest the object; the resolved arm comes back on the
+            outcome and drives carry/place/release.
+          top_down — forwarded to /skill/grasp: pick the object from above
+            instead of from the graspgen candidate pool."""
         goal = gh.request
         run = _Run(self, gh, SkillPickPlace, 'pick_place')
         arm = self._validated_arm(goal)
-        if arm is None:
+        if arm is None and goal.arm.strip().lower() not in ('', 'none'):
             return run.abort(f'invalid arm {goal.arm!r}')
         obj, place = goal.target_object, goal.place_target
         if not place.strip():
             return run.abort('empty place_target')
+
+        def fail(message):
+            """Abort, lifting the hand clear first. Anything past the goal
+            validation above can fail with the arm mid-carry or holding the
+            object over the stack, so every one of those paths retreats before
+            reporting. `arm` is read at call time, which matters: it is None
+            until the inner grasp reports which hand it actually used."""
+            self._retreat_after_failure(arm, gh)
+            return run.abort(message)
 
         # --- detect: place-target top face, world-anchored ---------------------
         if not run.phase('detect', 0.0):
             return run.result
         place_cloud, _, err = self.detect_object_cloud(place, run, gh)
         if err:
-            return run.abort(f'place target: {err}')
+            return fail(f'place target: {err}')
         top_p = _top_face_point(place_cloud)          # (x, y, z_top) in pelvis
         # Anchor the place point in the world frame NOW, while the pelvis is
         # still at its detect-time pose — the grasp motions will drift it.
@@ -141,16 +169,14 @@ class PickPlaceSkill:
         # --- grasp: in-process /skill/grasp -------------------------------------
         if not run.phase('grasp', 0.2):
             return run.result
-        outcome, err = self._grasp_via_skill(obj, arm, run, gh)
+        outcome, err = self._grasp_via_skill(goal, obj, arm, run, gh)
         if err:
-            return run.abort(err)
-        # Verify the close actually stopped on something: the magpie driver
-        # reports the aperture it reached; ~0 mm means the fingers met each
-        # other and the "grasped" object isn't in the hand.
-        aperture = self.gripper_aperture(arm)
-        if aperture is not None and aperture <= MIN_HELD_APERTURE_MM:
-            return run.abort(
-                f'grasp of {obj!r} closed on nothing (gripper at {aperture:.1f}mm)')
+            return fail(err)
+        # The grasp skill resolves an auto ("" / "none") arm against the object's
+        # own centroid, which pick_place hasn't detected — so take the arm it
+        # actually used. Every arm-indexed step below (place frame, release)
+        # must address that same hand.
+        arm = outcome.arm
 
         # --- placement geometry -------------------------------------------------
         # Work in one consistent frame: world only when BOTH the place point and
@@ -166,7 +192,7 @@ class PickPlaceSkill:
             cent_p = self._transform_pose(
                 _pose_at(outcome.centroid), WORLD_FRAME, 'pelvis')
             if pose_p is None or cent_p is None:
-                return run.abort(
+                return fail(
                     'grasp outcome is world-anchored but the world TF is '
                     'unavailable to bring it back to the pelvis frame')
             outcome = replace(outcome, pose=pose_p, frame='pelvis',
@@ -183,10 +209,20 @@ class PickPlaceSkill:
         o_g = R.T @ (outcome.centroid - p)   # gripper->object, constant while held
         rest_h = (outcome.rest_height if outcome.rest_height > 0.005
                   else FALLBACK_REST_HEIGHT)
-        c_release = top + [0.0, 0.0, rest_h + PLACE_CLEARANCE]
         T_place = np.eye(4)
         T_place[:3, :3] = R
-        T_place[:3, 3] = c_release - R @ o_g
+        if goal.top_down:
+            # Top-down place mirrors the top-down pick: park the GRASPGENX frame
+            # a fixed height straight above the place point and open there. No
+            # rest_height / gripper->object math — the object is released from
+            # above, not lowered onto the surface.
+            T_place[:3, 3] = top + [0.0, 0.0, TOP_DOWN_PLACE_HEIGHT]
+            self.get_logger().info(
+                f'pick_place: top-down place — {GRASP_FRAMES[arm]} to '
+                f'{TOP_DOWN_PLACE_HEIGHT * 100:.0f}cm above {place!r}, then release')
+        else:
+            c_release = top + [0.0, 0.0, rest_h + PLACE_CLEARANCE]
+            T_place[:3, 3] = c_release - R @ o_g
         place_pose = matrix_to_pose(T_place)
         # Standoff straight ABOVE the release pose (same orientation): the place
         # descent is vertical, so any grasp orientation delivers the object from
@@ -202,7 +238,7 @@ class PickPlaceSkill:
         place_frame = PLACE_FRAMES[arm]
         T_off = self._place_frame_offset(arm)
         if T_off is None:
-            return run.abort(
+            return fail(
                 f'TF {GRASP_FRAMES[arm]} -> {place_frame} unavailable')
 
         def to_place(pose_gx):
@@ -222,17 +258,17 @@ class PickPlaceSkill:
             if not self._servo_pose(place_frame, to_place(lift), world_ok, gh,
                                     do_plan=False,
                                     duration_sec=LIFT_STEP_DURATION_SEC):
-                return run.abort(
+                return fail(
                     f'lift after grasp failed at {dz * 100:.0f}cm of '
                     f'{LIFT_HEIGHT * 100:.0f}cm')
             if gh.is_cancel_requested or run.remaining() <= 0.0:
-                return run.abort('canceled or timed out during carry')
+                return fail('canceled or timed out during carry')
         self.get_logger().info(
             f'pick_place: lifted {LIFT_HEIGHT * 100:.0f}cm in {n_rungs} x '
             f'{LIFT_STEP * 100:.0f}cm increments')
         if not self._servo_pose(place_frame, to_place(pre_place), world_ok, gh,
                                 do_plan=True):
-            return run.abort('pre-place pose unreachable')
+            return fail('pre-place pose unreachable')
 
         # --- place: descend vertically onto the stack ----------------------------
         if not run.phase('place', 0.75):
@@ -245,7 +281,7 @@ class PickPlaceSkill:
         if not self._servo_pose(place_frame, place_cmd, world_ok, gh,
                                 do_plan=False, slow_mode=True):
             if gh.is_cancel_requested or run.remaining() <= 0.0:
-                return run.abort('canceled or timed out during place')
+                return fail('canceled or timed out during place')
             # A stall NEAR the release pose is early touchdown (rest_height is a
             # single-view estimate) — release there rather than aborting while
             # pressing the object into the stack. A distant stall means the
@@ -253,7 +289,7 @@ class PickPlaceSkill:
             lin_err = self._lin_error_to(place_frame, place_cmd,
                                          WORLD_FRAME if world_ok else 'pelvis')
             if lin_err is None or lin_err > PLACE_STALL_MAX_M:
-                return run.abort(
+                return fail(
                     'place descent stalled far from the release pose'
                     + ('' if lin_err is None else f' ({lin_err * 100:.1f}cm short)'))
             self.get_logger().warn(
@@ -264,7 +300,7 @@ class PickPlaceSkill:
         if not run.phase('release', 0.9):
             return run.result
         if not self.open_gripper(arm):
-            return run.abort('gripper open failed')
+            return fail('gripper open failed')
         # Two-step retreat: back the open fingers out along the reverse grasp
         # approach so they can't catch the just-placed object, THEN rise clear of
         # the stack. Best-effort — the object is already placed.
@@ -281,20 +317,33 @@ class PickPlaceSkill:
         if not (ok_clear and ok_rise):
             self.get_logger().warn('pick_place: post-release retreat incomplete')
         return run.succeed(
-            f'placed {obj!r} on {place!r} '
-            f'(rest height {rest_h * 100:.1f}cm, grasp score {outcome.score:.2f})')
+            f'placed {obj!r} on {place!r} ('
+            + (f'top-down release {TOP_DOWN_PLACE_HEIGHT * 100:.0f}cm up'
+               if goal.top_down else f'rest height {rest_h * 100:.1f}cm')
+            + f', grasp score {outcome.score:.2f})')
 
-    def _grasp_via_skill(self, obj, arm, run, gh):
+    def _grasp_via_skill(self, goal, obj, arm, run, gh):
         """Send an in-process /skill/grasp goal for `obj` and return
-        (GraspOutcome, None) or (None, reason). No orientation bias is imposed —
-        the vertical place descent works from any executed grasp. Inner feedback
-        is proxied into this skill's 'grasp' phase; a cancel of the outer goal
-        cancels the in-flight inner goal (via _send_action's outer_gh
-        plumbing)."""
+        (GraspOutcome, None) or (None, reason). No orientation bias is imposed of
+        our own — the vertical place descent works from any executed grasp — but
+        the caller's optional top_down and visual_servo are forwarded, so a
+        pick_place grasp behaves exactly like the same direct /skill/grasp call.
+        `arm` is None for auto: the inner goal
+        carries "" and the grasp skill picks, reporting back in outcome.arm.
+        Inner feedback is proxied into this skill's 'grasp' phase; a cancel of
+        the outer goal cancels the in-flight inner goal (via _send_action's
+        outer_gh plumbing)."""
         inner_timeout = max(10.0, run.remaining() - PLACE_RESERVE_SEC)
         inner = SkillGrasp.Goal()
         inner.target_object = obj
-        inner.arm = arm
+        inner.arm = arm or ''
+        # Forward BOTH grasp modifiers. Every optional field the grasp skill
+        # understands has to be relayed explicitly — an unset field silently
+        # defaults to false, which is how visual_servo used to be dropped here
+        # and made a pick_place grasp behave differently from the identical
+        # direct /skill/grasp call.
+        inner.top_down = goal.top_down
+        inner.visual_servo = goal.visual_servo
         if inner_timeout == float('inf'):
             # This goal carries no deadline (timeout 0 = run to completion, see
             # DEFAULT_SKILL_TIMEOUT), so remaining() is infinite and can't be put

@@ -23,10 +23,13 @@ import math
 import time
 from dataclasses import dataclass
 
+import cv2
 import numpy as np
 
 from builtin_interfaces.msg import Time
-from geometry_msgs.msg import Pose, PoseStamped, Point, TransformStamped
+from geometry_msgs.msg import (Pose, PoseStamped, Point, TransformStamped,
+                               Vector3Stamped)
+from sensor_msgs.msg import Image
 from visualization_msgs.msg import Marker, MarkerArray
 from rclpy.duration import Duration as RclpyDuration
 from rclpy.qos import QoSProfile, DurabilityPolicy
@@ -120,6 +123,17 @@ GRASP_YUP_TOL_DEG = 55.0
 TOP_DOWN_PITCH_DEG = 80.0
 
 
+# ===================== failure retreat (_retreat_after_failure) ==============
+# Straight-up (pelvis +Z) lift run before a skill reports a failure, so a failed
+# grasp does not leave the hand sitting in the parts where the next attempt — or
+# a person — has to work around it. Larger than the visual servo's own 5 cm
+# reacquire hop: that one is trying to keep servoing, this one is leaving.
+# Excluded on purpose from the t_pose failure, which fires before the skill has
+# moved the arm itself.
+FAILURE_RETRACT_M = 0.15
+FAILURE_RETRACT_SEC = 3.0
+
+
 # ========================= motion / execution knobs ==========================
 # Fraction of the gripper's full range to pre-open to before approaching (see
 # base.open_gripper); 1 = fully open. The grasp CLOSE is a force-based /close at
@@ -134,6 +148,19 @@ APPROACH_DIST = 0.1
 # measured from this shifted grasp, so the whole approach->grasp pair moves
 # together.
 GRASP_OFFSET = 0.0
+# Pause between the last commanded motion and the gripper close [s]. frame_task
+# reports 'done' the moment its IK converges, but the arm is still settling — its
+# streamed error visibly wanders several mm mid-move and takes a beat to come to
+# rest. Closing into that residual motion drags the part. Uses the node clock, so
+# it respects sim time like the other gripper waits.
+PRE_CLOSE_SETTLE_SEC = 1.0
+# Pause after the close returns, before the skill reports and anything moves the
+# arm again [s]. This is ON TOP of the GRIPPER_SETTLE_SEC (1.0 s) close_gripper
+# already waits internally, and on top of the grip-hold loop it starts: it gives
+# the grip a moment to establish at full force before pick_place's lift takes the
+# part's weight. Walked up 0.5 -> 1.0 -> 2.0: the lift was still starting before
+# the grip was set.
+POST_CLOSE_SETTLE_SEC = 2.0
 # Metres to STOP SHORT of the (GRASP_OFFSET-shifted) grasp pose on the contact
 # move, measured back along the grasp's own +Z approach axis. Tuning knob for
 # how deep the contact move actually drives: 0.0 = the full GraspGenX pose.
@@ -154,12 +181,13 @@ CONFIRM_BEFORE_CONTACT = False
 # on the approach axis, 4.4 cm ahead of the gripper base) — so "centered in the
 # image at depth D" means "on the approach ray, D metres ahead of the camera".
 #
-# TARGET depth from the CAMERA to the object [m]. NOTE the 4.4 cm camera lead:
-# the finger contact point sits GRIPPER_BASE_TO_CONTACT_M - 0.044 = 0.0706 m in
-# front of the camera, so the geometrically consistent "fingers on the object"
-# value is 0.0706. At 0.10 the object still ends up ~2.9 cm BEYOND the
-# fingertips (~1.9 cm at 0.09, ~3.9 cm at the original 0.11) — conservative by
-# design: the loop can never drive the hand into the object.
+# TARGET depth from the CAMERA to the object [m], and the Z of the setpoint the
+# loop drives to (see the SETPOINT note further down — X and Y are both 0, i.e.
+# straight down the boresight). NOTE the 4.4 cm camera lead: the finger contact
+# point sits GRIPPER_BASE_TO_CONTACT_M - 0.044 = 0.0706 m in front of the camera,
+# so the geometrically consistent "fingers on the object" value is 0.0706. At
+# 0.10 the object ends up ~2.9 cm BEYOND the fingertips — conservative by design:
+# the loop can never drive the hand into the object.
 #
 # Do NOT expect to tune all the way down to 0.0706: the hand cameras are D405s
 # (min-Z ~0.07 m, optimal 0.07-0.5 m), so that target sits AT the sensor floor
@@ -185,15 +213,36 @@ VISUAL_SERVO_DEPTH_M = 0.10
 # measurable happens, and the loop spins. Anything under ~4 mm lateral is
 # therefore unreachable no matter how much budget it is given.
 #
-# 5 mm lateral sits ~1.5 mm above the observed steady state so a slightly worse
-# run still converges instead of running the budget out and ABORTING the skill
-# (see _visual_servo_refine — there is no fallback anymore, so an unreachable
-# tolerance is a hard failure). 2 mm range likewise clears the observed 1.0 mm.
-VISUAL_SERVO_LAT_TOL_M = 0.005
+# Tolerance is PER AXIS, not a radius, because the three camera axes mean
+# different things to a parallel gripper:
+#
+#   optical X (1 mm) — perpendicular to the jaws. The part has to sit between
+#     them, so this is what a grasp depends on. Tight — and now AT the arm's own
+#     resolution: frame_task settles to ~1.2 mm residual, and a correction of
+#     GAIN x 1 mm is smaller than that, so the loop cannot deliberately place
+#     within this band; it converges when it happens to land there. Halved from
+#     2 mm after the setpoint was shifted +2 mm to cancel the observed X bias.
+#     If runs start stalling with X named in the message, this is the cause and
+#     2 mm is the honest value.
+#   optical Z (2 mm) — range along the approach, i.e. how far down the hand
+#     comes. Tight: it decides whether the jaws close around the part or above
+#     it.
+#   optical Y (5 mm) — ALONG the jaw span (optical Y = -graspgenx X = the
+#     finger-closing direction). The jaws are pre-opened to
+#     GRIPPER_MAX_WIDTH_MM = 106 mm, so being off along the span is far more
+#     forgiving than being off across it — but only relatively: 5 mm still holds
+#     it near the middle of the grip rather than out toward one jaw.
+#
+# A single hypot() tolerance conflated X and Y and failed real runs on Y alone
+# while X was ~2 mm — demanding precision in the direction the hardware needs it
+# least. Keep these ordered X <= Y: inverting them asks for accuracy along the
+# span and tolerates it across, which is backwards for a parallel gripper.
+VISUAL_SERVO_X_TOL_M = 0.001
+VISUAL_SERVO_Y_TOL_M = 0.005
 VISUAL_SERVO_RANGE_TOL_M = 0.002
 # Wall-clock budget for the whole loop [s] — this, not an iteration count, is
 # what bounds the number of corrections: one iteration costs about
-# VISUAL_SERVO_MOVE_SEC plus a frame wait (~1.7 s), so 90 s is roughly 50
+# VISUAL_SERVO_MOVE_SEC plus a frame wait, so 90 s is dozens of
 # corrections. Walked up from 20 s (~11) as the tolerances tightened — runs
 # converge slowly but steadily, so the budget, not the control law, was the
 # limit. NOTE the goal's own timeout still wins: the loop checks run.remaining()
@@ -202,10 +251,69 @@ VISUAL_SERVO_RANGE_TOL_M = 0.002
 # open-loop contact descent rather than aborting, so a longer budget costs time
 # on a failing grasp but never changes the outcome.
 VISUAL_SERVO_TIMEOUT_SEC = 90.0
-# How long to keep waiting for a usable hand-camera detection before giving up
-# on servoing entirely [s] — the object may not be in frame yet when the arm
-# arrives, and yolo_server only publishes at ~5 Hz.
+# How long to keep waiting for a usable hand-camera detection before treating
+# the object as LOST [s] — it may not be in frame yet when the arm arrives, and
+# yolo_server only publishes at ~5 Hz.
 VISUAL_SERVO_DETECT_WAIT_SEC = 5.0
+# Losing sight is usually a geometry problem, not a detector problem: the hand
+# has come in close enough that the part has left the frame, is occluded by the
+# fingers, or has fallen inside the D405's ~7 cm minimum range. Backing STRAIGHT
+# UP (pelvis +Z, not along the approach) widens the view and restores depth
+# without giving up the lateral alignment already achieved, so the loop retracts
+# and keeps servoing instead of failing outright.
+VISUAL_SERVO_LOST_RETRACT_M = 0.05
+# Depth at or below which the object is TOO CLOSE to keep servoing on [m], and
+# the loop backs off exactly as it does for a lost object. The D405 stops
+# returning trustworthy depth under ~0.07 m, so a reading from inside that band
+# is not something to steer by — and by then the fingers are practically on the
+# part. The loop's own correction would ease back only GAIN x error per tick and
+# would keep believing those readings on the way; this gets clear in one move.
+#
+# Deliberately ABOVE VISUAL_SERVO_MIN_DEPTH_M (0.04), the back-projection's
+# floor: the deprojection has to still return points below this threshold, or
+# being too close would just look like losing sight and cost the full
+# VISUAL_SERVO_DETECT_WAIT_SEC before anything happened.
+#
+# LOWERED from 0.070 after it fired repeatedly on a perfectly visible screw: the
+# FINGER CONTACT POINT sits 70.6 mm in front of the camera (0.1146 - 0.044), so
+# a 70 mm trip was 0.6 mm away from the gripper's own hardware, and any depth
+# sample catching finger material read as "too close". That failure could not
+# heal, either — the fingers are rigid to the camera, so backing off does not
+# change their depth; it just retracted twice and aborted. Keep this clearly
+# BELOW 0.0706.
+VISUAL_SERVO_MIN_RANGE_M = 0.055
+# Consecutive too-close readings before acting. One frame must never be able to
+# command a 5 cm retreat; the condition is real only if it persists.
+VISUAL_SERVO_TOO_CLOSE_STRIKES = 2
+# Plausibility band on the depth of a new measurement [m]. Each iteration
+# predicts where the object's depth should land (previous depth minus the depth
+# component of the correction just commanded) and accepts anything between "the
+# arm did not move at all" and "the arm moved fully", plus this slack. Rejects
+# the pathological reading — a finger, a shadow, the surface behind the part —
+# that would otherwise drive a large bogus correction, WITHOUT rejecting honest
+# motion: the largest legitimate change is VISUAL_SERVO_MAX_STEP_M (50 mm), and
+# that is inside the band by construction because the prediction accounts for it.
+VISUAL_SERVO_RANGE_BAND_M = 0.02
+# Cap on retracts per servo run, SHARED by the lost-sight and too-close paths.
+# Needed: each retract is gated only by VISUAL_SERVO_DETECT_WAIT_SEC (or by an
+# immediate too-close reading), so an uncapped loop would climb ~5 cm at a time
+# and walk the arm out of the workspace before the budget ran out. After this
+# many, the object is genuinely not servo-able and the skill fails.
+VISUAL_SERVO_MAX_RETRACTS = 2
+# Stall detection: give up once the error stops improving, instead of spending
+# the rest of VISUAL_SERVO_TIMEOUT_SEC re-commanding a pose the arm has already
+# reached. Observed twice on the robot — the loop pinned at a fixed residual and
+# an unchanging commanded pose for 30+ iterations (~75 s) before the budget
+# expired, because below ~2 mm the correction (GAIN x error) is smaller than the
+# arm's own ~1.2 mm IK residual and nothing measurable happens.
+#
+# An iteration counts as progress only if it beats the best error so far by more
+# than EPS; STALL_ITERS consecutive non-improving iterations end the run. Failing
+# here rather than at the timeout turns "waited 90 s, no idea why" into a message
+# carrying the residual, which is what tells you the tolerance is unreachable.
+# Both counters reset after a back-off, since that genuinely changes the setup.
+VISUAL_SERVO_STALL_ITERS = 5
+VISUAL_SERVO_STALL_EPS_M = 0.001
 # Proportional gain: fraction of the measured error corrected per iteration.
 # Below 1.0 so a bad depth sample can't throw the hand across the workspace and
 # so the loop damps rather than oscillates around the target.
@@ -213,27 +321,47 @@ VISUAL_SERVO_GAIN = 0.6
 # Largest single correction [m]; a mis-detection (wrong instance, background
 # depth) can produce a huge error, and this bounds what one iteration can do.
 VISUAL_SERVO_MAX_STEP_M = 0.05
-# Per-iteration frame_task move duration [s]. Short: these are small corrections
-# and the loop re-measures after each one. Sent with slow_mode (the corrections
-# happen with the gripper already at the pre-grasp, centimetres from the object),
-# so the budget is scaled by SLOW_MODE_TIME_SCALE at the call site — otherwise a
-# quarter-speed move would only cover a quarter of the correction before the
-# duration expired, and the loop would stall short of convergence.
-VISUAL_SERVO_MOVE_SEC = 1.5
-# Empirical lateral TRIM on the TF-derived setpoint [m], in the camera OPTICAL
-# frame: (+X = right in the image, +Y = down). _servo_target already places the
-# setpoint on the finger axis using live TF, but that inherits the camera mount
-# transform in cl_realsense's h12_hand_cameras.launch.py, which is hand-entered
-# rather than measured — so a residual bias survives it.
+# Per-iteration frame_task move duration [s]. Sent with slow_mode (the
+# corrections happen with the gripper already at the pre-grasp, centimetres from
+# the object); NOT scaled by SLOW_MODE_TIME_SCALE at the call site — this value
+# is already sized for a quarter-speed move to converge AND reach the server's
+# steady-state hold. That hold matters: each new frame_task goal re-seeds its
+# command from the MEASURED joints, so a goal cut off before the hold's integral
+# stage cancels the arm's gravity droop leaves the droop baked in — at 1 s per
+# move the servo visibly ratcheted the hand downward ~5 mm per iteration while
+# lateral corrections went unexecuted.
+VISUAL_SERVO_MOVE_SEC = 4.0
+# Pause after each servo move before the next measurement [s]. The freshness
+# rule only requires a frame NEWER than the last one consumed (see
+# _servo_measure), so without this the loop can act on a frame captured
+# mid-move, from a vantage point the arm has already left. Node clock, so it
+# respects sim time.
+VISUAL_SERVO_POST_MOVE_SLEEP_SEC = 0.25
+# SETPOINT: the object is driven to (X, Y, VISUAL_SERVO_DEPTH_M) in the camera
+# OPTICAL frame, with the lateral part fixed here. Nothing is derived from TF and
+# nothing is fitted per-run.
 #
-# Tuned on the real robot 2026-07-21: converged grasps landed toward graspgenx
-# +Y, which at the 80-deg approach is pelvis +X (forward) and is image RIGHT in
-# the optical frame. Trimming the setpoint right moves the gripper BACK in pelvis
-# +X and sits the screw correspondingly further right in frame; walked 2 mm ->
-# 4 mm, each step confirmed on the robot. Re-measure if the camera is remounted,
-# the arm is swapped, or the static TF is ever properly calibrated — this
-# constant exists only to absorb that TF's error.
-VISUAL_SERVO_TRIM_XY_M = (0.004, 0.0)
+# Sign convention for tuning this on the robot: POSITIVE X sits the object
+# further RIGHT in the image and parks the hand further BACK in pelvis +X
+# (optical +X = graspgenx +Y ~= pelvis +X at the 80-deg approach, and raising the
+# setpoint pulls the hand back). Negative does the reverse. Values tried so far:
+# anywhere in -0.020 .. +0.012 — all set from observed grasps, not geometry.
+#
+# The loop previously aimed at the FINGER CONTACT POINT instead, resolved from
+# live TF (~+1.9 mm off the boresight) plus an empirical trim tuned on the robot.
+# That is the geometrically "correct" target — converged then meant "the object
+# is where the fingers will close" rather than "the object is centred". It was
+# abandoned because it did not behave: the trim had to grow to +4 mm (more than
+# twice TF's own answer, itself a sign the hand-entered camera mount transform in
+# cl_realsense's h12_hand_cameras.launch.py is materially wrong), then over-shot
+# at that value, and a Y term fitted the same way inverted sign between
+# consecutive runs. Aiming at the boresight gives up the finger-axis correction
+# in exchange for a setpoint that is exact, stable, and has no fitted constants.
+#
+# What that costs: any real camera-to-finger offset now shows up as a constant
+# lateral bias in the grasp. Recover it by MEASURING the camera mount rather than
+# by re-introducing a trim here.
+VISUAL_SERVO_TARGET_XY_M = (0.012, 0.0)
 # Floor on valid depth for the servo's back-projection [m], overriding base's
 # DEPTH_MIN_M (0.1) — that head-camera default sits ABOVE the target depth and
 # would reject exactly the measurements the loop needs.
@@ -274,6 +402,8 @@ class GraspOutcome:
     grasp, handed back through the node's `_last_grasp_outcome` attribute — the
     SkillGrasp result message itself only carries success/message (see
     _exec_grasp for the side-channel contract)."""
+    arm: str                # arm that executed it ('left'/'right') — the resolved
+                            # one, so a caller that asked for auto learns the pick
     pose: Pose              # executed grasp pose (GraspGenX gripper-base), in `frame`
     frame: str              # WORLD_FRAME when the world TF was available, else 'pelvis'
     centroid: np.ndarray    # object-cloud centroid [m], same frame
@@ -361,11 +491,24 @@ class GraspSkill:
         # other — so this long opening move goes through the planner rather than
         # a direct IK descent that can sweep the arms through obstacles.
         if not self.goto_named_config('t_pose', plan=True, outer_gh=gh):
+            # The ONLY failure that does not retract: this one fires before the
+            # skill has moved the arm anywhere of its own, and a t_pose that
+            # could not be reached is exactly the case where commanding another
+            # motion on top is the wrong move.
             return run.abort("move to 't_pose' before detection failed")
+
+        def fail(message):
+            """Abort, but lift the hand clear of the workspace first. Every
+            failure from here on leaves the arm somewhere it was put — reaching
+            into the parts, at a pre-grasp, or on the object — and reporting the
+            failure without retreating strands it there for the next attempt."""
+            self._retreat_after_failure(arm, gh)
+            return run.abort(message)
+
         obj_cloud, scene, err = self.detect_object_cloud(
             obj, run, gh, box_provider=box_provider, use_sam=use_sam)
         if err:
-            return run.abort(err)
+            return fail(err)
         # Held-object geometry for the pick_place side channel: the cloud
         # centroid and how high it sits above the object's own bottom (its rest
         # height on a support surface) — measured now, while the object still
@@ -384,16 +527,16 @@ class GraspSkill:
             cands, err = self._graspgen_candidates(goal, obj, arm, obj_cloud,
                                                    scene)
             if err:
-                return run.abort(err)
+                return fail(err)
 
         # --- approach: pre-open, then servo to the first reachable pre-grasp --
         if not self.open_gripper(arm, OPEN_PERCENT):
-            return run.abort('gripper pre-open failed')
+            return fail('gripper pre-open failed')
         targets = self._snapshot_targets(cands, centroid_p)
         idx, err = self._servo_to_first_reachable(run, gh, obj, arm, cands,
                                                   targets)
         if err:
-            return run.abort(err)
+            return fail(err)
         # Markers only now that a grasp is committed, so RViz matches where the
         # arm is actually going: the committed pose (GRASP_OFFSET included; the
         # contact move stops CONTACT_OFFSET short of it) bright green, the
@@ -414,7 +557,7 @@ class GraspSkill:
             servo_pose_p, err = self._visual_servo_refine(run, gh, arm, obj,
                                                           targets, idx)
             if err:
-                return run.abort(err)
+                return fail(err)
         if CONFIRM_BEFORE_CONTACT:
             # Hold at the pre-grasp standoff until a human confirms. Logged AND
             # prompted: the logger line reaches rosout even when stdout is
@@ -436,8 +579,12 @@ class GraspSkill:
             # Only reached when visual servoing wasn't requested — a servo that
             # ran and failed has already aborted the skill above.
             contact_p, contact_w = self._drive_to_contact(gh, arm, targets, idx)
+        # Let the arm come to rest before the jaws move — see PRE_CLOSE_SETTLE_SEC.
+        self.get_clock().sleep_for(RclpyDuration(seconds=PRE_CLOSE_SETTLE_SEC))
         if not self.close_gripper(arm):
-            return run.abort('gripper close failed')
+            return fail('gripper close failed')
+        # Let the grip establish before anything moves the arm again.
+        self.get_clock().sleep_for(RclpyDuration(seconds=POST_CLOSE_SETTLE_SEC))
 
         # Hand the executed grasp + held-object geometry to any in-process
         # caller (pick_place) via the side channel documented on _exec_grasp.
@@ -451,7 +598,7 @@ class GraspSkill:
         else:
             out_pose, out_frame, out_c = contact_p, 'pelvis', _pose_at(centroid_p)
         self._last_grasp_outcome = GraspOutcome(
-            pose=out_pose, frame=out_frame,
+            arm=arm, pose=out_pose, frame=out_frame,
             centroid=np.array([out_c.position.x, out_c.position.y,
                                out_c.position.z]),
             rest_height=rest_height, gripper_width=cands.gripper_width,
@@ -664,10 +811,11 @@ class GraspSkill:
     def _visual_servo_refine(self, run, gh, arm, obj, targets, idx):
         """Closed-loop hand-camera alignment at the pre-grasp (goal.visual_servo).
 
-        Drives GRASP_FRAMES[arm] in PURE TRANSLATION until `obj` sits on the hand
-        camera's boresight at VISUAL_SERVO_DEPTH_M — centered in the image at the
-        target range. Because the camera looks straight down the approach axis,
-        that is the same as "on the approach ray, D metres ahead". The PLANNED
+        Drives GRASP_FRAMES[arm] in PURE TRANSLATION until `obj` sits at
+        (VISUAL_SERVO_TARGET_XY_M, VISUAL_SERVO_DEPTH_M) in the hand camera's
+        optical frame — a fixed lateral offset from the boresight, at the target
+        range. Because the camera looks straight down the approach axis, the
+        depth part is the same as "D metres ahead along the approach". The PLANNED
         orientation is re-commanded every iteration and never adjusted, so the
         approach the candidate was chosen for survives the loop and the wrist
         can't drift somewhere unreachable.
@@ -680,6 +828,13 @@ class GraspSkill:
         frame matters: re-using the frame that motivated the last move would
         apply the same correction twice and overshoot.
 
+        Two situations are RECOVERABLE rather than fatal, and both are answered
+        by backing the hand straight up (pelvis +Z) by
+        VISUAL_SERVO_LOST_RETRACT_M and carrying on, up to
+        VISUAL_SERVO_MAX_RETRACTS times between them: losing the object for
+        VISUAL_SERVO_DETECT_WAIT_SEC, and finding it closer than
+        VISUAL_SERVO_MIN_RANGE_M (where the depth can no longer be trusted).
+
         Returns (pose, None) with the pelvis-frame gripper Pose it converged at —
         the caller closes the gripper THERE, with no contact descent — or
         (None, reason) when it could not converge. A failure FAILS THE SKILL:
@@ -689,18 +844,26 @@ class GraspSkill:
         correction the loop had already made."""
         frame = GRASP_FRAMES[arm]
         planned_q = targets.grasps_p[idx].orientation
-        # Resolved from TF on the first measurement, once the camera frame is
-        # known — see _servo_target for why it is NOT simply (0, 0, depth).
-        target = None
+        # Fixed lateral offset from the boresight at the target range — no TF
+        # lookup, no fitted constants (see the SETPOINT note above).
+        target = np.array([VISUAL_SERVO_TARGET_XY_M[0],
+                           VISUAL_SERVO_TARGET_XY_M[1],
+                           VISUAL_SERVO_DEPTH_M])
         deadline = time.monotonic() + VISUAL_SERVO_TIMEOUT_SEC
         last_seen = time.monotonic()
+        retracts = 0
+        best_err, stalled = None, 0        # stall detection, see VISUAL_SERVO_STALL_*
+        too_close_hits = 0                 # consecutive sub-MIN_RANGE readings
+        last_z = pred_z = None             # depth plausibility band, see below
         # Only frames captured after this instant count, so the first measurement
         # describes the arm where it actually is, not mid-approach.
         after = _stamp_tuple(self.get_clock().now().to_msg())
         self.get_logger().info(
-            f'grasp: visual servo for {obj!r} on the {arm} hand camera — '
-            f'target {VISUAL_SERVO_DEPTH_M * 100:.1f}cm, centered '
-            f'(tol {VISUAL_SERVO_LAT_TOL_M * 1000:.0f}mm lateral / '
+            f'grasp: visual servo for {obj!r} on the {arm} hand camera — setpoint '
+            f'({target[0] * 1000:+.0f}, {target[1] * 1000:+.0f}, '
+            f'{target[2] * 1000:.0f})mm optical '
+            f'(tol {VISUAL_SERVO_X_TOL_M * 1000:.0f}mm across the jaws / '
+            f'{VISUAL_SERVO_Y_TOL_M * 1000:.0f}mm along them / '
             f'{VISUAL_SERVO_RANGE_TOL_M * 1000:.0f}mm range)')
         it = 0
         while True:
@@ -709,30 +872,115 @@ class GraspSkill:
             if time.monotonic() >= deadline:
                 return None, (
                     f'visual servo did not converge on {obj!r} within '
-                    f'{VISUAL_SERVO_TIMEOUT_SEC:.0f}s ({it} iteration(s), '
-                    f'tol {VISUAL_SERVO_LAT_TOL_M * 1000:.0f}mm)')
-            p_cam, cam_frame = self._servo_measure(arm, obj, after)
-            if p_cam is None:
-                if time.monotonic() - last_seen > VISUAL_SERVO_DETECT_WAIT_SEC:
+                    f'{VISUAL_SERVO_TIMEOUT_SEC:.0f}s ({it} iteration(s), tol '
+                    f'{VISUAL_SERVO_X_TOL_M * 1000:.0f}/'
+                    f'{VISUAL_SERVO_Y_TOL_M * 1000:.0f}mm X/Y)')
+            p_cam, cam_frame, stamp, bundle = self._servo_measure(arm, obj, after)
+            # Plausibility gate: a reading whose DEPTH lands outside the band
+            # around what the last correction predicted is not this object — a
+            # finger, a shadow, the surface behind it — and acting on it would
+            # command a large bogus correction. Drop the frame and wait for the
+            # next one; if they are all implausible the lost-sight path below
+            # eventually fires, which is the right outcome.
+            if p_cam is not None and pred_z is not None:
+                lo = min(last_z, pred_z) - VISUAL_SERVO_RANGE_BAND_M
+                hi = max(last_z, pred_z) + VISUAL_SERVO_RANGE_BAND_M
+                if not lo <= float(p_cam[2]) <= hi:
+                    self.get_logger().warn(
+                        f'grasp: visual servo ignoring implausible depth '
+                        f'{p_cam[2] * 1000:.0f}mm (expected '
+                        f'{lo * 1000:.0f}-{hi * 1000:.0f}mm)',
+                        throttle_duration_sec=2.0)
+                    after = stamp          # consumed; do not re-test this frame
+                    self.get_clock().sleep_for(RclpyDuration(seconds=0.1))
+                    continue
+            # Two ways the hand ends up somewhere it cannot servo from, both
+            # answered the same way — back straight up and look again:
+            #   LOST      nothing usable for DETECT_WAIT (out of frame, occluded
+            #             by the fingers, or depth gone entirely);
+            #   TOO CLOSE inside MIN_RANGE on STRIKES consecutive frames, where
+            #             the depth can no longer be trusted. One frame is never
+            #             enough — a single bad sample must not command a retreat.
+            if p_cam is not None and float(p_cam[2]) < VISUAL_SERVO_MIN_RANGE_M:
+                too_close_hits += 1
+            else:
+                too_close_hits = 0
+            lost = (p_cam is None
+                    and time.monotonic() - last_seen > VISUAL_SERVO_DETECT_WAIT_SEC)
+            too_close = too_close_hits >= VISUAL_SERVO_TOO_CLOSE_STRIKES
+            if lost or too_close:
+                why = (f'lost sight of {obj!r} in the {arm} hand camera for '
+                       f'{VISUAL_SERVO_DETECT_WAIT_SEC:.0f}s' if lost else
+                       f'{obj!r} at {p_cam[2] * 1000:.0f}mm is inside the '
+                       f'{VISUAL_SERVO_MIN_RANGE_M * 1000:.0f}mm minimum range')
+                if retracts >= VISUAL_SERVO_MAX_RETRACTS:
                     return None, (
-                        f'no fresh {arm} hand-camera detection of {obj!r} with usable '
-                        f'depth in {VISUAL_SERVO_DETECT_WAIT_SEC:.0f}s')
+                        f'{why}; still not servo-able after {retracts} retract(s) of '
+                        f'{VISUAL_SERVO_LOST_RETRACT_M * 100:.0f}cm')
+                retracts += 1
+                self.get_logger().warn(
+                    f'grasp: {why} — backing off '
+                    f'{VISUAL_SERVO_LOST_RETRACT_M * 100:.0f}cm up (pelvis +Z) '
+                    f'({retracts}/{VISUAL_SERVO_MAX_RETRACTS})')
+                cur = self._frame_pose_in_pelvis(frame)
+                if cur is None:
+                    return None, (f'{why} and TF {frame!r} -> pelvis failed, so the '
+                                  'back-off pose is unknown')
+                up = Pose()
+                up.position.x = cur.position.x
+                up.position.y = cur.position.y
+                up.position.z = cur.position.z + VISUAL_SERVO_LOST_RETRACT_M
+                up.orientation = planned_q
+                self.move_frame_to(frame, up, outer_gh=gh,
+                                   duration_sec=VISUAL_SERVO_MOVE_SEC, do_plan=False)
+                # A back-off is the one place `after` becomes a CLOCK instant
+                # rather than a consumed-frame stamp: frames captured before it
+                # describe the old vantage point outright. The detect wait
+                # restarts too, so another back-off needs its own full wait.
+                # Stall counters and the depth prediction reset as well — the
+                # hand is somewhere new, so neither the old errors nor the old
+                # depth say anything about what should happen next (and a 5 cm
+                # jump would fail the plausibility band by construction).
+                after = _stamp_tuple(self.get_clock().now().to_msg())
+                last_seen = time.monotonic()
+                best_err, stalled = None, 0
+                last_z = pred_z = None
+                too_close_hits = 0
+                continue
+            if p_cam is None:
                 self.get_clock().sleep_for(RclpyDuration(seconds=0.1))
                 continue
             last_seen = time.monotonic()
-            if target is None:
-                target = self._servo_target(frame, cam_frame)
-                if target is None:
-                    return None, (f'visual servo setpoint unavailable: TF {frame!r} '
-                                  f'-> {cam_frame!r} failed')
             err = p_cam - target
+            ex, ey = float(abs(err[0])), float(abs(err[1]))
             lat = float(math.hypot(err[0], err[1]))
             rng = float(abs(err[2]))
+            # Move the camera BY the error: the object sits at p_cam and we want
+            # it at `target`, and translating the camera by d shifts the object's
+            # camera coordinates by -d. Gain-scaled and step-capped so one bad
+            # depth sample can't fling the hand across the workspace. Computed
+            # HERE, before the convergence check, only so the debug image can
+            # draw the correction this iteration would apply.
+            step = VISUAL_SERVO_GAIN * err
+            norm = float(np.linalg.norm(step))
+            if norm > VISUAL_SERVO_MAX_STEP_M:
+                step *= VISUAL_SERVO_MAX_STEP_M / norm
+                self.get_logger().warn(
+                    f'grasp: visual servo step capped at '
+                    f'{VISUAL_SERVO_MAX_STEP_M * 100:.0f}cm (wanted {norm * 100:.1f}cm)')
+            # Stamped with the frame's CAPTURE time, not now(), so plots line
+            # up with the camera stream it was measured from.
+            self.servo_error_pub.publish(_vec3_stamped(
+                Time(sec=stamp[0], nanosec=stamp[1]), cam_frame, err))
+            self._publish_servo_image(bundle, p_cam, target, step)
             self.get_logger().info(
                 f'grasp: visual servo iter {it}: object at ({p_cam[0] * 1000:+.0f}, '
                 f'{p_cam[1] * 1000:+.0f}, {p_cam[2] * 1000:.0f})mm in {cam_frame} — '
-                f'lateral {lat * 1000:.1f}mm, range err {err[2] * 1000:+.1f}mm')
-            if lat <= VISUAL_SERVO_LAT_TOL_M and rng <= VISUAL_SERVO_RANGE_TOL_M:
+                f'err X {err[0] * 1000:+.1f}mm (tol {VISUAL_SERVO_X_TOL_M * 1000:.0f}) '
+                f'Y {err[1] * 1000:+.1f}mm (tol {VISUAL_SERVO_Y_TOL_M * 1000:.0f}) '
+                f'range {err[2] * 1000:+.1f}mm (tol {VISUAL_SERVO_RANGE_TOL_M * 1000:.0f})')
+            if (ex <= VISUAL_SERVO_X_TOL_M and ey <= VISUAL_SERVO_Y_TOL_M
+                    and rng <= VISUAL_SERVO_RANGE_TOL_M):
                 pose = self._frame_pose_in_pelvis(frame)
                 if pose is None:
                     return None, (f'visual servo converged but TF {frame!r} -> pelvis '
@@ -741,17 +989,28 @@ class GraspSkill:
                 self.get_logger().info(
                     f'grasp: visual servo converged for {obj!r} in {it} iteration(s)')
                 return pose, None
-            # Move the camera BY the error: the object sits at p_cam and we want
-            # it at `target`, and translating the camera by d shifts the object's
-            # camera coordinates by -d. Gain-scaled and step-capped so one bad
-            # depth sample can't fling the hand across the workspace.
-            step = VISUAL_SERVO_GAIN * err
-            norm = float(np.linalg.norm(step))
-            if norm > VISUAL_SERVO_MAX_STEP_M:
-                step *= VISUAL_SERVO_MAX_STEP_M / norm
-                self.get_logger().warn(
-                    f'grasp: visual servo step capped at '
-                    f'{VISUAL_SERVO_MAX_STEP_M * 100:.0f}cm (wanted {norm * 100:.1f}cm)')
+            # Not converged — is it still getting closer? A run that stops
+            # improving will not start again on its own (see VISUAL_SERVO_STALL_*),
+            # so end it here with the residual rather than at the timeout.
+            err_norm = float(np.linalg.norm(err))
+            if best_err is None or err_norm < best_err - VISUAL_SERVO_STALL_EPS_M:
+                best_err, stalled = err_norm, 0
+            else:
+                stalled += 1
+                if stalled >= VISUAL_SERVO_STALL_ITERS:
+                    # Name the axis that is actually out of tolerance — X (across
+                    # the jaws) is a real problem, Y (along them) usually is not.
+                    out = ', '.join(
+                        f'{ax} {v * 1000:+.1f}mm (tol {t * 1000:.0f})'
+                        for ax, v, t in (('X', err[0], VISUAL_SERVO_X_TOL_M),
+                                         ('Y', err[1], VISUAL_SERVO_Y_TOL_M),
+                                         ('range', err[2], VISUAL_SERVO_RANGE_TOL_M))
+                        if abs(v) > t)
+                    return None, (
+                        f'visual servo stalled on {obj!r}: no improvement over '
+                        f'{stalled} iterations, still out of tolerance on {out} — '
+                        'the tolerance is below what this arm can resolve, or the '
+                        'setpoint is off')
             delta = self._rotate_into_pelvis(step, cam_frame)
             cur = self._frame_pose_in_pelvis(frame)
             if delta is None or cur is None:
@@ -771,62 +1030,159 @@ class GraspSkill:
             # the error that is left, so a failed/partial move is not fatal here.
             self.move_frame_to(
                 frame, goal_pose, outer_gh=gh,
-                duration_sec=VISUAL_SERVO_MOVE_SEC * SLOW_MODE_TIME_SCALE,
+                duration_sec=VISUAL_SERVO_MOVE_SEC,
                 do_plan=False, slow_mode=True)
-            after = _stamp_tuple(self.get_clock().now().to_msg())
+            # Executed move = TF pose after the move minus before (`cur` above,
+            # measured just before commanding). Its residual vs the commanded
+            # correction `delta` equals post - goal_pose: the tracking
+            # shortfall. Debug-only, so a failed TF lookup just skips the pair.
+            post = self._frame_pose_in_pelvis(frame)
+            if post is not None:
+                executed = np.array([post.position.x - cur.position.x,
+                                     post.position.y - cur.position.y,
+                                     post.position.z - cur.position.z])
+                residual = executed - delta
+                self.get_logger().info(
+                    f'grasp: visual servo iter {it}: '
+                    f'commanded ({delta[0] * 1000:+.1f}, {delta[1] * 1000:+.1f}, '
+                    f'{delta[2] * 1000:+.1f})mm, '
+                    f'executed ({executed[0] * 1000:+.1f}, {executed[1] * 1000:+.1f}, '
+                    f'{executed[2] * 1000:+.1f})mm, '
+                    f'residual ({residual[0] * 1000:+.1f}, {residual[1] * 1000:+.1f}, '
+                    f'{residual[2] * 1000:+.1f})mm (pelvis frame)')
+                now = self.get_clock().now().to_msg()
+                self.servo_move_pub.publish(
+                    _vec3_stamped(now, 'pelvis', executed))
+                self.servo_move_residual_pub.publish(
+                    _vec3_stamped(now, 'pelvis', residual))
+            # Where the depth should land next: moving the camera by +step along
+            # its own axes shifts the object's camera coordinates by -step, so a
+            # fully-executed move lands at z - step[2] and an ignored one stays
+            # at z. The band between those two (plus slack) is what the next
+            # measurement is checked against.
+            last_z, pred_z = float(p_cam[2]), float(p_cam[2]) - float(step[2])
+            # Require a frame NEWER than the one just consumed — not one captured
+            # after the move (see _servo_measure).
+            after = stamp
+            # Give the camera/detector a beat to publish a frame from the new
+            # vantage point before measuring again.
+            self.get_clock().sleep_for(
+                RclpyDuration(seconds=VISUAL_SERVO_POST_MOVE_SLEEP_SEC))
             it += 1
 
-    def _servo_target(self, frame, cam_frame):
-        """Where the object must sit in the camera optical frame for the FINGERS
-        to close on it — the servo's setpoint, resolved from live TF.
+    def _publish_servo_image(self, bundle, p_cam, target, step=None):
+        """Draw one visual-servo frame and publish it for RViz: the measured
+        object as a RED dot, the setpoint as a GREEN box whose half-extents are
+        the X/Y tolerances, both PROJECTED into pixel space through the bundle's
+        own intrinsics.
 
-        NOT (0, 0, depth): the camera is mounted off the gripper's own axis (the
-        URDF puts it 1.5 mm off in graspgenx Y before the driver's
-        hand_link -> optical extrinsic is even applied), so driving the object
-        onto the camera BORESIGHT lands it beside where the fingers close. That
-        error is systematic and always in the same direction — graspgenx +Y for
-        this mount, which is exactly how a missed grasp reads on the robot.
+        The tolerance is drawn as a RECTANGLE because that is exactly what the
+        convergence test is: per axis, |dx| <= X_TOL AND |dy| <= Y_TOL. An
+        ellipse would be inscribed in it and would under-report convergence — a
+        dot in a corner (say 1.5 mm X, 4.0 mm Y against 2/5 mm tolerances) passes
+        the real test while sitting outside the ellipse. Range is the criterion
+        this view cannot show at all, so it goes in the caption.
 
-        So the setpoint's LATERAL part is the finger contact point's own position
-        in the camera frame, taken from TF, plus VISUAL_SERVO_TRIM_XY_M; only the
-        DEPTH is our choice (VISUAL_SERVO_DEPTH_M). Reading it from TF rather
-        than hard-coding it means the mount transform in cl_realsense's
-        h12_hand_cameras.launch.py and the driver's extrinsic are both absorbed
-        automatically — but ALSO that a wrong mount transform is inherited
-        verbatim, which is what the trim is for. The trim is a correction to that
-        static TF's error, NOT a property of the servo: if the mount is ever
-        measured properly, zero it rather than re-tuning it."""
-        c = self._transform_pose(_pose_at((0.0, 0.0, GRIPPER_BASE_TO_CONTACT_M)),
-                                 frame, cam_frame)
-        if c is None:
-            return None
-        tx = c.position.x + VISUAL_SERVO_TRIM_XY_M[0]
-        ty = c.position.y + VISUAL_SERVO_TRIM_XY_M[1]
-        self.get_logger().info(
-            f'grasp: visual servo setpoint — fingers at TF '
-            f'({c.position.x * 1000:+.1f}, {c.position.y * 1000:+.1f})mm off the '
-            f'{cam_frame} boresight, trim '
-            f'({VISUAL_SERVO_TRIM_XY_M[0] * 1000:+.1f}, '
-            f'{VISUAL_SERVO_TRIM_XY_M[1] * 1000:+.1f})mm '
-            f'-> targeting ({tx * 1000:+.1f}, {ty * 1000:+.1f})mm at '
-            f'{VISUAL_SERVO_DEPTH_M * 100:.0f}cm')
-        return np.array([tx, ty, VISUAL_SERVO_DEPTH_M])
+        The box is drawn at the SETPOINT's depth, so its pixel size is fixed
+        regardless of where the object currently is.
+
+        Best-effort throughout: visualisation must never break a grasp."""
+        try:
+            info = bundle.camera_info
+            if not bundle.rgb_image.data or not info.width:
+                return
+            img = cv2.imdecode(
+                np.frombuffer(bytes(bundle.rgb_image.data), dtype=np.uint8),
+                cv2.IMREAD_COLOR)
+            if img is None:
+                return
+            fx, fy, cx, cy = info.k[0], info.k[4], info.k[2], info.k[5]
+
+            def project(pt):
+                z = float(pt[2])
+                if z <= 1e-6:
+                    return None
+                return (int(round(fx * float(pt[0]) / z + cx)),
+                        int(round(fy * float(pt[1]) / z + cy)))
+
+            tgt_px, obj_px = project(target), project(p_cam)
+            if tgt_px is not None:
+                # Tolerances are metres at the setpoint depth; convert to pixels
+                # with the same pinhole scale (u = fx*X/Z) that projected it.
+                ax = max(2, int(round(fx * VISUAL_SERVO_X_TOL_M / target[2])))
+                ay = max(2, int(round(fy * VISUAL_SERVO_Y_TOL_M / target[2])))
+                cv2.rectangle(img, (tgt_px[0] - ax, tgt_px[1] - ay),
+                              (tgt_px[0] + ax, tgt_px[1] + ay), (0, 255, 0), 2)
+                cv2.drawMarker(img, tgt_px, (0, 255, 0), cv2.MARKER_CROSS, 10, 1)
+            if obj_px is not None:
+                cv2.circle(img, obj_px, 6, (0, 0, 255), -1)
+            if tgt_px is not None and obj_px is not None:
+                cv2.line(img, obj_px, tgt_px, (0, 200, 255), 1)
+            # Commanded correction, drawn where it is legible: as the object's
+            # PREDICTED next position. Translating the camera by +step shifts the
+            # object's camera coordinates by -step, so the dot should land at
+            # p_cam - step. Projecting that instead of drawing the raw vector
+            # gets the perspective right for free — in particular a pure-range
+            # correction barely moves the dot, which is the truth.
+            cmd_color = _step_color(step[2] if step is not None else 0.0)
+            if obj_px is not None and step is not None:
+                nxt_px = project(np.asarray(p_cam) - np.asarray(step))
+                if nxt_px is not None and nxt_px != obj_px:
+                    cv2.arrowedLine(img, obj_px, nxt_px, cmd_color, 2,
+                                    tipLength=0.3)
+            if tgt_px is not None and obj_px is not None:
+                err = np.asarray(p_cam) - np.asarray(target)
+                cv2.putText(
+                    img, f'err X{err[0] * 1000:+.1f} Y{err[1] * 1000:+.1f} '
+                         f'Z{err[2] * 1000:+.1f} mm',
+                    (10, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2)
+                if step is not None:
+                    cv2.putText(
+                        img, f'cmd X{step[0] * 1000:+.1f} Y{step[1] * 1000:+.1f} '
+                             f'Z{step[2] * 1000:+.1f} mm',
+                        (10, 58), cv2.FONT_HERSHEY_SIMPLEX, 0.8, cmd_color, 2)
+
+            img = np.ascontiguousarray(img)
+            msg = Image()
+            msg.header = bundle.rgb_image.header
+            msg.height, msg.width = int(img.shape[0]), int(img.shape[1])
+            msg.encoding = 'bgr8'
+            msg.is_bigendian = 0
+            msg.step = int(img.shape[1] * 3)
+            msg.data = img.tobytes()
+            self.servo_image_pub.publish(msg)
+        except Exception as e:                       # noqa: BLE001 - viz only
+            self.get_logger().warn(f'servo image publish failed: {e}',
+                                   throttle_duration_sec=5.0)
 
     def _servo_measure(self, arm, obj, after):
         """One visual-servo measurement: the position of `obj` in the `arm` hand
-        camera's optical frame, as (point, frame_id), or (None, None).
+        camera's optical frame, as (point, frame_id, stamp, bundle), or a tuple
+        of Nones. The bundle comes back so the caller can draw the servo
+        overlay on the EXACT frame the measurement came from.
 
         Only accepts a bundle stamped strictly after `after` (a (sec, nanosec)
-        tuple) so each correction is driven by a frame captured after the
-        previous move. Among detections of the class, picks the one CLOSEST TO
-        THE BORESIGHT rather than the most confident: the loop must stay locked
-        on the instance it is aligning to, not hop to a neighbouring part that
-        happens to score higher on one frame."""
+        tuple). The caller sets `after` to the stamp of the frame it last USED,
+        not to a wall-clock instant — that still makes it impossible to apply the
+        same frame's correction twice (which would overshoot), while no longer
+        demanding a frame captured after the move finished. The stricter rule
+        starved the loop whenever yolo_server's inference latency exceeded the
+        gap between moves: every arriving bundle carried a capture stamp from
+        before the move ended, all were rejected, and after DETECT_WAIT the loop
+        declared a plainly visible object lost. The caller does still bump
+        `after` to a clock instant after a BACK-OFF, where pre-move frames really
+        are describing the wrong vantage point.
+
+        Among detections of the class, picks the one CLOSEST TO THE BORESIGHT
+        rather than the most confident: the loop must stay locked on the instance
+        it is aligning to, not hop to a neighbouring part that happens to score
+        higher on one frame."""
         bundle = self.latest_arm_detections(arm)
         if bundle is None or not bundle.detections:
-            return None, None
-        if _stamp_tuple(bundle.rgb_image.header.stamp) <= after:
-            return None, None          # stale: captured before/at the last move
+            return None, None, None, None
+        stamp = _stamp_tuple(bundle.rgb_image.header.stamp)
+        if stamp <= after:
+            return None, None, None, None  # already consumed, or pre-dates a back-off
         key = obj.strip().lower()
         best_p, best_lat = None, None
         for d in bundle.detections:
@@ -840,8 +1196,38 @@ class GraspSkill:
             if best_lat is None or lat < best_lat:
                 best_p, best_lat = p, lat
         if best_p is None:
-            return None, None
-        return best_p, self.bundle_camera_frame(bundle)
+            return None, None, None, None
+        return best_p, self.bundle_camera_frame(bundle), stamp, bundle
+
+    def _retreat_after_failure(self, arm, gh):
+        """Lift the hand FAILURE_RETRACT_M straight up (pelvis +Z) before a skill
+        reports a failure, so the arm does not stay parked in the workspace.
+
+        Shared by the grasp skill and pick_place. Keeps the CURRENT orientation
+        (read from TF) rather than any planned one — a failure can happen at any
+        stage, including ones where no grasp orientation was ever settled, and
+        re-orienting a stuck arm is how a bad situation gets worse.
+
+        Entirely best-effort: no arm chosen yet, TF missing, or the move itself
+        failing all just warn. The skill is already failing; the retreat must
+        never replace the real reason with a second one."""
+        if arm is None:
+            return
+        frame = GRASP_FRAMES[arm]
+        cur = self._frame_pose_in_pelvis(frame)
+        if cur is None:
+            self.get_logger().warn(
+                f'retreat: TF {frame!r} -> pelvis unavailable; leaving the arm in place')
+            return
+        up = copy.deepcopy(cur)
+        up.position.z += FAILURE_RETRACT_M
+        self.get_logger().info(
+            f'retreat: lifting {frame} {FAILURE_RETRACT_M * 100:.0f}cm (pelvis +Z) '
+            'before reporting the failure')
+        if not self.move_frame_to(frame, up, outer_gh=gh,
+                                  duration_sec=FAILURE_RETRACT_SEC * SLOW_MODE_TIME_SCALE,
+                                  do_plan=False, slow_mode=True):
+            self.get_logger().warn('retreat: lift incomplete')
 
     def _frame_pose_in_pelvis(self, frame):
         """Current pose of URDF `frame` in the pelvis frame, or None."""
@@ -1141,6 +1527,29 @@ def _stamp_tuple(stamp):
     without pulling in rclpy's Time arithmetic (and without caring whether the
     clock is sim or wall — both sides of every comparison share one clock)."""
     return (stamp.sec, stamp.nanosec)
+
+
+def _step_color(dz):
+    """BGR for the servo image's commanded-step arrow, coding its DEPTH
+    component: RED as the step drives IN along the boresight (+Z), GREEN as it
+    backs OFF (-Z). At the top-down approach the boresight points down, so red
+    reads as "going down onto the part" and green as "coming back up". Scaled
+    over +/- VISUAL_SERVO_MAX_STEP_M, so saturated colour = the biggest step the
+    loop is allowed to command; a step with no depth component comes out olive."""
+    t = (float(np.clip(dz / VISUAL_SERVO_MAX_STEP_M, -1.0, 1.0)) + 1.0) / 2.0
+    return (0, int(round(255 * (1.0 - t))), int(round(255 * t)))
+
+
+def _vec3_stamped(stamp, frame_id, v):
+    """A geometry_msgs/Vector3Stamped from a 3-sequence, for the visual-servo
+    debug topics (/skill/grasp/servo_*)."""
+    msg = Vector3Stamped()
+    msg.header.stamp = stamp
+    msg.header.frame_id = frame_id
+    msg.vector.x = float(v[0])
+    msg.vector.y = float(v[1])
+    msg.vector.z = float(v[2])
+    return msg
 
 
 def _pose_at(point):

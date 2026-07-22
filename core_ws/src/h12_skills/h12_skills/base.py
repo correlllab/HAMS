@@ -30,8 +30,8 @@ from rclpy.time import Time
 
 from action_msgs.msg import GoalStatus
 from builtin_interfaces.msg import Duration
-from geometry_msgs.msg import Point, Pose, Quaternion
-from sensor_msgs.msg import CameraInfo, CompressedImage
+from geometry_msgs.msg import Point, Pose, Quaternion, Vector3Stamped
+from sensor_msgs.msg import CameraInfo, CompressedImage, Image
 from std_msgs.msg import Header
 
 from sensor_msgs_py import point_cloud2
@@ -86,7 +86,31 @@ GRASP_FRAMES = {'left': 'left_graspgenx_frame', 'right': 'right_graspgenx_frame'
 GRIPPER_NS = {'left': '/left/gripper', 'right': '/right/gripper'}
 
 # Grip-force limit (N) applied via set_force before closing on an object.
-GRIP_FORCE_N = 30.0
+# Halved from 30 N: 30 N on a small part is more than the grasp needs and is what
+# drives the Dynamixels into the overload the grip-hold loop then has to keep
+# clearing. This is the default for both set_gripper_force and close_gripper, so
+# every close in the package moves together.
+GRIP_FORCE_N = 15.0
+# --- grip-hold loop (see close_gripper / _grip_hold_loop) --------------------
+# The magpie fingers are Dynamixels that trip into OVERLOAD while holding
+# against an object and then go limp, dropping it. reset_overload clears that
+# without opening the fingers, so a background thread per arm re-asserts the
+# grip at this rate: reset_overload, then close, every tick.
+#
+# LIFETIME: the loop deliberately outlives the skill that started it — the
+# object is still held after /skill/grasp returns — and stops only when the
+# gripper is commanded to an aperture again (open_gripper / set_gripper). It is
+# a daemon thread, so it also dies with the node.
+GRIP_HOLD_RATE_HZ = 5.0
+# Per-call timeout inside the loop [s]. Well under the 1/rate period so a
+# stalled gripper service can't drag the loop off cadence; a tick that times out
+# is simply retried on the next one.
+GRIP_HOLD_CALL_TIMEOUT_SEC = 0.15
+# The loop calls two services at GRIP_HOLD_RATE_HZ, so a persistently dead
+# gripper service would emit ~10 log lines/s. Warn only once per this many
+# consecutive failed ticks instead (failures are logged, never fatal — a flaky
+# gripper service must not turn a good grasp into a failed goal).
+GRIP_HOLD_WARN_EVERY = 25
 # ROS-time wait (get_clock().sleep_for — respects sim time) after an open/close so
 # the fingers finish moving before the arm starts its next motion. The /close
 # Trigger returns in ~5 ms and the position wait under-estimates finger travel, so
@@ -280,6 +304,16 @@ class SkillsBase(Node):
                                     callback_group=self._cb_group)
             for arm, ns in GRIPPER_NS.items()
         }
+        # Clears a Dynamixel overload WITHOUT opening the fingers
+        # (magpie_control gripper.py:reset_overload) — the grip-hold loop's
+        # other half. See _grip_hold_loop.
+        self.gripper_reset_clis = {
+            arm: self.create_client(Trigger, f'{ns}/reset_overload',
+                                    callback_group=self._cb_group)
+            for arm, ns in GRIPPER_NS.items()
+        }
+        # arm -> (thread, stop Event) for the running grip-hold loops.
+        self._grip_hold = {}
         # Live gripper aperture [mm] from the driver's published state (10 Hz),
         # cached per arm. Unlike _gripper_actual_mm (only refreshed by a position
         # command), this tracks the aperture after ANY close — including the
@@ -339,6 +373,30 @@ class SkillsBase(Node):
         self._tf_lock = threading.Lock()
         self.create_timer(TF_REPUBLISH_PERIOD_SEC, self._republish_tfs,
                           callback_group=self._cb_group)
+        # Visual-servo residual (dx/dy/dz in the hand-camera optical frame),
+        # one message per servo iteration — for live plotting (PlotJuggler).
+        self.servo_error_pub = self.create_publisher(
+            Vector3Stamped, '/skill/grasp/servo_error', 10)
+        # Visual-servo EXECUTED move (TF pose after the move minus before, in
+        # the pelvis frame) — compare against servo_error to see how much of
+        # each commanded correction the arm actually delivered.
+        self.servo_move_pub = self.create_publisher(
+            Vector3Stamped, '/skill/grasp/servo_move', 10)
+        # Executed move minus the commanded correction, elementwise (== pose
+        # after the move minus the commanded goal): the move's tracking
+        # shortfall, in the pelvis frame. Zero = the arm did exactly as asked.
+        self.servo_move_residual_pub = self.create_publisher(
+            Vector3Stamped, '/skill/grasp/servo_move_residual', 10)
+        # Annotated hand-camera frame for the visual servo: the measured object
+        # (red dot), the setpoint with its X/Y tolerance (green ellipse), and the
+        # commanded correction (arrow), projected into the image. One per servo
+        # iteration. RAW sensor_msgs/Image, matching yolo_server's '/annotated'
+        # convention, so an RViz Image display on this topic just works — a
+        # compressed-only topic never appears in RViz's topic list at all,
+        # because nothing publishes the base name it looks for. Depth 1 and only
+        # while a servo runs (~0.4 Hz), so the bandwidth is bounded and brief.
+        self.servo_image_pub = self.create_publisher(
+            Image, '/skill/grasp/servo_image', 1)
 
         # --- head-camera caches (color for the services, depth+info for lifting
         #     a 2-D mask to a 3-D cloud) -----------------------------------------
@@ -1023,7 +1081,13 @@ class SkillsBase(Node):
 
     def set_gripper(self, arm, position_mm, speed=1.0):
         """Direct position command (mm); used to pre-open to a measured grasp
-        width. Full open/close go through the dedicated services below."""
+        width. Full open/close go through the dedicated services below.
+
+        Cancels any grip-hold loop on this arm FIRST: this is the one funnel
+        every aperture command goes through (open_gripper included), so an
+        explicit position always wins over a hold that would otherwise keep
+        re-closing on top of it."""
+        self._stop_grip_hold(arm)
         req = SetGripperPosition.Request()
         req.position = float(position_mm)
         req.speed = float(speed)
@@ -1061,7 +1125,11 @@ class SkillsBase(Node):
         """Open the gripper by `amount`, a fraction of its full range where 0 is
         fully closed and 1 is fully open (default 1 = fully open). Commanded as a
         position so intermediate openings are honored. Waits GRIPPER_SETTLE_SEC
-        after commanding so the fingers finish moving before the arm does."""
+        after commanding so the fingers finish moving before the arm does.
+
+        This is what ENDS a grip-hold loop (via set_gripper): the hold started by
+        close_gripper runs until the gripper is opened, outliving the skill that
+        grasped."""
         amount = min(max(float(amount), 0.0), 1.0)
         if not self.set_gripper(arm, amount * GRIPPER_MAX_WIDTH_MM):
             return False
@@ -1075,13 +1143,94 @@ class SkillsBase(Node):
         object at that force. A force-based close rather than a position command —
         the fingers seek and grip the object at `force_n` (N) whatever its width.
         Waits GRIPPER_SETTLE_SEC after triggering so the fingers finish closing
-        before the arm moves (the /close service returns almost immediately)."""
+        before the arm moves (the /close service returns almost immediately).
+
+        Then starts the GRIP-HOLD LOOP (_grip_hold_loop): a background thread
+        that re-asserts the grip at GRIP_HOLD_RATE_HZ so a Dynamixel overload
+        can't quietly drop the object. It keeps running after this call and
+        after the skill returns — the object is still held — until the gripper
+        is opened. Every caller of close_gripper gets this."""
         if not self.set_gripper_force(arm, force_n):
             return False
         if not self._trigger_gripper(self.gripper_close_clis[arm], f'close({arm})'):
             return False
         self.get_clock().sleep_for(RclpyDuration(seconds=GRIPPER_SETTLE_SEC))   # let the fingers finish closing before the arm moves
+        # Only now, so the loop's first tick can't race the initial close.
+        self._start_grip_hold(arm)
         return True
+
+    # ------------------------------------------------------------- grip hold
+    def _start_grip_hold(self, arm):
+        """Start (or restart) the background grip-hold loop for `arm`. Safe to
+        call when one is already running — the old thread is stopped first, so
+        there is never more than one loop per arm."""
+        self._stop_grip_hold(arm)
+        stop = threading.Event()
+        thread = threading.Thread(target=self._grip_hold_loop, args=(arm, stop),
+                                  name=f'grip_hold_{arm}', daemon=True)
+        self._grip_hold[arm] = (thread, stop)
+        thread.start()
+        self.get_logger().info(
+            f'gripper {arm}: grip-hold loop started at {GRIP_HOLD_RATE_HZ:.0f} Hz '
+            '(reset_overload + close); runs until the gripper is opened')
+
+    def _stop_grip_hold(self, arm):
+        """Stop the grip-hold loop for `arm` and WAIT for its thread to finish,
+        so no tick is in flight when the caller then commands the gripper —
+        otherwise a stray re-close would race the open it is about to send."""
+        entry = self._grip_hold.pop(arm, None)
+        if entry is None:
+            return
+        thread, stop = entry
+        stop.set()
+        thread.join(timeout=2.0)
+        if thread.is_alive():
+            self.get_logger().warn(
+                f'gripper {arm}: grip-hold thread did not stop within 2s; '
+                'it will exit on its next tick')
+        else:
+            self.get_logger().info(f'gripper {arm}: grip-hold loop stopped')
+
+    def _grip_hold_loop(self, arm, stop):
+        """Re-assert the grip on `arm` until `stop` is set: every tick, call
+        reset_overload (clear any Dynamixel overload without releasing) and then
+        close (re-drive the fingers shut at the force set by close_gripper).
+
+        Runs on its own thread. That is safe here because the node spins a
+        MultiThreadedExecutor over one ReentrantCallbackGroup, so blocking on a
+        service future off the executor thread does not deadlock it. Calls go
+        through _wait_future directly rather than _call_service so that failures
+        can be throttled — at this rate _call_service's per-failure error log
+        would be ~10 lines/s against a dead service.
+
+        Failures are never fatal: a tick that fails is logged (throttled) and
+        the loop simply tries again."""
+        period = 1.0 / GRIP_HOLD_RATE_HZ
+        calls = ((self.gripper_reset_clis[arm], 'reset_overload'),
+                 (self.gripper_close_clis[arm], 'close'))
+        fails = 0
+        while not stop.is_set():
+            ok, failed = True, ''
+            for client, label in calls:
+                if stop.is_set():
+                    return
+                result = None
+                if client.service_is_ready():
+                    result = self._wait_future(
+                        client.call_async(Trigger.Request()),
+                        GRIP_HOLD_CALL_TIMEOUT_SEC)
+                if result is None or not result.success:
+                    ok, failed = False, label
+            if ok:
+                fails = 0
+            else:
+                if fails % GRIP_HOLD_WARN_EVERY == 0:
+                    self.get_logger().warn(
+                        f'gripper {arm}: grip-hold {failed} failed '
+                        f'({fails + 1} consecutive tick(s)); still retrying')
+                fails += 1
+            if stop.wait(period):
+                break
 
     def _validated_arm(self, goal):
         arm = goal.arm.strip().lower()

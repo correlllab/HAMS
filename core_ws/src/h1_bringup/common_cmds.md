@@ -80,7 +80,7 @@ Optional goal fields (omit / `false` / `0` = off):
 |---|---|
 | `top_down` | skip GraspGenX; build ONE synthetic grasp above the object — the tier-1 orientation (forward azimuth, fingers across pelvis ±Y, level wrist) pitched `TOP_DOWN_PITCH_DEG` = 80° below horizontal, base backed 0.1146 m off along that approach so the fingers close on the cloud centroid. Still steeper than the arm's ~45° practical reach, and there is no second candidate to fall back to, so an unreachable pose aborts the skill. |
 | `min_downward_pitch_deg` | keep only GraspGenX grasps approaching at least this far below horizontal (a *minimum* pitch, not proximity to vertical) |
-| `visual_servo` | at the pre-grasp, close the loop on the arm's hand camera: translate (orientation frozen) until the object is centered at `VISUAL_SERVO_DEPTH_M` = 0.10 m, then close **there** instead of running the contact descent. Tolerance 5 mm lateral / 2 mm range (the arm's own IK settles to ~1.2 mm, so tighter than ~4 mm lateral is unreachable and just burns the budget), 90 s budget (~50 corrections). If it can't converge or sees no detection the skill **aborts** — there is no open-loop fallback, so the result tells you the grasp was never aligned. Only works for the 7 YOLO battery classes — the hand detector knows nothing else. |
+| `visual_servo` | at the pre-grasp, close the loop on the arm's hand camera: translate (orientation frozen) until the object sits at a fixed setpoint in the camera optical frame — `VISUAL_SERVO_TARGET_XY_M` = (+12, 0) mm laterally, `VISUAL_SERVO_DEPTH_M` = 0.10 m in range — then close **there** instead of running the contact descent. Tolerances are **per axis**, because the camera axes mean different things to a parallel gripper: 1 mm across the jaws (optical X — what a grasp depends on), 2 mm in range (optical Z — whether the jaws close around the part or above it), 5 mm along the jaws (optical Y — the jaws span 106 mm, so this is the forgiving one). 90 s budget (~50 corrections), and it gives up early if the error stops improving. If it loses sight of the object for 5 s, **or** reads it closer than 5.5 cm on two consecutive frames, it backs straight up 5 cm (pelvis +Z) and keeps servoing — up to twice between the two cases. If it still can't converge the skill **aborts** — there is no open-loop fallback, so the result tells you the grasp was never aligned. Only works for the 7 YOLO battery classes — the hand detector knows nothing else. |
 
 Small battery-workcell parts (`Bolt`, `BusBar`, `InteriorScrew`, `Nut`,
 `OrageCover`, `Screw`, `ScrewHole`) are routed to the head-camera YOLO detector
@@ -90,6 +90,65 @@ the match is on `target_object`.
 The full sequence runs: pre-grasp standoff → contact move (`APPROACH_DIST −
 CONTACT_OFFSET` = 7.5 cm along the approach) → force close at
 `base.GRIP_FORCE_N`. It does **not** lift afterwards.
+
+---
+
+## Pick and place (`/skill/pick_place`)
+
+Grasp a named object, carry it, place it on a named destination and release.
+Internally sends its own `/skill/grasp` goal, so everything the grasp section
+above says about detection routing still applies to `target_object`. Like
+`/skill/grasp`, `arm` is optional — `""`, `"none"`, or omitting it entirely
+lets the grasp skill pick the arm nearest the object, and the carry/place/release
+motions then follow whichever hand it chose.
+
+```bash
+# auto arm, top-down + visual servo pick of a battery-workcell screw onto a plate.
+# No timeout -> runs to completion (see the budget note below); Ctrl-C cancels.
+ros2 action send_goal /skill/pick_place custom_ros_messages/action/SkillPickPlace \
+  "{target_object: 'Screw', place_target: 'plate', top_down: true, visual_servo: true}" \
+  --feedback
+```
+
+```bash
+# explicit right arm, graspgen candidates (no orientation bias)
+ros2 action send_goal /skill/pick_place custom_ros_messages/action/SkillPickPlace \
+  "{target_object: 'mug', place_target: 'sink', arm: 'right', timeout: {sec: 300, nanosec: 0}}" \
+  --feedback
+```
+
+Optional goal fields (omit / `false` = off):
+
+| Field | Meaning |
+|---|---|
+| `arm` | `""` / `"none"` / omitted = auto: the grasp skill takes the arm whose gripper is currently closest to the object. Anything other than `left`/`right`/empty aborts the goal. |
+| `top_down` | forwarded verbatim to the inner `/skill/grasp` — same 80°-below-horizontal synthetic grasp, same reachability caveat as the grasp table above. **Also changes the place:** instead of lowering the object onto the target, the graspgenx frame goes to `TOP_DOWN_PLACE_HEIGHT` = 25 cm straight above the place point and releases, so the object is dropped the remaining ~14 cm (the fingers sit ~11 cm below that frame). Off by default: the normal place descent is vertical and grasp-agnostic. |
+| `visual_servo` | forwarded verbatim to the inner `/skill/grasp` — same hand-camera alignment and the same abort-on-failure behavior. Off by default. ⚠️ Budget: the servo alone can take 90 s, and pick_place spends its Gemini place-target detect *before* the grasp, so prefer omitting `timeout` (run to completion) when using this. |
+
+The `place_target` is located with Gemini + SAM (not YOLO, whatever
+`target_object` routes to) and its **top face** becomes the drop point, anchored
+in the `camera_init` world frame so pelvis drift during the long grasp doesn't
+move it. The object lands in its pick-time orientation.
+
+Sequence: detect place target → grasp → lift 10 cm in 5 cm hops → transit to a
+10 cm standoff above the release pose → vertical descent → release 3 cm above
+rest height → back the fingers out 15 cm along the reverse approach.
+
+With `top_down: true` the release pose changes only in *where* it is — the
+graspgenx frame goes 25 cm above the place point rather than to a computed
+set-down pose. Everything else (lift, standoff, descent, retreat) is unchanged.
+
+**Budget:** the last 60 s of `timeout` (`PLACE_RESERVE_SEC`) are reserved for
+carry/place/release, so a slow Gemini detect can't starve the placement half —
+the inner grasp gets everything else. Omit `timeout` to run to completion; the
+reserve is then moot (there is no finite budget to split) and the inner grasp is
+handed "no deadline" too.
+
+⚠️ With `visual_servo`, a finite `timeout` is easy to under-set. The place-target
+Gemini detect runs BEFORE the grasp and can take ~3 min on its own, then 60 s
+comes off for the reserve — so a 300 s goal can leave the inner grasp less than
+the servo's own 90 s budget. The servo then gets cut off by the goal deadline and
+aborts, which reads as a servo failure when it is really budget starvation.
 
 ---
 
