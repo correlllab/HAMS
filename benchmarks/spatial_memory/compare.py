@@ -52,6 +52,7 @@ COMPARISON_METRICS = [
 
 RUN_METADATA_FIELDS = [
     (("wall_time_seconds",), "Wall time", "seconds"),
+    (("resumption", "attempt_count"), "Run attempts", "integer"),
     (("resources", "process_peak_rss_bytes"), "Process peak RAM", "bytes"),
     (("resources", "storage", "adapter_state_bytes"), "Adapter state", "bytes"),
     (("adapter", "vlm", "logical_calls"), "VLM logical calls", "integer"),

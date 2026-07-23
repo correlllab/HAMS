@@ -428,6 +428,31 @@ episodes and 15 calls). Set a smaller subset with `--max-episodes`, or explicitl
 raise `--vlm-call-limit` only after checking the available quota. It is not the
 default because every streaming VLM query consumes API quota.
 
+### Resume an interrupted evaluation
+
+The evaluator atomically writes one episode result under
+`<report>/checkpoints/episodes/` before starting the next episode. It also keeps
+attempt-level runtime and API metadata, so resumed runs report combined token,
+cost, error, and wall-time totals rather than only the final process.
+
+Resume with the same adapter, Top-K, episode selection, and adapter options:
+
+```bash
+docker/scripts/spatial_memory_camera.sh benchmark-eval \
+  --benchmark-name spatial_memory_20ep_256_paired_v1 \
+  --adapter embodied_agent_vlm \
+  --recall-k 12 \
+  --top-k 3 \
+  --vlm-call-limit 200 \
+  --resume /path/to/incomplete/report
+```
+
+The report directory may be an absolute host path, a path below the selected
+benchmark directory, or the `/data/...` path printed by the container. Before
+making another API call, resume verifies the benchmark-manifest SHA-256,
+adapter name/options, Top-K, and selected episode IDs. The VLM safety check
+counts only unfinished episodes. A completed report cannot be resumed.
+
 To compare another method, implement
 `benchmarks.spatial_memory.adapter.MemoryAdapter` (`reset`, `ingest`, `query`,
 and `close`) and select it by import path:

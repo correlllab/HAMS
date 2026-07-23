@@ -140,6 +140,15 @@ def _run_metadata_rows(report: dict) -> list[tuple[str, str]]:
         ("HAMS commit", _git_label(_nested(metadata, "software", "hams"))),
         ("EmbodiedAgent commit", _git_label(_nested(metadata, "software", "embodied_agent"))),
     ]
+    resumption = metadata.get("resumption")
+    if isinstance(resumption, dict):
+        rows.extend([
+            ("Run attempts", str(int(resumption.get("attempt_count", 1)))),
+            (
+                "Checkpointed episodes",
+                str(int(resumption.get("checkpointed_episode_count", 0))),
+            ),
+        ])
     vlm = _nested(metadata, "adapter", "vlm")
     if isinstance(vlm, dict):
         rows.extend([

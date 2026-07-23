@@ -75,6 +75,7 @@ BENCHMARK_ADAPTER_OPTION_USED=0
 BENCHMARK_ADAPTER_KWARGS_OPTION_USED=0
 BENCHMARK_MAX_EPISODES=""
 BENCHMARK_KEEP_STATE=0
+BENCHMARK_RESUME=""
 BENCHMARK_VLM_CALL_LIMIT="${SPATIAL_VLM_CALL_LIMIT:-20}"
 BENCHMARK_VLM_PREFLIGHT_DONE=0
 BENCHMARK_COMPARE_ADAPTERS="vlmaps,embodied_agent,latest_only"
@@ -170,7 +171,8 @@ Object-relocation benchmark options:
   --adapter-kwargs JSON   constructor kwargs for a custom adapter
   --max-episodes N        evaluate only the first N episodes
   --keep-state            retain generated memory and FAISS files in the report
-  --vlm-call-limit N       scheduled VLM-call safety cap (default: 20)
+  --resume REPORT_DIR     resume an interrupted benchmark-eval report
+  --vlm-call-limit N      scheduled VLM-call safety cap (default: 20)
   --compare-adapters A,... latest runs to compare (default: vlmaps,
                            embodied_agent,latest_only)
 
@@ -183,6 +185,9 @@ Examples:
   docker/scripts/spatial_memory_camera.sh benchmark-eval --max-episodes 1
   docker/scripts/spatial_memory_camera.sh benchmark-eval \
     --adapter embodied_agent_vlm --recall-k 12 --top-k 3 --max-episodes 1
+  docker/scripts/spatial_memory_camera.sh benchmark-eval \
+    --adapter embodied_agent_vlm --recall-k 12 --top-k 3 \
+    --resume /path/to/incomplete/report
   docker/scripts/spatial_memory_camera.sh benchmark-eval \
     --adapter latest_only --top-k 3
   docker/scripts/spatial_memory_camera.sh benchmark-eval \
@@ -267,6 +272,7 @@ parse_options() {
             --adapter-kwargs) [[ $# -ge 2 ]] || die "--adapter-kwargs needs a value"; BENCHMARK_ADAPTER_KWARGS="$2"; BENCHMARK_ADAPTER_KWARGS_OPTION_USED=1; shift 2 ;;
             --max-episodes) [[ $# -ge 2 ]] || die "--max-episodes needs a value"; BENCHMARK_MAX_EPISODES="$2"; shift 2 ;;
             --keep-state) BENCHMARK_KEEP_STATE=1; shift ;;
+            --resume) [[ $# -ge 2 ]] || die "--resume needs a report directory"; BENCHMARK_RESUME="$2"; shift 2 ;;
             --vlm-call-limit) [[ $# -ge 2 ]] || die "--vlm-call-limit needs a value"; BENCHMARK_VLM_CALL_LIMIT="$2"; shift 2 ;;
             --compare-adapters) [[ $# -ge 2 ]] || die "--compare-adapters needs a value"; BENCHMARK_COMPARE_ADAPTERS="$2"; shift 2 ;;
             --replace) REPLACE=1; shift ;;
@@ -660,6 +666,30 @@ run_benchmark_setup() {
     note "benchmark contact sheets: $host_benchmark/episodes/*/contact_sheet.jpg"
 }
 
+benchmark_resume_host_dir() {
+    [[ -n "$BENCHMARK_RESUME" ]] || return 0
+    local host_benchmark candidate resolved
+    host_benchmark="$(benchmark_host_dir)"
+    if [[ "$BENCHMARK_RESUME" == /data/* ]]; then
+        candidate="$host_benchmark/${BENCHMARK_RESUME#/data/}"
+    elif [[ "$BENCHMARK_RESUME" == /* ]]; then
+        candidate="$BENCHMARK_RESUME"
+    else
+        candidate="$host_benchmark/$BENCHMARK_RESUME"
+    fi
+    [[ -d "$candidate" ]] || die "resume report directory not found: $candidate"
+    resolved="$(cd -- "$candidate" && pwd -P)"
+    case "$resolved/" in
+        "$host_benchmark/"*) ;;
+        *) die "resume report must be inside the selected benchmark: $host_benchmark" ;;
+    esac
+    [[ -f "$resolved/checkpoints/run.json" ]] \
+        || die "resume checkpoint config not found: $resolved/checkpoints/run.json"
+    [[ ! -f "$resolved/results.json" ]] \
+        || die "benchmark report is already complete: $resolved"
+    printf '%s\n' "$resolved"
+}
+
 enforce_benchmark_vlm_call_limit() {
     local host_benchmark
     host_benchmark="$(benchmark_host_dir)"
@@ -675,6 +705,9 @@ enforce_benchmark_vlm_call_limit() {
     )
     [[ -n "$BENCHMARK_MAX_EPISODES" ]] \
         && command+=(--max-episodes "$BENCHMARK_MAX_EPISODES")
+    if [[ -n "$BENCHMARK_RESUME" ]]; then
+        command+=(--resume-output "$(benchmark_resume_host_dir)")
+    fi
     local scheduled_calls selected_episodes safe_episodes safe_calls
     read -r scheduled_calls selected_episodes safe_episodes safe_calls \
         < <("${command[@]}")
@@ -793,6 +826,12 @@ PY
     [[ -n "$BENCHMARK_MAX_EPISODES" ]] \
         && command+=(--max-episodes "$BENCHMARK_MAX_EPISODES")
     [[ "$BENCHMARK_KEEP_STATE" == 1 ]] && command+=(--keep-state)
+    if [[ -n "$BENCHMARK_RESUME" ]]; then
+        local resume_host resume_relative
+        resume_host="$(benchmark_resume_host_dir)"
+        resume_relative="${resume_host#"$host_benchmark"/}"
+        command+=(--resume "/data/$resume_relative")
+    fi
     note "evaluating streaming memory adapter=$BENCHMARK_ADAPTER top_k=$TOP_K"
     "${command[@]}"
     note "benchmark reports: $host_benchmark/reports"
@@ -877,6 +916,9 @@ main() {
             && "$RERANK_OPTIONS_USED" == 1 ]]; then
         die "VLM options are accepted only by rerank, benchmark, benchmark-eval, or benchmark-suite"
     fi
+    if [[ -n "$BENCHMARK_RESUME" && "$command" != benchmark-eval ]]; then
+        die "--resume is accepted only by benchmark-eval"
+    fi
 
     case "$command" in
         all)
@@ -931,7 +973,7 @@ main() {
             ;;
         benchmark)
             [[ "$REBUILD" == 0 && -z "$LIVE_SESSION" && -z "$EXPECT_LIVE_SESSION" \
-               && ${#QUERIES[@]} -eq 0 ]] \
+               && -z "$BENCHMARK_RESUME" && ${#QUERIES[@]} -eq 0 ]] \
                 || die "benchmark does not accept rebuild, live-session, validation, or query options"
             acquire_benchmark_lock
             run_benchmark_setup
@@ -939,7 +981,7 @@ main() {
             ;;
         benchmark-setup)
             [[ "$REBUILD" == 0 && -z "$LIVE_SESSION" && -z "$EXPECT_LIVE_SESSION" \
-               && ${#QUERIES[@]} -eq 0 ]] \
+               && -z "$BENCHMARK_RESUME" && ${#QUERIES[@]} -eq 0 ]] \
                 || die "benchmark-setup does not accept rebuild, live-session, validation, or query options"
             acquire_benchmark_lock
             run_benchmark_setup
@@ -953,14 +995,16 @@ main() {
             ;;
         benchmark-suite)
             [[ "$REPLACE" == 0 && "$REBUILD" == 0 && -z "$LIVE_SESSION" \
-               && -z "$EXPECT_LIVE_SESSION" && ${#QUERIES[@]} -eq 0 ]] \
+               && -z "$EXPECT_LIVE_SESSION" && -z "$BENCHMARK_RESUME" \
+               && ${#QUERIES[@]} -eq 0 ]] \
                 || die "benchmark-suite does not accept replace, rebuild, session, validation, or query options"
             acquire_benchmark_lock
             run_benchmark_suite
             ;;
         benchmark-compare)
             [[ "$REPLACE" == 0 && "$REBUILD" == 0 && -z "$LIVE_SESSION" \
-               && -z "$EXPECT_LIVE_SESSION" && ${#QUERIES[@]} -eq 0 ]] \
+               && -z "$EXPECT_LIVE_SESSION" && -z "$BENCHMARK_RESUME" \
+               && ${#QUERIES[@]} -eq 0 ]] \
                 || die "benchmark-compare does not accept replace, rebuild, session, validation, or query options"
             acquire_benchmark_lock
             run_benchmark_compare
