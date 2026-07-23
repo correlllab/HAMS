@@ -107,30 +107,69 @@ def _torch_module():
         return None
 
 
-def _reset_gpu_peak() -> None:
+def _reset_gpu_peak() -> dict:
     torch = _torch_module()
-    if torch is None or not torch.cuda.is_available():
-        return
-    for index in range(torch.cuda.device_count()):
-        torch.cuda.reset_peak_memory_stats(index)
+    if torch is None:
+        return {"attempted": False, "successful": False, "error": None}
+    try:
+        if not torch.cuda.is_available():
+            return {"attempted": False, "successful": False, "error": None}
+        # On recent GPUs, device_count/current_device can succeed before the CUDA
+        # memory allocator exists. Explicit initialization avoids an otherwise
+        # surprising ``Invalid device argument`` from reset_peak_memory_stats.
+        torch.cuda.init()
+        for index in range(torch.cuda.device_count()):
+            torch.cuda.reset_peak_memory_stats(index)
+        return {"attempted": True, "successful": True, "error": None}
+    except Exception as error:
+        # Telemetry must never prevent the benchmark itself from running.
+        return {
+            "attempted": True,
+            "successful": False,
+            "error": f"{type(error).__name__}: {error}"[:500],
+        }
 
 
 def _gpu_metadata() -> dict:
     torch = _torch_module()
     if torch is None:
         return {"available": False, "device_count": 0, "devices": []}
-    available = bool(torch.cuda.is_available())
+    try:
+        available = bool(torch.cuda.is_available())
+    except Exception as error:
+        return {
+            "available": False,
+            "device_count": 0,
+            "devices": [],
+            "error": f"{type(error).__name__}: {error}"[:500],
+        }
     devices = []
     if available:
-        for index in range(torch.cuda.device_count()):
-            properties = torch.cuda.get_device_properties(index)
-            devices.append({
-                "index": index,
-                "name": properties.name,
-                "total_memory_bytes": int(properties.total_memory),
-                "peak_allocated_bytes": int(torch.cuda.max_memory_allocated(index)),
-                "peak_reserved_bytes": int(torch.cuda.max_memory_reserved(index)),
-            })
+        try:
+            device_count = int(torch.cuda.device_count())
+        except Exception as error:
+            return {
+                "available": True,
+                "device_count": 0,
+                "devices": [],
+                "error": f"{type(error).__name__}: {error}"[:500],
+            }
+        for index in range(device_count):
+            try:
+                properties = torch.cuda.get_device_properties(index)
+                devices.append({
+                    "index": index,
+                    "name": properties.name,
+                    "total_memory_bytes": int(properties.total_memory),
+                    "peak_allocated_bytes": int(torch.cuda.max_memory_allocated(index)),
+                    "peak_reserved_bytes": int(torch.cuda.max_memory_reserved(index)),
+                })
+            except Exception as error:
+                devices.append({
+                    "index": index,
+                    "name": "unavailable",
+                    "error": f"{type(error).__name__}: {error}"[:500],
+                })
     return {
         "available": available,
         "device_count": len(devices),
@@ -174,7 +213,7 @@ class RunMetadataCollector:
         self.started_at = _utc_now()
         self.started_perf = time.perf_counter()
         self.dataset_storage = _dataset_storage(self.dataset_dir)
-        _reset_gpu_peak()
+        self.gpu_peak_reset = _reset_gpu_peak()
 
     def finish(
         self,
@@ -203,6 +242,8 @@ class RunMetadataCollector:
             self.hams_root, "EmbodiedAgent", "/opt/EmbodiedAgent"
         )
         vlmaps_root = _discover_repo(self.hams_root, "vlmaps", "/opt/vlmaps")
+        gpu_metadata = _gpu_metadata()
+        gpu_metadata["peak_stats_reset"] = self.gpu_peak_reset
         metadata = {
             "schema_version": 1,
             "status": status,
@@ -232,7 +273,7 @@ class RunMetadataCollector:
             },
             "resources": {
                 "process_peak_rss_bytes": _peak_rss_bytes(),
-                "gpu": _gpu_metadata(),
+                "gpu": gpu_metadata,
                 "storage": {
                     **self.dataset_storage,
                     **_state_storage(Path(state_root)),
