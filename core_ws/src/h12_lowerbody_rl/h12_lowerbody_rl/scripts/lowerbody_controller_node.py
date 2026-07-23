@@ -61,6 +61,7 @@ from h12_lowerbody_rl.policy import (
     NUM_LEG_JOINTS,
     NUM_POLICY_JOINTS,
     AlmiPolicy,
+    Almi27Policy,
     FamePolicy,
     LegCommand,
     RobotState,
@@ -87,10 +88,12 @@ ALMI = "almi"   # ALMI LSTM policy: superb stand (incl. under arm motion), but
                 # ever trained with the command present from episode start) —
                 # so under auto_switch it serves as a STAND policy and hands
                 # locomotion to walk, exactly like fame does.
+ALMI27 = "almi27"  # wrist-inclusive ALMI (27-DoF/77-d obs, trained adversarially
+                   # under full arm+wrist motion); same stand role as ALMI.
 
 # Policies that can serve as the auto-switch stand side. The locomotion side
 # is always the walk policy (the proven velocity tracker).
-STAND_CAPABLE = (FAME, ALMI)
+STAND_CAPABLE = (FAME, ALMI, ALMI27)
 
 # Pre-pose: before engaging the policy, PD-drive the legs to the incoming policy's
 # nominal crouch (band-held) and wait until they settle there. The RMA policy warms
@@ -125,6 +128,7 @@ class LowerBodyControllerNode(Node):
         self.declare_parameter("walk_config", _share("policies", "walk", "walk.yaml"))
         self.declare_parameter("fame_config", _share("policies", "fame", "fame.yaml"))
         self.declare_parameter("almi_config", _share("policies", "almi", "almi.yaml"))
+        self.declare_parameter("almi27_config", _share("policies", "almi27", "almi27.yaml"))
         # IMU mounting/calibration trim (deg): what the raw quaternion reads
         # when the torso is known to be level (e.g. measured hanging plumb).
         # Positive pitch = reads tilted forward, positive roll = tilted right.
@@ -178,6 +182,7 @@ class LowerBodyControllerNode(Node):
         walk_cfg = self.get_parameter("walk_config").value
         fame_cfg = self.get_parameter("fame_config").value
         almi_cfg = self.get_parameter("almi_config").value
+        almi27_cfg = self.get_parameter("almi27_config").value
         self._imu_corr = self._build_imu_corr()
         self.add_on_set_parameters_callback(self._on_set_parameters)
         self._height_cmd = float(self.get_parameter("default_height_cmd").value)
@@ -194,6 +199,7 @@ class LowerBodyControllerNode(Node):
             "walk": WalkPolicy(walk_cfg),
             "fame": FamePolicy(fame_cfg),
             "almi": AlmiPolicy(almi_cfg),
+            "almi27": Almi27Policy(almi27_cfg),
         }
         if not policies["fame"].has_encoder:
             self.get_logger().warn(

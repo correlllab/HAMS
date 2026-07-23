@@ -79,6 +79,7 @@ def generate_launch_description():
         # sim option right now, which is why the default is 'almi'. Only the SIM
         # bringup defaults to almi; the real-robot bringup still defaults to mjpc
         # behind the start_position_verified interlock.
+        DeclareLaunchArgument('lowerbody', default_value='almi'),  # almi | almi27 | fame | walk
         DeclareLaunchArgument('model_logging', default_value='true'),
         DeclareLaunchArgument('model_visualization', default_value='true'),
         DeclareLaunchArgument('model_clear_logs', default_value='true'),
@@ -163,7 +164,7 @@ def generate_launch_description():
             executable='lowerbody_controller_node',
             name='lowerbody_controller_node',
             parameters=[sim_time_param,
-                        {'active_policy':"almi",  # almi/fame/walk
+                        {'active_policy': LaunchConfiguration('lowerbody'),  # almi/almi27/fame/walk
                          # Sim auto-engages after the pre-pose settles (unattended
                          # runs); the operator-confirm arming gate is a REAL-robot
                          # step (see h1_real_desktop_bringup.launch.py).
