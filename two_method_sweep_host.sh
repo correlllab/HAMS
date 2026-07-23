@@ -278,11 +278,15 @@ fresh_env() {
   # Third-person mp4 of the WHOLE env epoch (streamed, fragmented — survives
   # the docker rm between envs; VideoRecorder failure just disables video,
   # never the sim). One file per env, timestamped, next to the trial data.
+  # NOTE the 9>&- on both compose launches: these children outlive the script
+  # (they stay attached to the containers), and without closing fd 9 they
+  # inherit the flock and deadlock the NEXT invocation ("REFUSING ... holds
+  # the lock" — hit at the hanging->standing cell handoff, 2026-07-23 07:36).
   VIDEO_PATH="$OUTROOT/sim_$(date +%m%d_%H%M%S).mp4"
-  echo "$PW" | sudo -S -E bash -c "cd '$SIM_REPO' && bash docker/scripts/docker_run.sh robocasa --task OpenFridge --seed 42 --record-video '$VIDEO_PATH'" > /tmp/sim_batch.log 2>&1 &
+  echo "$PW" | sudo -S -E bash -c "cd '$SIM_REPO' && bash docker/scripts/docker_run.sh robocasa --task OpenFridge --seed 42 --record-video '$VIDEO_PATH'" > /tmp/sim_batch.log 2>&1 9>&- &
   echo "[env] third-person video -> $VIDEO_PATH"
   for k in $(seq 1 60); do sudo_do docker logs hams_sim_robocasa 2>&1 | grep -q "ROS bridges up" && break; sleep 3; done
-  echo "$PW" | sudo -S -E bash docker/scripts/docker_run.sh ros sleep infinity > /tmp/ros_batch.log 2>&1 &
+  echo "$PW" | sudo -S -E bash docker/scripts/docker_run.sh ros sleep infinity > /tmp/ros_batch.log 2>&1 9>&- &
   for k in $(seq 1 40); do sudo_do docker ps --format '{{.Names}}' | grep -q hams_ros && break; sleep 2; done
   sudo_do docker cp "$HELPER_DIR/grab_head.py" hams_ros:/tmp/grab_head.py
   sudo_do docker cp "$HELPER_DIR/trial_recorder.py" hams_ros:/tmp/trial_recorder.py

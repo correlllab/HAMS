@@ -31,6 +31,18 @@ if ! flock -n 8; then
 fi
 
 run_cell() {  # $1=tier-name $2=policy $3=rand $4=methods
+  # Re-entrancy fast-path: if EVERY method in this cell already has N trial
+  # JSONs (host view), skip the cell outright — a resumed grid should not pay
+  # 3 env rebuilds just to discover there is nothing to do.
+  local HOST_TIER="/home/guest/Downloads/HAMS-test-grasping/core_ws/benchmark_results/sweep_paper/$1"
+  local done_all=1 m
+  for m in $4; do
+    [ "$(ls "$HOST_TIER/$m"/trial_*.json 2>/dev/null | wc -l)" -lt "$N" ] && { done_all=0; break; }
+  done
+  if [ "$done_all" = 1 ]; then
+    echo "[grid] cell '$1' already complete (N=$N per method) — skipping"
+    return 0
+  fi
   echo "[grid] === cell tier=$1 methods='$4' N=$N $(date +%H:%M:%S) ==="
   UNFROZEN_N=$N UNFROZEN_POLICY="$2" UNFROZEN_RAND="$3" \
   UNFROZEN_METHODS="$4" UNFROZEN_OUT="$OUTBASE/$1" \
