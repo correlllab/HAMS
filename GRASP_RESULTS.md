@@ -10,12 +10,21 @@ JSON, 10 Hz telemetry CSV, rosbag, servo log, and head snapshot. Figures:
 
 ## Headline table — success / 30 (Wilson 95% CI)
 
-| method | frozen (rigid pin) | hanging (compliant tether) | **standing (ALMI RL balance)** |
-|---|---|---|---|
-| centroid | 0/30 (0–11%) | 4/30 (5–30%) | **24/30 (63–90%)** |
-| pca (top-down antipodal) | 0/30 (0–11%) | 19/30 (46–78%) | 8/30 (14–44%) |
-| graspgenx (raw) | 20/30 (49–81%) | 16/30 (36–70%) | 16/30 (36–70%) |
-| **skill (wrist-aware ranked)** | 19/30 (46–78%) | **29/30 (83–99%)** | **21/30 (52–83%)** |
+| method | hanging (compliant tether) | **standing (ALMI RL balance)** |
+|---|---|---|
+| centroid | *re-testing* † | **24/30 (63–90%)** |
+| pca (top-down antipodal) | 19/30 (46–78%) | 8/30 (14–44%) |
+| graspgenx (raw) | 16/30 (36–70%) | 16/30 (36–70%) |
+| **skill (wrist-aware ranked)** | **29/30 (83–99%)** | **21/30 (52–83%)** |
+
+† **centroid · hanging is being re-run.** The prior 4/30 used the *old*
+executor + Gemini perception, while standing used the world-anchored executor +
+GT crop — so 4/30 (hanging) vs 24/30 (standing) is a config artifact, not a base
+effect. The re-run matches standing's config (GT crop + world-anchored executor)
+on the compliant-tether base to give an apples-to-apples number. **Caveat:** the
+other hanging cells (pca/ggx/skill) still use the old executor + Gemini; a
+strictly fair hanging-vs-standing comparison requires re-running them the same
+way.
 
 ## Executor ablation — standing tier
 
@@ -29,15 +38,10 @@ differs.
 | graspgenx | 0/20 | 16/30 |
 | skill | 12/20 | 21/30 |
 
-## Perception control — frozen base + ground-truth crop
-
-| method | frozen + Gemini perception | frozen + GT crop (control) |
-|---|---|---|
-| centroid | 0/30 | 0/20 |
-| pca | 0/30 | 0/20 |
-
-Ground-truth aiming alone does not rescue the baselines on the frozen base: they
-reach the bar (fingertip 15–75 mm from the bar axis) but never commit a grasp.
+*(Frozen tier removed from the study per decision 2026-07-23; the frozen +
+GT-crop control that showed baselines still 0/20 with perfect aiming is retained
+in the archived data as evidence that standing gains come from executor + stance,
+not perception.)*
 
 ## Grasp-quality metrics (standing successes)
 

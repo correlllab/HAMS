@@ -20,8 +20,9 @@ POLICY="${UNFROZEN_POLICY:-}"
 SP=/tmp/claude-1001/-home-guest-Downloads-HAMS-test-grasping/9645ef6d-75d8-4b70-b59a-82ef7165e409/scratchpad
 
 # Tier knobs (defaults keep the hanging tier byte-identical to its final run)
-if [ -n "$POLICY" ]; then
-  ATTEMPT_PAUSE=3; BRIGHT_MIN=140; DEPTH_MAX=0.75; MAXATT=8; SKILL_ATT=12
+if [ -n "$POLICY" ] || [ "${FORCE_WSRV:-0}" = "1" ]; then
+  # policy tier AND the band+world-executor re-run share the standing executor knobs
+  ATTEMPT_PAUSE=3; BRIGHT_MIN=0; DEPTH_MAX=0; MAXATT=8; SKILL_ATT=12
   FF_LIN=0.08; FF_ANG=0.35; SRV_ITER=4; SRV_DUR=15
 else
   ATTEMPT_PAUSE=0; BRIGHT_MIN=0; DEPTH_MAX=0; MAXATT=20; SKILL_ATT=40
@@ -36,9 +37,9 @@ LSTM_STATE_HOST=/home/guest/Downloads/HAMS-test-grasping/core_ws/.almi_lstm.pt
 # ramped — hands off mid-named_config with a PD setpoint mismatch that yanks
 # the free base (2.3 m catapult). The arm is instead PRE-HOMED UNDER FREEZE in
 # fresh_env/retether, so go_home's named_config starts from home = trivial.
-if [ -n "$POLICY" ]; then NO_PIN=1; G_OFF=0.06; else NO_PIN=0; G_OFF=0.0; fi
+if [ -n "$POLICY" ] || [ "${FORCE_WSRV:-0}" = "1" ]; then NO_PIN=1; G_OFF=0.06; else NO_PIN=0; G_OFF=0.0; fi
 if [ -n "$POLICY" ] || [ "${FORCE_GT:-0}" = "1" ]; then BOX_ARGS="--box-source gt"; GT_ENV="HAMS_GRASP_BOX_SOURCE=gt HAMS_GRASP_GT_NAME=door_obj HAMS_GRASP_GT_WORLD=$GT_WORLD"; else BOX_ARGS=""; GT_ENV=""; fi
-if [ -n "$POLICY" ]; then W_SRV=1; else W_SRV=0; fi
+if [ -n "$POLICY" ] || [ "${FORCE_WSRV:-0}" = "1" ]; then W_SRV=1; else W_SRV=0; fi
 TRIAL_ENV="HAMS_BENCH_WORLD_SERVO=$W_SRV HAMS_GRASP_OFFSET=$G_OFF HAMS_NO_SIM_ARM_RESET=$NO_PIN HAMS_GRASP_GT_WORLD=$GT_WORLD HAMS_ATTEMPT_PAUSE=$ATTEMPT_PAUSE HAMS_MASK_BRIGHTNESS_MIN=$BRIGHT_MIN HAMS_TARGET_MAX_DEPTH=$DEPTH_MAX HAMS_SERVO_FASTFAIL_LIN=$FF_LIN HAMS_SERVO_FASTFAIL_ANG=$FF_ANG HAMS_SERVO_MAX_ITER=$SRV_ITER HAMS_SERVO_DURATION=$SRV_DUR"
 
 sudo_do() { echo "$PW" | sudo -S "$@" 2>/dev/null; }
@@ -175,10 +176,19 @@ fresh_env() {
   else
     sed -i 's/^HAMS_STANCE=.*/HAMS_STANCE=/' docker/.env
     sed -i "s/^HAMS_FREEZE_BODY=.*/HAMS_FREEZE_BODY=${FORCE_FREEZE:-0}/" docker/.env
-    sed -i 's/^HAMS_SIM_ODOM=.*/HAMS_SIM_ODOM=0/' docker/.env
+    # FORCE_WSRV: band base runs the SAME world-anchored executor as the standing
+    # tier -> needs the GT odom (camera_init anchor) and matching sim-speed knobs,
+    # so the only difference from standing is the base condition itself.
+    if [ "${FORCE_WSRV:-0}" = "1" ]; then
+      sed -i 's/^HAMS_SIM_ODOM=.*/HAMS_SIM_ODOM=1/' docker/.env
+      sed -i 's/^HAMS_CAMERAS=.*/HAMS_CAMERAS=head/' docker/.env
+      sed -i 's/^HAMS_LIDAR=.*/HAMS_LIDAR=0/' docker/.env
+    else
+      sed -i 's/^HAMS_SIM_ODOM=.*/HAMS_SIM_ODOM=0/' docker/.env
+      sed -i 's/^HAMS_CAMERAS=.*/HAMS_CAMERAS=1/' docker/.env
+      sed -i 's/^HAMS_LIDAR=.*/HAMS_LIDAR=1/' docker/.env
+    fi
     sed -i 's/^HAMS_ARM_RESET_RAMP=.*/HAMS_ARM_RESET_RAMP=0/' docker/.env
-    sed -i 's/^HAMS_CAMERAS=.*/HAMS_CAMERAS=1/' docker/.env
-    sed -i 's/^HAMS_LIDAR=.*/HAMS_LIDAR=1/' docker/.env
     sed -i 's|^HAMS_STATE_PATH=.*|HAMS_STATE_PATH=|' docker/.env
   fi
   echo "$PW" | sudo -S -E bash docker/scripts/docker_run.sh robocasa --task OpenFridge --seed 42 > /tmp/sim_batch.log 2>&1 &
@@ -207,6 +217,13 @@ fresh_env() {
   done
   if [ $READY -ne 1 ]; then echo "[env] bringup NOT ready after 600s — retry env"; fresh_env; return; fi
   sleep 3
+  if [ -z "$POLICY" ] && [ "${FORCE_WSRV:-0}" = "1" ]; then
+    # band base, world-anchored executor: publish the same camera_init->odom
+    # anchor the policy tier uses (GT odom supplies odom->pelvis), then the
+    # non-policy main loop proceeds normally (no engage/settle).
+    in_ros_d "ros2 run tf2_ros static_transform_publisher --frame-id camera_init --child-frame-id odom --x 0 --y 0 --z 0 > /dev/null 2>&1"
+    sleep 3
+  fi
   if [ -n "$POLICY" ]; then
     # world anchor for drift-compensated servoing (camera_init -> odom identity)
     in_ros_d "ros2 run tf2_ros static_transform_publisher --frame-id camera_init --child-frame-id odom --x 0 --y 0 --z 0 > /dev/null 2>&1"
