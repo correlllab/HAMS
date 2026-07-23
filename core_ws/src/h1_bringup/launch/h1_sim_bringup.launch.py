@@ -117,6 +117,9 @@ def generate_launch_description():
             package='model_server',
             executable='gemini_server',
             name='gemini_server',
+            # GT-perception sweeps never call this server; skipping saves the
+            # model load + steady-state CPU/GPU (HAMS_SKIP_VLM_SERVERS=1).
+            condition=IfCondition('0' if os.environ.get('HAMS_SKIP_VLM_SERVERS', '0') == '1' else '1'),
             parameters=[sim_time_param, model_log_params],
             output='screen',
         ),
@@ -124,6 +127,9 @@ def generate_launch_description():
             package='model_server',
             executable='sam_server',
             name='sam_server',
+            # GT-perception sweeps never call this server; skipping saves the
+            # model load + steady-state CPU/GPU (HAMS_SKIP_VLM_SERVERS=1).
+            condition=IfCondition('0' if os.environ.get('HAMS_SKIP_VLM_SERVERS', '0') == '1' else '1'),
             parameters=[sim_time_param, model_log_params],
             output='screen',
         ),

@@ -60,7 +60,7 @@ from tf2_ros import TransformException
 from custom_ros_messages.action import NamedConfig, SkillGrasp
 from magpie_msgs.msg import GripperState
 
-from .base import SkillsBase, GRASP_FRAMES, MIN_GRASP_POINTS
+from .base import SkillsBase, GRASP_FRAMES, MIN_GRASP_POINTS, WORLD_FRAME
 from .perception_utils import (
     decode_compressed_depth_image, deproject_mask, transform_points,
     transform_to_matrix, mat_to_quat, pose_to_matrix,
@@ -249,6 +249,10 @@ class GraspBenchmark(SkillsBase):
         # Optional fixed WORLD point for the GT crop (HAMS_GRASP_GT_WORLD="x,y,z"):
         # used instead of the object's GT origin when that origin sits inside the
         # body but the graspable feature (handle bar) protrudes elsewhere.
+        # World-anchored execution (HAMS_BENCH_WORLD_SERVO=1): moves + hold are
+        # servoed against the fixed world target instead of a pelvis-frame one.
+        self._world_servo = os.environ.get('HAMS_BENCH_WORLD_SERVO', '0') == '1'
+        self._last_grasp_world = None
         self._gt_point = None
         _gw = os.environ.get('HAMS_GRASP_GT_WORLD', '').strip()
         if _gw:
@@ -480,6 +484,26 @@ class GraspBenchmark(SkillsBase):
         return self.mask_to_cloud(mask, target_frame='pelvis')
 
     # ------------------------------------------------------- grasp execution
+    def _snap_cloud_tf(self):
+        """Record T[world<-pelvis] at cloud-capture time (see detect path)."""
+        try:
+            from rclpy.time import Time as _T
+            from rclpy.duration import Duration as _D
+            self._cloud_tf = self.tf_buffer.lookup_transform(
+                WORLD_FRAME, 'pelvis', _T(), timeout=_D(seconds=1.0))
+        except Exception as e:
+            self._cloud_tf = None
+            self.get_logger().warn(f'_snap_cloud_tf failed: {e}')
+
+    def _pose_to_world_at_cloud_time(self, pose):
+        """pelvis Pose -> WORLD_FRAME using the transform captured when the
+        cloud (hence the candidate set) was made — NOT the current TF."""
+        if getattr(self, '_cloud_tf', None) is None:
+            return self._transform_pose(pose, 'pelvis', WORLD_FRAME)
+        from .base import transform_to_matrix, pose_to_matrix, matrix_to_pose
+        return matrix_to_pose(
+            transform_to_matrix(self._cloud_tf.transform) @ pose_to_matrix(pose))
+
     def execute(self, candidates, width_m=None):
         """Walk `candidates` [(Pose in pelvis, label), ...] best-first: pre-open,
         drive the graspgenx frame to the standoff then to the grasp, close.
@@ -506,18 +530,38 @@ class GraspBenchmark(SkillsBase):
             pose = _offset_along_z(raw_pose, self._grasp_offset)
             approach = _offset_along_z(pose, -APPROACH_DIST_M)
             self.get_logger().info(f'candidate {i} ({label}): trying pre-grasp')
-            if not self.move_frame_to(frame, approach, duration_sec=APPROACH_SEC,
-                                      lin_tol=PREGRASP_LIN_TOL,
-                                      ang_tol=PREGRASP_ANG_TOL,
-                                      do_plan=self._do_plan):
-                self.get_logger().warn(f'candidate {i} pre-grasp unreachable')
-                continue
-            # Contact move is best-effort: we already committed to a reachable
-            # standoff, so close even if the last few mm don't converge. Log the
-            # residual — a large one means the fingers close off-target and tend
-            # to knock the object rather than grip it.
-            contact_ok = self.move_frame_to(frame, pose, duration_sec=CONTACT_SEC,
-                                            do_plan=self._do_plan)
+            # HAMS_BENCH_WORLD_SERVO=1: execute via the SAME world-anchored
+            # drift-compensated servo the deployed skill uses. On a DYNAMIC base
+            # pelvis-frame targets are never corrected as the base moves, so the
+            # arm chases a smeared target (wander before contact) and the closed
+            # grip is sheared by sway (30+ mm aperture churn). Anchoring both
+            # the moves and the hold removes the executor as a confound between
+            # methods. Default off = legacy static-base behavior.
+            if self._world_servo:
+                a_w = self._pose_to_world_at_cloud_time(approach)
+                g_w = self._pose_to_world_at_cloud_time(pose)
+                if not self.servo_frame_to_world(
+                        frame, a_w, approach, duration_sec=APPROACH_SEC,
+                        lin_tol=PREGRASP_LIN_TOL, ang_tol=PREGRASP_ANG_TOL,
+                        do_plan=self._do_plan):
+                    self.get_logger().warn(f'candidate {i} pre-grasp unreachable')
+                    continue
+                contact_ok = self.servo_frame_to_world(
+                    frame, g_w, pose, duration_sec=CONTACT_SEC, do_plan=False)
+                self._last_grasp_world = g_w
+            else:
+                if not self.move_frame_to(frame, approach, duration_sec=APPROACH_SEC,
+                                          lin_tol=PREGRASP_LIN_TOL,
+                                          ang_tol=PREGRASP_ANG_TOL,
+                                          do_plan=self._do_plan):
+                    self.get_logger().warn(f'candidate {i} pre-grasp unreachable')
+                    continue
+                # Contact move is best-effort: we already committed to a reachable
+                # standoff, so close even if the last few mm don't converge. Log the
+                # residual — a large one means the fingers close off-target and tend
+                # to knock the object rather than grip it.
+                contact_ok = self.move_frame_to(frame, pose, duration_sec=CONTACT_SEC,
+                                                do_plan=self._do_plan)
             if not contact_ok:
                 self.get_logger().warn(
                     f'candidate {i}: contact move did not fully converge; '
@@ -797,6 +841,11 @@ class GraspBenchmark(SkillsBase):
             # handle-bar centre) instead of the object's GT origin — needed when
             # the origin sits inside the body (door_obj: 0 cloud pts within the
             # crop ball) while the graspable feature protrudes elsewhere.
+            # Stash the world<-pelvis transform AT CLOUD TIME: candidates are in
+            # the pelvis frame of THIS instant; converting them with a LATER TF
+            # (per-attempt) bakes the base's interim drift into the world target
+            # (measured: up to ~110 mm by candidate idx 2 on the standing tier).
+            self._snap_cloud_tf()
             if self._gt_point is not None:
                 return self._gt_point_cloud()
             return self._gt_cloud()
@@ -1142,6 +1191,15 @@ def main():
         time.sleep(1.0)
         g1 = node._grip_last.get(args.arm)
         g1_mm = g1[0] if g1 else None
+        # World-anchored HOLD: on a dynamic base, keep correcting the closed
+        # hand against the fixed world grasp pose during the settling window,
+        # exactly as the deployed skill holds — otherwise base sway shears a
+        # pelvis-held grip off the (world-fixed) handle while we grade it.
+        if getattr(node, '_world_servo', False) and node._last_grasp_world is not None:
+            node.servo_frame_to_world(
+                GRASP_FRAMES[args.arm], node._last_grasp_world,
+                node._last_grasp_pose, duration_sec=2.0, max_iter=1,
+                do_plan=False)
         time.sleep(2.0)
         now = node.gt_pos(args.gt_name)
         dz = float(now[2] - base[2]) if now is not None else 0.0
@@ -1151,8 +1209,12 @@ def main():
         gfinal = node._grip_last.get(args.arm)
         gfinal_mm = gfinal[0] if gfinal else None      # settled aperture after close
         in_band = lambda g: g is not None and CONTACT_MIN_HOLD_MM < g < CONTACT_MAX_HOLD_MM
+        # Direction-aware stability: fingers TIGHTENING onto the object between
+        # the two samples (aperture shrinking) is healthy seating, not slip —
+        # a slipping object forces the aperture OPEN or out of band. Fail only
+        # on opening >8 mm or a final aperture outside the hold band.
         holding = bool(in_band(g1_mm) and in_band(gfinal_mm)
-                       and abs(gfinal_mm - g1_mm) < 8.0)
+                       and (gfinal_mm - g1_mm) < 8.0)
         rec['grip_hold_early_mm'] = g1_mm
 
         # Geometric target check: fingertip (executed graspgenx frame + TCP depth)

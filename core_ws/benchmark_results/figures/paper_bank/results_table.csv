@@ -1,0 +1,5 @@
+method,frozen,frozen_ci,hanging,hanging_ci,standing,standing_ci,standing_old_exec
+centroid,0/30,0-11%,4/30,5-30%,24/30,63-90%,0/20
+pca (top-down),0/30,0-11%,19/30 SPLIT!,46-78%,8/30,14-44%,0/20
+graspgenx (raw),20/30,49-81%,16/30,36-70%,16/30,36-70%,0/20
+skill (ranked),19/30 SPLIT!,46-78%,29/30,83-99%,21/30,52-83%,12/20

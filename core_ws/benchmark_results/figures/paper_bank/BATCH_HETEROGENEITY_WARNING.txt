@@ -1,0 +1,2 @@
+frozen/skill: original 16/20 vs top-up 3/10 DISAGREE (Fisher p=0.0147) — DO NOT POOL; report separately and diagnose.
+hanging/topdown_antipodal: original 19/20 vs top-up 0/10 DISAGREE (Fisher p=0.0000) — DO NOT POOL; report separately and diagnose.

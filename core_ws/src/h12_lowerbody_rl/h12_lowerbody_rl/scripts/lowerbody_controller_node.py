@@ -115,6 +115,12 @@ class LowerBodyControllerNode(Node):
         self.declare_parameter("walk_config", _share("policies", "walk", "walk.yaml"))
         self.declare_parameter("fame_config", _share("policies", "fame", "fame.yaml"))
         self.declare_parameter("almi_config", _share("policies", "almi", "almi.yaml"))
+        # Spawn-at-ready support: path to a saved ALMI LSTM memory snapshot
+        # (paired with the sim qpos/qvel snapshot). If the file exists the
+        # memory is restored at construction, so the policy is converged from
+        # tick 0 and the 40 sim-s pinned warmup is unnecessary. Publish
+        # std_msgs/Empty on /hams/save_lstm to (re)write the snapshot.
+        self.declare_parameter("lstm_state_path", "")
         # IMU mounting/calibration trim (deg): what the raw quaternion reads
         # when the torso is known to be level (e.g. measured hanging plumb).
         # Positive pitch = reads tilted forward, positive roll = tilted right.
@@ -178,6 +184,16 @@ class LowerBodyControllerNode(Node):
             "fame": FamePolicy(fame_cfg),
             "almi": AlmiPolicy(almi_cfg),
         }
+        self._almi_policy = policies["almi"]
+        self._lstm_state_path = str(self.get_parameter("lstm_state_path").value or "")
+        if self._lstm_state_path and os.path.isfile(self._lstm_state_path):
+            try:
+                policies["almi"].load_memory(self._lstm_state_path)
+                self.get_logger().info(
+                    f"almi LSTM memory RESTORED from {self._lstm_state_path} "
+                    "(spawn-at-ready)")
+            except Exception as e:
+                self.get_logger().warn(f"LSTM restore failed ({e}); cold start")
         if not policies["fame"].has_encoder:
             self.get_logger().warn(
                 "FAME encoder not loaded — z_t will be zeros (out-of-distribution). "
@@ -223,6 +239,16 @@ class LowerBodyControllerNode(Node):
             f"auto_switch={self._auto_switch} (rise={self._auto_rise}, fall={self._auto_fall}), "
             f"control_hz={control_hz}. Policy follows /cmd_vel; no start services."
         )
+        from std_msgs.msg import Empty as _Empty
+        def _save_lstm(_m):
+            p = self._lstm_state_path or "/home/code/core_ws/.almi_lstm.pt"
+            try:
+                self._almi_policy.save_memory(p)
+                self.get_logger().info(f"almi LSTM memory SAVED to {p}")
+            except Exception as e:
+                self.get_logger().warn(f"LSTM save failed: {e}")
+        self.create_subscription(_Empty, "/hams/save_lstm", _save_lstm, 1)
+
 
         if startup_policy and startup_policy != "none":
             self.get_logger().info(f"active_policy={startup_policy!r}: auto-activating at startup")

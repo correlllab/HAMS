@@ -430,6 +430,23 @@ class AlmiPolicy(Policy):
 # --------------------------------------------------------------------------- #
 # FAME standing / squatting policy (RMA)
 # --------------------------------------------------------------------------- #
+    # --- LSTM memory checkpointing (spawn-at-ready support) -----------------
+    # The TorchScript module keeps hidden/cell state in named buffers; saving
+    # and restoring them (with the matching sim qpos/qvel snapshot) lets a run
+    # start from a converged standing state instead of a 40 sim-s warmup.
+    def save_memory(self, path):
+        import torch as _t
+        _t.save({k: v.detach().cpu().clone()
+                 for k, v in self._policy.named_buffers()}, path)
+
+    def load_memory(self, path):
+        import torch as _t
+        sd = _t.load(path)
+        with _t.no_grad():
+            for k, v in self._policy.named_buffers():
+                if k in sd:
+                    v.copy_(sd[k])
+
 class FamePolicy(Policy):
     """RMA loco-manipulation policy: env-factor encoder + history-conditioned actor.
 
