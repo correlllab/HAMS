@@ -8,10 +8,35 @@ class FakeGemini:
     def __init__(self, response):
         self.response = response
         self.calls = []
+        self.usage = {
+            "logical_calls": 0,
+            "api_attempts": 0,
+            "successful_calls": 0,
+            "responses_with_usage_metadata": 0,
+            "prompt_tokens": 0,
+            "candidate_tokens": 0,
+            "thought_tokens": 0,
+            "total_tokens": 0,
+        }
 
     def rerank_memory_candidates(self, **kwargs):
         self.calls.append(kwargs)
+        self.usage.update({
+            "logical_calls": self.usage["logical_calls"] + 1,
+            "api_attempts": self.usage["api_attempts"] + 1,
+            "successful_calls": self.usage["successful_calls"] + 1,
+            "responses_with_usage_metadata": (
+                self.usage["responses_with_usage_metadata"] + 1
+            ),
+            "prompt_tokens": self.usage["prompt_tokens"] + 100,
+            "candidate_tokens": self.usage["candidate_tokens"] + 20,
+            "thought_tokens": self.usage["thought_tokens"] + 5,
+            "total_tokens": self.usage["total_tokens"] + 125,
+        })
         return self.response
+
+    def usage_summary(self):
+        return dict(self.usage)
 
 
 def raw_candidate(frame_idx, score):
@@ -65,6 +90,7 @@ class SpatialMemoryVLMAdapterTests(unittest.TestCase):
             ],
         }
         adapter = self.make_adapter(response)
+        adapter.vlm_model = "gemini-3.5-flash"
         with patch.object(
             self.module, "retrieve_memory_candidates", return_value=self.recalled
         ) as retrieve:
@@ -75,6 +101,15 @@ class SpatialMemoryVLMAdapterTests(unittest.TestCase):
         self.assertEqual(result[0].metadata["score_label"], "VLM confidence")
         self.assertTrue(adapter.query_diagnostics()["rerank_valid"])
         self.assertEqual(retrieve.call_args.kwargs["top_k"], 12)
+        diagnostics = adapter.query_diagnostics()
+        self.assertEqual(diagnostics["vlm_usage_delta"]["logical_calls"], 1)
+        self.assertEqual(diagnostics["vlm_usage_delta"]["prompt_tokens"], 100)
+        metadata = adapter.run_metadata()
+        self.assertEqual(metadata["vlm"]["total_tokens"], 125)
+        self.assertAlmostEqual(
+            metadata["vlm"]["estimated_standard_cost_usd"],
+            (100 * 1.5 + 25 * 9.0) / 1_000_000,
+        )
 
     def test_invalid_vlm_response_falls_back_to_faiss_order(self):
         adapter = self.make_adapter({"ranked_ids": ["mem_000002"]})

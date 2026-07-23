@@ -50,6 +50,17 @@ COMPARISON_METRICS = [
     ("query_latency_ms_p50", "Query latency p50", "ms", "lower"),
 ]
 
+RUN_METADATA_FIELDS = [
+    (("wall_time_seconds",), "Wall time", "seconds"),
+    (("resources", "process_peak_rss_bytes"), "Process peak RAM", "bytes"),
+    (("resources", "storage", "adapter_state_bytes"), "Adapter state", "bytes"),
+    (("adapter", "vlm", "logical_calls"), "VLM logical calls", "integer"),
+    (("adapter", "vlm", "api_attempts"), "VLM API attempts", "integer"),
+    (("adapter", "vlm", "api_errors"), "VLM API errors", "integer"),
+    (("adapter", "vlm", "total_tokens"), "VLM total tokens", "integer"),
+    (("adapter", "vlm", "estimated_standard_cost_usd"), "Estimated standard cost", "usd"),
+]
+
 
 def _load(path: Path) -> dict:
     with open(path, encoding="utf-8") as file:
@@ -141,6 +152,33 @@ def _format_stats(stats: dict | None, kind: str, include_ci: bool = True) -> str
     return text
 
 
+def _metadata_value(metadata: dict, path: tuple[str, ...]):
+    current = metadata
+    for key in path:
+        if not isinstance(current, dict):
+            return None
+        current = current.get(key)
+    return current
+
+
+def _format_run_value(value, kind: str) -> str:
+    if value is None:
+        return "N/A"
+    if kind == "seconds":
+        return f"{float(value):.1f} s"
+    if kind == "bytes":
+        size = float(value)
+        for unit in ("B", "KiB", "MiB", "GiB"):
+            if size < 1024.0 or unit == "GiB":
+                return f"{size:.1f} {unit}"
+            size /= 1024.0
+    if kind == "integer":
+        return f"{int(value):,}"
+    if kind == "usd":
+        return f"${float(value):.4f}"
+    return str(value)
+
+
 def _method_key(report: dict) -> str:
     return str(report.get("adapter_spec") or report.get("adapter"))
 
@@ -194,6 +232,7 @@ def build_comparison(
             "created_at": report.get("created_at"),
             "results_path": report["_results_path"],
             "metrics": metrics,
+            "run_metadata": report.get("run_metadata", {}),
         })
     return {
         "schema_version": 1,
@@ -232,6 +271,21 @@ def _write_markdown(comparison: dict, output_dir: Path) -> Path:
         "similarity, recency score, or VLM confidence) and must not be compared across "
         "different score types.",
         "",
+        "## Run metadata",
+        "",
+        "| Field | " + " | ".join(method["label"] for method in methods) + " |",
+        "|---|" + "---:|" * len(methods),
+    ])
+    for path_parts, label, kind in RUN_METADATA_FIELDS:
+        cells = [
+            _format_run_value(
+                _metadata_value(method["run_metadata"], path_parts), kind
+            )
+            for method in methods
+        ]
+        lines.append(f"| {label} | " + " | ".join(cells) + " |")
+    lines.extend([
+        "",
         "## Runs",
         "",
     ])
@@ -259,6 +313,13 @@ def _write_html(comparison: dict, output_dir: Path) -> Path:
             f"<tr><th>{html.escape(label)}<small>{html.escape(direction)} is better</small></th>"
             f"{cells}</tr>"
         )
+    run_rows = []
+    for path_parts, label, kind in RUN_METADATA_FIELDS:
+        cells = "".join(
+            f"<td>{html.escape(_format_run_value(_metadata_value(method['run_metadata'], path_parts), kind))}</td>"
+            for method in methods
+        )
+        run_rows.append(f"<tr><th>{html.escape(label)}</th>{cells}</tr>")
     run_cards = []
     for method in methods:
         result_path = _relative_path(Path(method["results_path"]), output_dir)
@@ -293,6 +354,9 @@ thead th {{ background:#f7f9fb; }} small {{ display:block; color:#66717d;
 <p class="note"><strong>* Absent score warning:</strong> raw absent scores use method-specific
 scales (cosine similarity, recency, or VLM confidence) and are not comparable across
 different score types.</p>
+<h2>Run metadata</h2>
+<div class="table-wrap"><table><thead><tr><th>Field</th>{header}</tr></thead>
+<tbody>{''.join(run_rows)}</tbody></table></div>
 <h2>Runs</h2><div class="runs">{''.join(run_cards)}</div>
 </main></body></html>"""
     path.write_text(document, encoding="utf-8")

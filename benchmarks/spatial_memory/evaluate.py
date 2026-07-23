@@ -19,6 +19,7 @@ from .metrics import (
     summarize_episode,
 )
 from .report import write_reports
+from .run_metadata import RunMetadataCollector
 
 
 BUILTIN_ADAPTERS = {
@@ -73,6 +74,36 @@ def _load_adapter(spec: str, adapter_kwargs: dict) -> MemoryAdapter:
     return adapter
 
 
+def _adapter_run_metadata(adapter: MemoryAdapter) -> dict:
+    try:
+        metadata = adapter.run_metadata()
+        return metadata if isinstance(metadata, dict) else {}
+    except Exception as error:
+        return {
+            "telemetry_error": {
+                "type": type(error).__name__,
+                "message": str(error)[:1000],
+            }
+        }
+
+
+def _write_json(path: Path, payload: dict) -> None:
+    with open(path, "w", encoding="utf-8") as file:
+        json.dump(payload, file, indent=2)
+        file.write("\n")
+
+
+def _completed_status(adapter_metadata: dict) -> str:
+    vlm = adapter_metadata.get("vlm")
+    if isinstance(vlm, dict) and (
+        int(vlm.get("failed_calls", 0)) > 0
+        or int(vlm.get("api_errors", 0)) > 0
+        or not bool(vlm.get("telemetry_available", True))
+    ):
+        return "completed_with_errors"
+    return "completed"
+
+
 def _validate_episode_contract(episode_dir: Path) -> tuple[list[dict], list[dict]]:
     observations = _read_jsonl(episode_dir / "observations.jsonl")
     queries = _read_jsonl(episode_dir / "queries.jsonl")
@@ -120,7 +151,9 @@ def evaluate_episode(
     ingestion_ms: list[float] = []
     query_results: list[dict] = []
     ingested_ids: set[str] = set()
+    reset_started = time.perf_counter()
     adapter.reset(episode_dir, state_dir)
+    reset_latency_ms = (time.perf_counter() - reset_started) * 1000.0
     try:
         for observation in observations:
             started = time.perf_counter()
@@ -179,6 +212,7 @@ def evaluate_episode(
         "episode_id": episode_dir.name,
         "frame_count": len(observations),
         "query_count": len(query_results),
+        "adapter_reset_latency_ms": reset_latency_ms,
         "summary": summarize_episode(query_results, ingestion_ms),
         "ingest_latency_ms": ingestion_ms,
         "queries": query_results,
@@ -216,6 +250,11 @@ def evaluate(args) -> Path:
     output_dir.mkdir(parents=True)
     state_root = output_dir / "state"
     state_root.mkdir()
+    metadata_collector = RunMetadataCollector(
+        dataset_dir=dataset_dir,
+        episode_records=episode_records,
+        hams_root=Path(__file__).resolve().parents[2],
+    )
 
     episode_results = []
     try:
@@ -227,6 +266,13 @@ def evaluate(args) -> Path:
                 state_dir=state_root / episode_id,
                 top_k=args.top_k,
             ))
+        adapter_metadata = _adapter_run_metadata(adapter)
+        run_metadata = metadata_collector.finish(
+            status=_completed_status(adapter_metadata),
+            episode_results=episode_results,
+            state_root=state_root,
+            adapter_metadata=adapter_metadata,
+        )
         report = {
             "schema_version": 1,
             "benchmark_id": manifest["benchmark_id"],
@@ -236,14 +282,14 @@ def evaluate(args) -> Path:
             "adapter_kwargs": adapter_kwargs,
             "top_k": args.top_k,
             "created_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "run_metadata": run_metadata,
             "aggregate": aggregate_episode_summaries(
                 [item["summary"] for item in episode_results]
             ),
             "episodes": episode_results,
         }
-        with open(output_dir / "results.json", "w", encoding="utf-8") as file:
-            json.dump(report, file, indent=2)
-            file.write("\n")
+        _write_json(output_dir / "run_metadata.json", run_metadata)
+        _write_json(output_dir / "results.json", report)
         html_report, markdown_report = write_reports(
             report=report,
             manifest=manifest,
@@ -257,8 +303,21 @@ def evaluate(args) -> Path:
         print(f"[memory-eval] readable HTML: {html_report}")
         print(f"[memory-eval] Markdown summary: {markdown_report}")
         return output_dir
-    except Exception:
+    except BaseException as error:
         adapter.close()
+        status = "interrupted" if isinstance(error, KeyboardInterrupt) else "failed"
+        run_metadata = metadata_collector.finish(
+            status=status,
+            episode_results=episode_results,
+            state_root=state_root,
+            adapter_metadata=_adapter_run_metadata(adapter),
+            failure=error,
+        )
+        _write_json(output_dir / "run_metadata.json", run_metadata)
+        print(
+            f"[memory-eval] {status} run metadata: "
+            f"{output_dir / 'run_metadata.json'}"
+        )
         raise
 
 

@@ -37,6 +37,14 @@ def fake_report(path: Path, adapter_spec: str, values: list[float]) -> dict:
         "adapter_kwargs": {},
         "top_k": 3,
         "created_at": "2026-01-01T00:00:00+00:00",
+        "run_metadata": {
+            "wall_time_seconds": 10.0,
+            "resources": {
+                "process_peak_rss_bytes": 1048576,
+                "storage": {"adapter_state_bytes": 1024},
+            },
+            "adapter": {},
+        },
         "aggregate": {"episode_count": len(episodes)},
         "episodes": episodes,
     }
@@ -82,6 +90,8 @@ class SpatialMemoryComparisonTests(unittest.TestCase):
             self.assertEqual(latest_stats["count"], 2)
             self.assertIsNotNone(latest_stats["ci95_low"])
             self.assertIn("Latest-only", (output / "comparison.html").read_text())
+            self.assertIn("Run metadata", (output / "comparison.html").read_text())
+            self.assertIn("10.0 s", (output / "comparison.md").read_text())
             self.assertIn("95% CI", (output / "comparison.md").read_text())
 
     def test_rejects_different_episode_sets(self):

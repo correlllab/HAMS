@@ -38,6 +38,46 @@ class SpatialMemoryReportTests(unittest.TestCase):
                 "adapter": "fake_adapter",
                 "created_at": "2026-01-01T00:00:00+00:00",
                 "top_k": 1,
+                "run_metadata": {
+                    "status": "completed",
+                    "wall_time_seconds": 12.5,
+                    "resources": {
+                        "process_peak_rss_bytes": 1048576,
+                        "gpu": {"devices": [{
+                            "name": "Test GPU",
+                            "peak_allocated_bytes": 524288,
+                        }]},
+                        "storage": {
+                            "payload_bytes": 2048,
+                            "adapter_state_bytes": 1024,
+                        },
+                    },
+                    "runtime": {"container_image": "test-image:latest"},
+                    "software": {
+                        "hams": {"commit": "abcdef1234567890", "dirty": False},
+                        "embodied_agent": {
+                            "commit": "123456abcdef7890",
+                            "dirty": True,
+                            "dirty_entry_count": 1,
+                        },
+                    },
+                    "adapter": {"vlm": {
+                        "logical_calls": 1,
+                        "api_attempts": 2,
+                        "retry_count": 1,
+                        "api_errors": 1,
+                        "successful_calls": 1,
+                        "failed_calls": 0,
+                        "prompt_tokens": 100,
+                        "output_tokens_including_thoughts": 25,
+                        "total_tokens": 125,
+                        "estimated_standard_cost_usd": 0.000375,
+                        "pricing_assumption": {
+                            "verified_on": "2026-07-22",
+                            "source": "https://example.com/pricing",
+                        },
+                    }},
+                },
                 "aggregate": {
                     "episode_count": 1,
                     "static_recall_at_k": 1.0,
@@ -101,11 +141,16 @@ class SpatialMemoryReportTests(unittest.TestCase):
             self.assertIn("FAISS pool: hit", html_text)
             self.assertIn("FAISS Rank 7 · cosine 0.1234", html_text)
             self.assertIn("The mug is visible.", html_text)
+            self.assertIn("Run metadata", html_text)
+            self.assertIn("VLM logical calls / API attempts", html_text)
+            self.assertIn("$0.0004", html_text)
             self.assertNotIn("<strong>#1</strong>", html_text)
             self.assertIn("# Spatial-memory benchmark report", markdown_text)
             self.assertIn("Image resolution: 512×512", markdown_text)
             self.assertIn("counter_a` → `counter_b", markdown_text)
             self.assertIn("| valid |", markdown_text)
+            self.assertIn("## Run metadata", markdown_text)
+            self.assertIn("Test GPU", markdown_text)
 
 
 if __name__ == "__main__":

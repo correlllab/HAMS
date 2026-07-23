@@ -206,6 +206,18 @@ note() {
     echo "[spatial-camera] $*"
 }
 
+git_commit_for_dir() {
+    git -C "$1" rev-parse HEAD 2>/dev/null || true
+}
+
+git_dirty_for_dir() {
+    if [[ -n "$(git -C "$1" status --porcelain 2>/dev/null)" ]]; then
+        printf '1\n'
+    else
+        printf '0\n'
+    fi
+}
+
 is_integer() {
     [[ "$1" =~ ^-?[0-9]+$ ]]
 }
@@ -747,6 +759,14 @@ PY
     fi
     local -a gpu_args=(--gpus all)
     [[ "$DEVICE" == cpu || "$BENCHMARK_ADAPTER" == latest_only ]] && gpu_args=()
+    local hams_git_commit embodied_git_commit vlmaps_git_commit
+    local hams_git_dirty embodied_git_dirty vlmaps_git_dirty
+    hams_git_commit="$(git_commit_for_dir "$REPO_ROOT")"
+    embodied_git_commit="$(git_commit_for_dir "$EMBODIED_ROOT")"
+    vlmaps_git_commit="$(git_commit_for_dir "$VLMAPS_ROOT")"
+    hams_git_dirty="$(git_dirty_for_dir "$REPO_ROOT")"
+    embodied_git_dirty="$(git_dirty_for_dir "$EMBODIED_ROOT")"
+    vlmaps_git_dirty="$(git_dirty_for_dir "$VLMAPS_ROOT")"
     local -a command=(
         docker run --rm
         "${gpu_args[@]}"
@@ -754,6 +774,13 @@ PY
         -e HOME="$runtime_home"
         -e PYTHONPATH=/opt/EmbodiedAgent:/opt/Humanoid_Simulation
         -e HF_HOME=/cache/huggingface
+        -e "SPATIAL_RUNTIME_IMAGE=$runtime_image"
+        -e "SPATIAL_HAMS_GIT_COMMIT=$hams_git_commit"
+        -e "SPATIAL_HAMS_GIT_DIRTY=$hams_git_dirty"
+        -e "SPATIAL_EMBODIED_AGENT_GIT_COMMIT=$embodied_git_commit"
+        -e "SPATIAL_EMBODIED_AGENT_GIT_DIRTY=$embodied_git_dirty"
+        -e "SPATIAL_VLMAPS_GIT_COMMIT=$vlmaps_git_commit"
+        -e "SPATIAL_VLMAPS_GIT_DIRTY=$vlmaps_git_dirty"
         "${key_args[@]}"
         "${runtime_mounts[@]}"
         "$runtime_image"
@@ -769,7 +796,7 @@ PY
     note "evaluating streaming memory adapter=$BENCHMARK_ADAPTER top_k=$TOP_K"
     "${command[@]}"
     note "benchmark reports: $host_benchmark/reports"
-    note "each run contains report.html, summary.md, and results.json"
+    note "each run contains report.html, summary.md, results.json, and run_metadata.json"
 }
 
 run_benchmark_compare() {

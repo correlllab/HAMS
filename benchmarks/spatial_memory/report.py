@@ -91,6 +91,105 @@ def _format_metric(value, kind: str) -> str:
     return f"{number:.4f}"
 
 
+def _format_bytes(value) -> str:
+    if value is None:
+        return "N/A"
+    size = float(value)
+    for unit in ("B", "KiB", "MiB", "GiB"):
+        if size < 1024.0 or unit == "GiB":
+            return f"{size:.1f} {unit}"
+        size /= 1024.0
+    return "N/A"
+
+
+def _nested(payload: dict, *keys):
+    current = payload
+    for key in keys:
+        if not isinstance(current, dict):
+            return None
+        current = current.get(key)
+    return current
+
+
+def _git_label(value) -> str:
+    if not isinstance(value, dict) or not value.get("commit"):
+        return "N/A"
+    label = str(value["commit"])[:12]
+    if value.get("dirty"):
+        count = value.get("dirty_entry_count")
+        label += f" + dirty ({int(count)})" if count is not None else " + dirty"
+    return label
+
+
+def _run_metadata_rows(report: dict) -> list[tuple[str, str]]:
+    metadata = report.get("run_metadata") or {}
+    if not metadata:
+        return []
+    gpu_devices = _nested(metadata, "resources", "gpu", "devices") or []
+    gpu_name = ", ".join(str(item.get("name", "unknown")) for item in gpu_devices)
+    gpu_peak = sum(int(item.get("peak_allocated_bytes", 0)) for item in gpu_devices)
+    rows = [
+        ("Run status", str(metadata.get("status", "unknown"))),
+        ("Wall time", f"{float(metadata.get('wall_time_seconds', 0.0)):.1f} s"),
+        ("Process peak RAM", _format_bytes(_nested(metadata, "resources", "process_peak_rss_bytes"))),
+        ("GPU", gpu_name or "CPU / unavailable"),
+        ("Peak allocated VRAM", _format_bytes(gpu_peak) if gpu_devices else "N/A"),
+        ("Dataset payload", _format_bytes(_nested(metadata, "resources", "storage", "payload_bytes"))),
+        ("Adapter state", _format_bytes(_nested(metadata, "resources", "storage", "adapter_state_bytes"))),
+        ("Container image", str(_nested(metadata, "runtime", "container_image") or "N/A")),
+        ("HAMS commit", _git_label(_nested(metadata, "software", "hams"))),
+        ("EmbodiedAgent commit", _git_label(_nested(metadata, "software", "embodied_agent"))),
+    ]
+    vlm = _nested(metadata, "adapter", "vlm")
+    if isinstance(vlm, dict):
+        rows.extend([
+            ("VLM logical calls / API attempts", f"{int(vlm.get('logical_calls', 0))} / {int(vlm.get('api_attempts', 0))}"),
+            ("VLM retries / API errors", f"{int(vlm.get('retry_count', 0))} / {int(vlm.get('api_errors', 0))}"),
+            ("VLM parse failures", f"{int(vlm.get('parse_failures', 0))}"),
+            ("VLM valid / failed calls", f"{int(vlm.get('successful_calls', 0))} / {int(vlm.get('failed_calls', 0))}"),
+            ("Input / output tokens", f"{int(vlm.get('prompt_tokens', 0)):,} / {int(vlm.get('output_tokens_including_thoughts', 0)):,}"),
+            ("Total tokens", f"{int(vlm.get('total_tokens', 0)):,}"),
+            ("Estimated standard cost", (
+                f"${float(vlm['estimated_standard_cost_usd']):.4f}"
+                if vlm.get("estimated_standard_cost_usd") is not None else "N/A"
+            )),
+        ])
+        if vlm.get("error_types"):
+            rows.append((
+                "VLM error types",
+                ", ".join(
+                    f"{name} × {int(count)}"
+                    for name, count in sorted(vlm["error_types"].items())
+                ),
+            ))
+        if vlm.get("last_error"):
+            rows.append(("Last VLM error", str(vlm["last_error"])[:240]))
+    return rows
+
+
+def _run_metadata_html(report: dict) -> str:
+    rows = _run_metadata_rows(report)
+    if not rows:
+        return ""
+    body = "".join(
+        f"<tr><th>{html.escape(label)}</th><td>{html.escape(value)}</td></tr>"
+        for label, value in rows
+    )
+    pricing = _nested(report, "run_metadata", "adapter", "vlm", "pricing_assumption")
+    pricing_note = ""
+    if isinstance(pricing, dict):
+        source = html.escape(str(pricing.get("source", "")), quote=True)
+        pricing_note = (
+            '<p class="meta-note">Cost uses the recorded standard paid-tier list-price '
+            f'assumption verified {html.escape(str(pricing.get("verified_on", "unknown")))}. '
+            f'<a href="{source}">Pricing source</a>; free-tier actual charge may be zero.</p>'
+        )
+    return (
+        '<h2>Run metadata</h2><div class="run-metadata">'
+        f'<table class="metric-table"><tbody>{body}</tbody></table>{pricing_note}</div>'
+    )
+
+
 def _metric_definition(metric_name: str) -> tuple[str, str]:
     for name, label, kind in METRICS:
         if name == metric_name:
@@ -506,6 +605,9 @@ def _html_document(
       text-align:left; } .metric-table th { color:var(--muted); font-weight:500; }
     .metric-table td { font-variant-numeric:tabular-nums; font-weight:650; }
     .aggregate { max-width:720px; border:1px solid var(--line); border-radius:10px; overflow:hidden; }
+    .run-metadata { max-width:900px; border:1px solid var(--line); border-radius:10px;
+      overflow:hidden; background:white; } .meta-note { color:var(--muted); padding:0 12px 10px;
+      font-size:12px; }
     .episode { background:var(--panel); border:1px solid var(--line); border-radius:12px;
       margin:14px 0; overflow:hidden; } .episode summary { cursor:pointer; display:grid;
       grid-template-columns:minmax(210px,1fr) minmax(100px,.5fr) minmax(300px,1.5fr);
@@ -575,6 +677,7 @@ def _html_document(
         "adapters show N/A rather than treating camera pose as object position. A top-similarity "
         "fallback is displayed explicitly when no voxel wins VLMaps category classification.</p>"
         f'<h2>Aggregate metrics</h2><div class="aggregate">{_metric_table_html(aggregate)}</div>'
+        f'{_run_metadata_html(report)}'
         f"<h2>Episodes</h2>{episodes}"
         '<footer>Generated from results.json. Oracle visibility labels were used only by the evaluator, '
         "not supplied to the memory adapter.</footer></main></body></html>"
@@ -609,6 +712,26 @@ def _markdown_document(
     for name, label, kind in METRICS:
         if name in report["aggregate"]:
             lines.append(f"| {label} | {_format_metric(report['aggregate'].get(name), kind)} |")
+    metadata_rows = _run_metadata_rows(report)
+    if metadata_rows:
+        lines.extend([
+            "",
+            "## Run metadata",
+            "",
+            "| Field | Value |",
+            "|---|---:|",
+            *(f"| {label} | {value} |" for label, value in metadata_rows),
+        ])
+        pricing = _nested(
+            report, "run_metadata", "adapter", "vlm", "pricing_assumption"
+        )
+        if isinstance(pricing, dict):
+            lines.extend([
+                "",
+                "Cost is an estimate using the recorded standard paid-tier list price "
+                f"verified {pricing.get('verified_on', 'unknown')}; free-tier actual "
+                "charge may be zero.",
+            ])
     lines.extend([
         "",
         "> Update lag begins at the first lap-2 frame where the relocated object is visible. "

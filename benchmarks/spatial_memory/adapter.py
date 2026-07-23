@@ -41,6 +41,10 @@ class MemoryAdapter(ABC):
         """Optional metadata about the most recent query (rerank/fallback, etc.)."""
         return {}
 
+    def run_metadata(self) -> dict:
+        """Optional run-level telemetry such as stage latency and API usage."""
+        return {}
+
     @abstractmethod
     def close(self) -> None:
         """Flush and release episode resources."""
