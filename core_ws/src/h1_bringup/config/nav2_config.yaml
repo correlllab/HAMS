@@ -11,7 +11,7 @@ controller_server:
     use_sim_time: True
     controller_frequency: 20.0
     min_x_velocity_threshold: 0.001
-    min_y_velocity_threshold: 0.01
+    min_y_velocity_threshold: 0.5
     min_theta_velocity_threshold: 0.001
     progress_checker_plugin: "progress_checker" # progress_checker_plugin: "progress_checker" For Humble and older
     goal_checker_plugins: ["goal_checker"]
@@ -23,8 +23,11 @@ controller_server:
       movement_time_allowance: 10.0
     goal_checker:
       plugin: "nav2_controller::SimpleGoalChecker"
-      xy_goal_tolerance: 0.10
-      yaw_goal_tolerance: 0.10
+      # Real-verified reference values (fast_lio_nav2_humanoid); the earlier
+      # in-tree 0.10s had drifted tighter than anything a walking humanoid
+      # can settle inside.
+      xy_goal_tolerance: 0.25
+      yaw_goal_tolerance: 0.25
       stateful: True
     FollowPath:
       plugin: "nav2_regulated_pure_pursuit_controller::RegulatedPurePursuitController"
@@ -53,7 +56,7 @@ controller_server:
       rotate_to_heading_min_angle: 0.785
       max_angular_accel: 3.2
       max_robot_pose_search_dist: 10.0
-      min_distance_to_obstacle: 0.4
+      min_distance_to_obstacle: 2.0
       stateful: true
 behavior_server:
   ros__parameters:
@@ -77,14 +80,14 @@ planner_server:
       max_on_approach_iterations: 1000    # maximum number of iterations to attempt to reach goal once in tolerance
       terminal_checking_interval: 5000     # number of iterations between checking if the goal has been cancelled or planner timed out
       max_planning_time: 3.5              # max time in s for planner to plan, smooth, and upsample. Will scale maximum smoothing and upsampling times based on remaining time after planning.
-      motion_model_for_search: "REEDS_SHEPP"  # Allows reverse motion; humanoid can step backwards
+      motion_model_for_search: "DUBIN"    # For Hybrid Dubin, Reeds-Shepp
       cost_travel_multiplier: 2.0         # For 2D: Cost multiplier to apply to search to steer away from high cost areas. Larger values will place in the center of aisles more exactly (if non-`FREE` cost potential field exists) but take slightly longer to compute. To optimize for speed, a value of 1.0 is reasonable. A reasonable tradeoff value is 2.0. A value of 0.0 effective disables steering away from obstacles and acts like a naive binary search A*.
       angle_quantization_bins: 64         # For Hybrid nodes: Number of angle bins for search, must be 1 for 2D node (no angle search)
       analytic_expansion_ratio: 3.5       # For Hybrid/Lattice nodes: The ratio to attempt analytic expansions during search for final approach.
       analytic_expansion_max_length: 3.0    # For Hybrid/Lattice nodes: The maximum length of the analytic expansion to be considered valid to prevent unsafe shortcutting (in meters). This should be scaled with minimum turning radius and be no less than 4-5x the minimum radius
       analytic_expansion_max_cost: 200   # For Hybrid/Lattice nodes: The maximum single cost for any part of an analytic expansion to contain and be valid (except when necessary on approach to goal)
       analytic_expansion_max_cost_override: false # For Hybrid/Lattice nodes: Whether or not to override the maximum cost setting if within critical distance to goal (ie probably required). If expansion is within 2*pi*min_r of the goal, then it will override the max cost if ``false``.
-      minimum_turning_radius: 0.20        # For Hybrid/Lattice nodes: minimum turning radius in m of path / vehicle
+      minimum_turning_radius: 0.10        # For Hybrid/Lattice nodes: minimum turning radius in m of path / vehicle
       reverse_penalty: 2.1                # For Reeds-Shepp model: penalty to apply if motion is reversing, must be => 1
       change_penalty: 0.0                 # For Hybrid nodes: penalty to apply if motion is changing directions, must be >= 0
       non_straight_penalty: 1.20          # For Hybrid nodes: penalty to apply if motion is non-straight, must be => 1
@@ -144,7 +147,7 @@ global_costmap:
           laser_scan_sensor:
             topic: /converted_scan
             max_obstacle_range: 2.5
-            obstacle_min_range: 0.6  # drop near-pelvis self-returns (defence in depth)
+            obstacle_min_range: 0.4572
             inf_is_valid: true
             clear_buffer_on_each_layer: true
             data_type: LaserScan
@@ -161,12 +164,6 @@ local_costmap:
     ros__parameters:
       update_frequency: 3.0
       publish_frequency: 3.0
-      # Match the reference (fast_lio_nav2_humanoid): the local costmap is
-      # anchored to pelvis, the same frame /converted_scan is produced in
-      # (pointcloud_to_laserscan target_frame=pelvis). The voxel-layer sensor
-      # origin is then (0,0,0), inside the grid. Anchoring to camera_init put
-      # the pelvis-height sensor ~0.67 m below the origin_z=0.0 grid floor, so
-      # every raytrace was rejected ("Sensor origin ... is out of map bounds").
       global_frame: pelvis
       robot_base_frame: pelvis
       use_sim_time: ${use_sim_time}
@@ -186,7 +183,7 @@ local_costmap:
         publish_voxel_map: True
         origin_z: 0.0
         z_resolution: 0.05
-        z_voxels: 16            # 0.05 * 16 = 0.8 m tall (reference value); scan sits at z~0 in the pelvis frame
+        z_voxels: 16
         max_obstacle_height: 2.0
         mark_threshold: 0
         observation_sources: scan
@@ -199,7 +196,7 @@ local_costmap:
           raytrace_max_range: 3.0
           raytrace_min_range: 0.0
           obstacle_max_range: 2.5
-          obstacle_min_range: 0.6  # drop near-pelvis self-returns (defence in depth)
+          obstacle_min_range: 0.4572
       static_layer:
         plugin: "nav2_costmap_2d::StaticLayer"
         map_subscribe_transient_local: True

@@ -5,13 +5,17 @@ A ``Policy`` turns the current robot state into a 12-joint lower-body PD setpoin
 layout, scales, PD gains, and nominal pose, all loaded from its own YAML — so the
 controller node can run any of them through the same loop and switch between them.
 
-Two concrete policies are provided:
+Three concrete policies are provided:
 
 * ``WalkPolicy``  — the original TorchScript walking policy (47-d obs, gait clock).
 * ``FamePolicy``  — the RMA standing/squatting policy: an env-factor encoder
   (e_t -> z_t) plus a base policy over a history of proprio + z_t (252-d actor obs).
   It reads all 27 joints (legs + torso + arms) but only commands the 12 legs; the
   arms are driven externally by the upper-body IK and merely *observed* here.
+* ``AlmiPolicy``  — the ALMI adversarial locomotion policy (TeleHuman/ALMI-Open,
+  BSD-3): a stateful TorchScript LSTM over a 65-d obs of the 21 non-wrist joints.
+  Stands at ||cmd|| < 0.1 and locomotes above it, so one policy covers both modes.
+  See policies/almi/README.md for the full interface.
 
 Joint indexing matches ``/lowstate`` exactly (verified against
 ``CL_Assets/mujoco_assets/h1_2_magpie.xml``): index 0-11 legs, 12 torso,
@@ -97,6 +101,49 @@ def quat_rotate_inverse(q: np.ndarray, v: np.ndarray) -> np.ndarray:
 
 def gravity_from_quat_fame(quat: np.ndarray) -> np.ndarray:
     return quat_rotate_inverse(quat, np.array([0.0, 0.0, -1.0], dtype=np.float32))
+
+
+def quat_mul(q1: np.ndarray, q2: np.ndarray) -> np.ndarray:
+    """Hamilton product q1 ⊗ q2, [w, x, y, z] convention."""
+    w1, x1, y1, z1 = q1
+    w2, x2, y2, z2 = q2
+    return np.array(
+        [
+            w1 * w2 - x1 * x2 - y1 * y2 - z1 * z2,
+            w1 * x2 + x1 * w2 + y1 * z2 - z1 * y2,
+            w1 * y2 - x1 * z2 + y1 * w2 + z1 * x2,
+            w1 * z2 + x1 * y2 - y1 * x2 + z1 * w2,
+        ],
+        dtype=np.float32,
+    )
+
+
+def imu_offset_quat(roll_rad: float, pitch_rad: float, yaw_rad: float) -> np.ndarray | None:
+    """Correction quaternion for a fixed IMU mounting/calibration bias, or None
+    when all three angles are zero (the no-op fast path).
+
+    The angles are what the raw IMU *reads* when the torso is actually level
+    (e.g. measured hanging plumb): positive pitch = reads tilted forward,
+    positive roll = reads tilted right. The bias is modeled as a body-frame
+    mounting rotation Rz(yaw)·Ry(pitch)·Rx(roll); right-multiplying the raw
+    quaternion by the returned conjugate cancels it, so the corrected
+    orientation (and the gravity vector derived from it) reads level.
+    """
+    if roll_rad == 0.0 and pitch_rad == 0.0 and yaw_rad == 0.0:
+        return None
+    hr, hp, hy = 0.5 * roll_rad, 0.5 * pitch_rad, 0.5 * yaw_rad
+    qx = np.array([np.cos(hr), np.sin(hr), 0.0, 0.0], dtype=np.float32)
+    qy = np.array([np.cos(hp), 0.0, np.sin(hp), 0.0], dtype=np.float32)
+    qz = np.array([np.cos(hy), 0.0, 0.0, np.sin(hy)], dtype=np.float32)
+    q_off = quat_mul(quat_mul(qz, qy), qx)
+    return np.array([q_off[0], -q_off[1], -q_off[2], -q_off[3]], dtype=np.float32)
+
+
+def apply_imu_offset(quat: np.ndarray, corr: np.ndarray | None) -> np.ndarray:
+    """Apply a correction from ``imu_offset_quat`` to a raw IMU quaternion."""
+    if corr is None:
+        return quat
+    return quat_mul(quat, corr)
 
 
 def _load_yaml(config_path: str) -> dict:
@@ -234,6 +281,214 @@ class WalkPolicy(Policy):
         with torch.no_grad():
             self._action = self._policy(torch.from_numpy(self._obs).unsqueeze(0)).numpy().squeeze()
         target = self._action * self._action_scale + self._default_angles
+        target = _clip_leg_positions(target, self._lower_limit, self._upper_limit)
+        return LegCommand(target_q=target, kp=self._kps, kd=self._kds)
+
+
+# --------------------------------------------------------------------------- #
+# ALMI adversarial locomotion policy (TeleHuman/ALMI-Open)
+# --------------------------------------------------------------------------- #
+class AlmiPolicy(Policy):
+    """ALMI lower-body policy: stateful LSTM, observes 21 joints, commands 12 legs.
+
+    The TorchScript module (legged_gym ``PolicyExporterLSTM``) keeps its LSTM
+    hidden/cell state in internal buffers updated by every forward call, so
+    inference cadence matters (trained at 50 Hz) and ``reset()`` must clear the
+    recurrent state via the exported ``reset_memory()`` — zeroed prev-action +
+    zeroed memory is exactly how the upstream rollout script starts episodes.
+
+    Gait clock quirk (as trained): when ``||cmd|| < STAND_CMD_EPS`` both phase
+    observations are forced to 0 and the policy balances in place — it does not
+    march at zero command the way WalkPolicy does.
+
+    Stand->walk onset resets the LSTM (verified in RoboCasa 2026-07-19): the
+    policy only enters locomotion if the command is already present when its
+    recurrent state starts — in the upstream rollouts every episode begins with
+    the command applied from tick 0, so "quiet stand, then a command appears"
+    is out-of-distribution and the hidden state stays latched on standing
+    (commands up to (0.9, 0.4) produced no stepping). Re-seeding the memory at
+    onset reproduces the trained episode-start condition and the gait engages;
+    walk->stand needs no reset (stopping tracks naturally). ONSET_RISE matches
+    the trained stand threshold; ONSET_FALL adds hysteresis so a ramping
+    commander (e.g. nav2's velocity smoother) can't re-trigger resets around
+    the boundary and stutter the gait.
+    """
+
+    name = "almi"
+    GAIT_PERIOD = 0.8
+    PHASE_OFFSET = 0.5       # right foot leads the left by half a period
+    STAND_CMD_EPS = 0.1      # ||cmd|| below this = stand (phase forced to 0)
+    ONSET_RISE = 0.1         # ||cmd|| rising through this resets the LSTM (gait start)
+    ONSET_FALL = 0.05        # ||cmd|| must drop below this to re-arm the onset reset
+
+    #: /lowstate (27) -> ALMI 21-DoF order: legs + torso + shoulder p/r/y +
+    #: elbow per arm. The six wrist joints (17-19, 24-26) are unobserved.
+    OBS_JOINT_IDX = np.r_[0:17, 20:24]
+
+    def __init__(self, config_path: str):
+        cfg = _load_yaml(config_path)
+        cfg_dir = os.path.dirname(os.path.abspath(config_path))
+        policy_path = cfg.get("policy_path", "policy_lstm_12800.pt")
+        if not os.path.isabs(policy_path):
+            policy_path = os.path.join(cfg_dir, policy_path)
+
+        self._kps = np.asarray(cfg["kps"], dtype=np.float32)                 # 12 legs
+        self._kds = np.asarray(cfg["kds"], dtype=np.float32)
+        self._default_angles = np.asarray(cfg["default_angles"], dtype=np.float32)  # 21
+        self._ang_vel_scale = float(cfg["ang_vel_scale"])
+        self._dof_pos_scale = float(cfg["dof_pos_scale"])
+        self._dof_vel_scale = float(cfg["dof_vel_scale"])
+        self._action_scale = float(cfg["action_scale"])
+        self._cmd_scale = np.asarray(cfg["cmd_scale"], dtype=np.float32)
+        # Deployment-side command gain (default identity), applied to the
+        # incoming [vx, vy, wz] and re-clipped to +/-1 BEFORE the trained
+        # cmd_scale — so the observation stays inside the trained range. The
+        # checkpoint undertracks its command (yaw badly: ~0.2x), which starves
+        # trajectory followers like nav2's pure pursuit; the gain trades
+        # command fidelity for closed-loop authority.
+        self._cmd_gain = np.asarray(cfg.get("cmd_gain", [1.0, 1.0, 1.0]), dtype=np.float32)
+        # First-order smoothing on the effective command (1.0 = off). A path
+        # follower correcting heading at 20 Hz flips the yaw command's sign
+        # faster than the gait can respond; the LSTM answers the thrash with
+        # an unstable in-place wobble. ~0.15 at 50 Hz (~0.13 s time constant)
+        # passes nav2's ramps but averages out the sign-flipping.
+        self._cmd_alpha = float(cfg.get("cmd_smooth_alpha", 1.0))
+        self._cmd_filt = np.zeros(3, dtype=np.float32)
+        self._num_actions = int(cfg["num_actions"])                          # 12
+        self._num_obs = int(cfg["num_obs"])                                  # 65
+        self._lower_limit, self._upper_limit = _load_leg_position_limits(cfg)
+        if self._default_angles.shape != (len(self.OBS_JOINT_IDX),):
+            raise ValueError(
+                f"almi default_angles must have {len(self.OBS_JOINT_IDX)} entries"
+            )
+
+        self._policy = torch.jit.load(policy_path)
+        self._policy.eval()
+
+        self.nominal_lower = self._default_angles[:NUM_LEG_JOINTS].copy()
+        self._action = np.zeros(self._num_actions, dtype=np.float32)
+        self._obs = np.zeros(self._num_obs, dtype=np.float32)
+        self._t_start: float | None = None
+        self._walking = False
+
+    def _effective_cmd(self, cmd: np.ndarray) -> np.ndarray:
+        raw = np.clip(cmd * self._cmd_gain, -1.0, 1.0)
+        if self._cmd_alpha >= 1.0:
+            return raw
+        self._cmd_filt += self._cmd_alpha * (raw - self._cmd_filt)
+        return self._cmd_filt.copy()
+
+    def reset(self, state: RobotState) -> None:
+        self._action[:] = 0.0
+        self._t_start = state.t
+        self._policy.reset_memory()
+        # Seed the filter with the raw command so an onset reset doesn't have
+        # to fight its own smoother's zero history.
+        self._cmd_filt = np.clip(state.cmd * self._cmd_gain, -1.0, 1.0).astype(np.float32)
+        self._walking = bool(np.linalg.norm(self._cmd_filt) >= self.ONSET_RISE)
+
+    def compute(self, state: RobotState) -> LegCommand:
+        if self._t_start is None:
+            self._t_start = state.t
+
+        cmd = self._effective_cmd(state.cmd)
+        cmd_norm = float(np.linalg.norm(cmd))
+        if not self._walking and cmd_norm >= self.ONSET_RISE:
+            self.reset(state)   # episode-start condition: memory zeroed, cmd present
+            # Use the freshly-seeded (full) command on this very tick: the
+            # LSTM's first post-reset step must see the command at full scale,
+            # exactly as at a training episode start — the smoother's stale
+            # pre-seed value here weakens the gait-commitment step.
+            cmd = self._cmd_filt.copy()
+            cmd_norm = float(np.linalg.norm(cmd))
+        elif self._walking and cmd_norm < self.ONSET_FALL:
+            self._walking = False
+
+        q21 = state.q[self.OBS_JOINT_IDX]
+        dq21 = state.dq[self.OBS_JOINT_IDX]
+        qj = (q21 - self._default_angles) * self._dof_pos_scale
+        dqj = dq21 * self._dof_vel_scale
+        gravity = gravity_from_quat_walk(state.quat)
+        omega = state.gyro * self._ang_vel_scale
+
+        if cmd_norm < self.STAND_CMD_EPS:
+            left_sin_phase = right_sin_phase = 0.0
+        else:
+            phase = ((state.t - self._t_start) % self.GAIT_PERIOD) / self.GAIT_PERIOD
+            left_sin_phase = np.sin(2 * np.pi * phase)
+            right_sin_phase = np.sin(2 * np.pi * ((phase + self.PHASE_OFFSET) % 1.0))
+
+        self._obs[0:3] = omega
+        self._obs[3:6] = gravity
+        self._obs[6:9] = cmd * self._cmd_scale
+        self._obs[9:30] = qj
+        self._obs[30:51] = dqj
+        self._obs[51:63] = self._action
+        self._obs[63:65] = (left_sin_phase, right_sin_phase)
+
+        with torch.no_grad():
+            self._action = self._policy(torch.from_numpy(self._obs).unsqueeze(0)).numpy().squeeze()
+        target = self._action * self._action_scale + self._default_angles[:NUM_LEG_JOINTS]
+        target = _clip_leg_positions(target, self._lower_limit, self._upper_limit)
+        return LegCommand(target_q=target, kp=self._kps, kd=self._kds)
+
+
+class Almi27Policy(AlmiPolicy):
+    """ALMI27: wrist-inclusive ALMI. Observes ALL 27 joints (77-d obs) including
+    the six wrist DoF, so the legs are aware of full arm + wrist motion — trained
+    adversarially against a learned upper policy driving the whole upper body,
+    with stronger pushes and motor-strength randomization.
+
+    Identical control to :class:`AlmiPolicy` (stateful LSTM, 12 leg actions,
+    stand<->walk onset reset, cmd gain/EMA); only the observation is the full
+    27-DoF view instead of the 21-DoF wrist-blind one, so ``compute`` is the only
+    override and the offsets grow (q/dq blocks 21->27, obs 65->77). ``default_angles``
+    and ``num_obs`` come from ``almi27.yaml`` (27 entries / 77).
+    """
+
+    name = "almi27"
+    #: full /lowstate order, all 27 joints (no wrist drop).
+    OBS_JOINT_IDX = np.arange(NUM_POLICY_JOINTS)
+
+    def compute(self, state: RobotState) -> LegCommand:
+        if self._t_start is None:
+            self._t_start = state.t
+
+        cmd = self._effective_cmd(state.cmd)
+        cmd_norm = float(np.linalg.norm(cmd))
+        if not self._walking and cmd_norm >= self.ONSET_RISE:
+            self.reset(state)   # episode-start condition: memory zeroed, cmd present
+            cmd = self._cmd_filt.copy()
+            cmd_norm = float(np.linalg.norm(cmd))
+        elif self._walking and cmd_norm < self.ONSET_FALL:
+            self._walking = False
+
+        q27 = state.q[self.OBS_JOINT_IDX]
+        dq27 = state.dq[self.OBS_JOINT_IDX]
+        qj = (q27 - self._default_angles) * self._dof_pos_scale
+        dqj = dq27 * self._dof_vel_scale
+        gravity = gravity_from_quat_walk(state.quat)
+        omega = state.gyro * self._ang_vel_scale
+
+        if cmd_norm < self.STAND_CMD_EPS:
+            left_sin_phase = right_sin_phase = 0.0
+        else:
+            phase = ((state.t - self._t_start) % self.GAIT_PERIOD) / self.GAIT_PERIOD
+            left_sin_phase = np.sin(2 * np.pi * phase)
+            right_sin_phase = np.sin(2 * np.pi * ((phase + self.PHASE_OFFSET) % 1.0))
+
+        # 77-d obs: gyro(3) grav(3) cmd(3) (q27-def)(27) dq27(27) prev_action(12) phase(2)
+        self._obs[0:3] = omega
+        self._obs[3:6] = gravity
+        self._obs[6:9] = cmd * self._cmd_scale
+        self._obs[9:36] = qj
+        self._obs[36:63] = dqj
+        self._obs[63:75] = self._action
+        self._obs[75:77] = (left_sin_phase, right_sin_phase)
+
+        with torch.no_grad():
+            self._action = self._policy(torch.from_numpy(self._obs).unsqueeze(0)).numpy().squeeze()
+        target = self._action * self._action_scale + self._default_angles[:NUM_LEG_JOINTS]
         target = _clip_leg_positions(target, self._lower_limit, self._upper_limit)
         return LegCommand(target_q=target, kp=self._kps, kd=self._kds)
 

@@ -1,0 +1,48 @@
+# ALMI27: wrist-inclusive ALMI lower-body policy for the Unitree H1-2.
+#
+# Trained in-house (2026-07-22, TeleHuman/ALMI-Open framework, BSD-3) as the full
+# adversarial campaign on a 27-DoF H1-2 that INCLUDES the six wrist DoF
+# (elbow_roll/wrist_pitch/wrist_yaw per arm): lower-1 (robust base) -> upper-1
+# (learned adversary) -> lower-2 (this policy). Unlike stock `almi` (21-DoF,
+# wrist-blind, 65-d obs), ALMI27 observes all 27 joints (77-d obs), so the legs
+# stay balanced under full arm+wrist motion. Also trained with stronger pushes
+# (1.5 m/s) + motor-strength randomization. See README.md.
+#
+# Consumed by Almi27Policy in policy.py. Same 12 leg PD gains / limits as almi.yaml.
+policy_path: "policy_lstm_almi27_r2_12000.pt"
+
+# 12 leg PD gains (identical to almi.yaml / walk.yaml).
+kps: [200, 200, 200, 300, 40, 40, 200, 200, 200, 300, 40, 40]
+kds: [2.5, 2.5, 2.5, 4, 2, 2, 2.5, 2.5, 2.5, 4, 2, 2]
+
+# Joint position clipping for the 12 commanded leg motors (H1-2 hardware limits).
+legs_motor_pos_lower_limit_list: [-0.37, -3.13, -0.42, -0.11, -0.887334, -0.181799,
+                                  -0.37, -3.13, -3.13, -0.11, -0.887334, -0.181799]
+legs_motor_pos_upper_limit_list: [0.37, 2.49, 3.13, 2.18, 0.513599, 0.181799,
+                                  0.37, 2.49, 0.42, 2.18, 0.513599, 0.181799]
+
+# 27-DoF trained defaults in FULL /lowstate (== training URDF) order: legs (12),
+# torso, then left/right arm 7-DoF each (shoulder p/r/y, elbow_pitch, elbow_roll,
+# wrist_pitch, wrist_yaw). The six wrist entries default to 0. Deep-crouch leg
+# nominal (hip -0.4 / knee 0.8) — the controller pre-poses the legs before engage.
+default_angles: [0.0, -0.4, 0.0, 0.8, -0.4, 0.0,
+                 0.0, -0.4, 0.0, 0.8, -0.4, 0.0,
+                 0.0,
+                 0.4, 0.2, 0.0, 0.3, 0.0, 0.0, 0.0,
+                 0.4, -0.2, 0.0, 0.3, 0.0, 0.0, 0.0]
+
+ang_vel_scale: 0.25
+dof_pos_scale: 1.0
+dof_vel_scale: 0.05
+action_scale: 0.25
+cmd_scale: [2.0, 2.0, 0.25]
+
+# Deployment-side command gain [vx, vy, wz] + EMA smoothing, applied before the
+# trained cmd_scale (see policy.py). Start neutral (identity / off) since ALMI27
+# is a freshly-trained checkpoint — RE-TUNE against measured tracking like almi.yaml
+# did (almi used [1.5,1,2] / 0.15 to fight the upstream checkpoint's undertracking).
+cmd_gain: [1.0, 1.0, 1.0]
+cmd_smooth_alpha: 1.0
+
+num_actions: 12
+num_obs: 77

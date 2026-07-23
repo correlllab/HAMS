@@ -30,8 +30,8 @@ from rclpy.time import Time
 
 from action_msgs.msg import GoalStatus
 from builtin_interfaces.msg import Duration
-from geometry_msgs.msg import Point, Pose, Quaternion
-from sensor_msgs.msg import CameraInfo, CompressedImage
+from geometry_msgs.msg import Point, Pose, Quaternion, Vector3Stamped
+from sensor_msgs.msg import CameraInfo, CompressedImage, Image
 from std_msgs.msg import Header
 
 from sensor_msgs_py import point_cloud2
@@ -39,7 +39,7 @@ from tf2_ros import Buffer, TransformBroadcaster, TransformListener, TransformEx
 
 from custom_ros_messages.msg import DetectionBundle
 from custom_ros_messages.srv import GeminiQuery, SamSegment, GraspGen
-from custom_ros_messages.action import FrameTask
+from custom_ros_messages.action import FrameTask, NamedConfig
 from custom_ros_messages.action import (
     SkillCloseDoor, SkillOpenDoor, SkillCloseLid, SkillOpenLid,
     SkillNavigate, SkillGrasp, SkillPickPlace, SkillPress, SkillSlideRack,
@@ -67,12 +67,13 @@ CAMERA_INFO_TOPIC = f'{CAMERA_NS}/color/camera_info'
 # the battery-object top-down grasp (skills/grasp.py) which skips gemini/sam/graspgen.
 DETECTION_TOPIC = f'{COLOR_IMAGE_TOPIC}/detections'
 # Per-arm HAND-camera DetectionBundle topics (same yolo_server, one channel per
-# camera; the hand cameras publish RECTIFIED color, so the '.../image_rect_raw'
-# stem differs from the head). The battery grasp reads the relevant arm's hand
-# detections once the GraspGenX frame is parked above the object.
+# camera; like the head, the hand cameras publish color on '.../image_raw' since
+# cl_realsense's h12_hand_cameras.launch.py split). The battery grasp reads the
+# relevant arm's hand detections once the GraspGenX frame is parked above the
+# object.
 ARM_DETECTION_TOPICS = {
-    'left':  '/realsense/left_hand/color/image_rect_raw/compressed/detections',
-    'right': '/realsense/right_hand/color/image_rect_raw/compressed/detections',
+    'left':  '/realsense/left_hand/color/image_raw/compressed/detections',
+    'right': '/realsense/right_hand/color/image_raw/compressed/detections',
 }
 
 # GraspGenX gripper-BASE frames (URDF frames whose axes match the GraspGenX
@@ -85,7 +86,31 @@ GRASP_FRAMES = {'left': 'left_graspgenx_frame', 'right': 'right_graspgenx_frame'
 GRIPPER_NS = {'left': '/left/gripper', 'right': '/right/gripper'}
 
 # Grip-force limit (N) applied via set_force before closing on an object.
-GRIP_FORCE_N = 30.0
+# Halved from 30 N: 30 N on a small part is more than the grasp needs and is what
+# drives the Dynamixels into the overload the grip-hold loop then has to keep
+# clearing. This is the default for both set_gripper_force and close_gripper, so
+# every close in the package moves together.
+GRIP_FORCE_N = 15.0
+# --- grip-hold loop (see close_gripper / _grip_hold_loop) --------------------
+# The magpie fingers are Dynamixels that trip into OVERLOAD while holding
+# against an object and then go limp, dropping it. reset_overload clears that
+# without opening the fingers, so a background thread per arm re-asserts the
+# grip at this rate: reset_overload, then close, every tick.
+#
+# LIFETIME: the loop deliberately outlives the skill that started it — the
+# object is still held after /skill/grasp returns — and stops only when the
+# gripper is commanded to an aperture again (open_gripper / set_gripper). It is
+# a daemon thread, so it also dies with the node.
+GRIP_HOLD_RATE_HZ = 5.0
+# Per-call timeout inside the loop [s]. Well under the 1/rate period so a
+# stalled gripper service can't drag the loop off cadence; a tick that times out
+# is simply retried on the next one.
+GRIP_HOLD_CALL_TIMEOUT_SEC = 0.15
+# The loop calls two services at GRIP_HOLD_RATE_HZ, so a persistently dead
+# gripper service would emit ~10 log lines/s. Warn only once per this many
+# consecutive failed ticks instead (failures are logged, never fatal — a flaky
+# gripper service must not turn a good grasp into a failed goal).
+GRIP_HOLD_WARN_EVERY = 25
 # ROS-time wait (get_clock().sleep_for — respects sim time) after an open/close so
 # the fingers finish moving before the arm starts its next motion. The /close
 # Trigger returns in ~5 ms and the position wait under-estimates finger travel, so
@@ -96,10 +121,19 @@ GRIPPER_SETTLE_SEC = 1.0
 # 0-106 mm (gripper.set_goal_aperture), so 106 mm is "fully open" and 0 mm is
 # "fully closed" — the endpoints the open/close percentage helpers map to.
 GRIPPER_MAX_WIDTH_MM = 106.0
-# Used when goal.timeout is zero [s]. Generous because the grasp skill's Gemini
-# detection alone (gemini-robotics-er) can take ~3 min; this deadline is a safety
-# ceiling checked at phase boundaries, not a target — most skills finish far sooner.
-DEFAULT_SKILL_TIMEOUT = 300.0
+# Used when goal.timeout is zero [s]. INFINITE: a goal that names no timeout is
+# taken as "run to completion" — the skill then ends only by finishing, failing,
+# or being canceled, never on a clock. Deliberate: the long-running skills
+# (frontier exploration, a visual-servo grasp) have no meaningful upper bound,
+# and the old 300 s ceiling silently aborted them mid-work. Send a NON-ZERO
+# goal.timeout whenever a bound is actually wanted.
+#
+# Consequences of the infinity, all checked: _Run.deadline becomes inf so
+# remaining() is inf and phase() never trips; callers that spend remaining() do
+# so through min(finite, ...) and stay finite; the one caller that converts it to
+# an integer Duration (pick_place's inner grasp goal) special-cases it. Cancel
+# remains the operator's escape hatch and is polled throughout.
+DEFAULT_SKILL_TIMEOUT = float('inf')
 # Gemini query-service call timeout [s]. The gemini-robotics-er model used for
 # grasp detection can take ~3 min to answer — far beyond _call_service's 30s
 # default — so give GeminiQuery its own generous ceiling.
@@ -141,6 +175,12 @@ WORLD_FRAME = 'camera_init'   # FAST-LIO odometry world frame; switch to 'map' f
 SERVO_ITER = 3                # max world-frame servo refinement iterations
 SERVO_LIN_TOL = 0.005         # 5 mm world-position convergence tolerance
 SERVO_ANG_TOL = 0.02          # ~1.15 deg world-orientation convergence tolerance
+# Multiply a move's duration BUDGET by this when it is sent with slow_mode=True.
+# The frame_task server's SLOW_MODE_SCALE (0.25) scales joint VELOCITY, while a
+# FrameTask duration is a TIMEOUT — so at 1/4 speed the same budget covers 1/4
+# the distance and the move would time out short of the target. Keep this at
+# 1 / SLOW_MODE_SCALE so a slow move gets the same reach as a full-speed one.
+SLOW_MODE_TIME_SCALE = 4.0
 
 # Skill action clients: name -> (action type, action server name). The same
 # table drives the action servers SkillsNode provides.
@@ -264,6 +304,16 @@ class SkillsBase(Node):
                                     callback_group=self._cb_group)
             for arm, ns in GRIPPER_NS.items()
         }
+        # Clears a Dynamixel overload WITHOUT opening the fingers
+        # (magpie_control gripper.py:reset_overload) — the grip-hold loop's
+        # other half. See _grip_hold_loop.
+        self.gripper_reset_clis = {
+            arm: self.create_client(Trigger, f'{ns}/reset_overload',
+                                    callback_group=self._cb_group)
+            for arm, ns in GRIPPER_NS.items()
+        }
+        # arm -> (thread, stop Event) for the running grip-hold loops.
+        self._grip_hold = {}
         # Live gripper aperture [mm] from the driver's published state (10 Hz),
         # cached per arm. Unlike _gripper_actual_mm (only refreshed by a position
         # command), this tracks the aperture after ANY close — including the
@@ -295,18 +345,21 @@ class SkillsBase(Node):
         # --- arm IK action client ---------------------------------------------
         self.frame_task_cli = ActionClient(
             self, FrameTask, '/frame_task', callback_group=self._cb_group)
+        # Named arm configurations (t_pose/home/...), served by the same
+        # frame_task server.
+        self.named_config_cli = ActionClient(
+            self, NamedConfig, '/named_config', callback_group=self._cb_group)
 
         # --- in-process skill composition ---------------------------------------
         # pick_place drives the grasp through this node's OWN /skill/grasp action
         # server (the ReentrantCallbackGroup + MultiThreadedExecutor make the
         # nested call safe). No wait_for_server at startup: the server comes up
-        # with this same node. Because caller and server share the process, extra
-        # per-call parameters and rich results travel on the instance instead of
-        # the (unchanged) action message — see skills/grasp.py for the contract.
+        # with this same node. Because caller and server share the process, rich
+        # RESULTS travel on the instance instead of the action result message —
+        # see skills/grasp.py (GraspOutcome) for the contract.
         self.grasp_skill_cli = ActionClient(
             self, SkillGrasp, SKILL_ACTIONS['grasp'][1],
             callback_group=self._cb_group)
-        self._grasp_overrides = None      # consumed-once per-goal grasp options
         self._last_grasp_outcome = None   # GraspOutcome of the last generic grasp
 
         # --- TF listener + broadcaster ----------------------------------------
@@ -320,6 +373,30 @@ class SkillsBase(Node):
         self._tf_lock = threading.Lock()
         self.create_timer(TF_REPUBLISH_PERIOD_SEC, self._republish_tfs,
                           callback_group=self._cb_group)
+        # Visual-servo residual (dx/dy/dz in the hand-camera optical frame),
+        # one message per servo iteration — for live plotting (PlotJuggler).
+        self.servo_error_pub = self.create_publisher(
+            Vector3Stamped, '/skill/grasp/servo_error', 10)
+        # Visual-servo EXECUTED move (TF pose after the move minus before, in
+        # the pelvis frame) — compare against servo_error to see how much of
+        # each commanded correction the arm actually delivered.
+        self.servo_move_pub = self.create_publisher(
+            Vector3Stamped, '/skill/grasp/servo_move', 10)
+        # Executed move minus the commanded correction, elementwise (== pose
+        # after the move minus the commanded goal): the move's tracking
+        # shortfall, in the pelvis frame. Zero = the arm did exactly as asked.
+        self.servo_move_residual_pub = self.create_publisher(
+            Vector3Stamped, '/skill/grasp/servo_move_residual', 10)
+        # Annotated hand-camera frame for the visual servo: the measured object
+        # (red dot), the setpoint with its X/Y tolerance (green ellipse), and the
+        # commanded correction (arrow), projected into the image. One per servo
+        # iteration. RAW sensor_msgs/Image, matching yolo_server's '/annotated'
+        # convention, so an RViz Image display on this topic just works — a
+        # compressed-only topic never appears in RViz's topic list at all,
+        # because nothing publishes the base name it looks for. Depth 1 and only
+        # while a servo runs (~0.4 Hz), so the bandwidth is bounded and brief.
+        self.servo_image_pub = self.create_publisher(
+            Image, '/skill/grasp/servo_image', 1)
 
         # --- head-camera caches (color for the services, depth+info for lifting
         #     a 2-D mask to a 3-D cloud) -----------------------------------------
@@ -356,6 +433,7 @@ class SkillsBase(Node):
             for cli in clis.values():
                 cli.wait_for_service(timeout_sec=10.0)
         self.frame_task_cli.wait_for_server(timeout_sec=10.0)
+        self.named_config_cli.wait_for_server(timeout_sec=10.0)
 
     # ----------------------------------------------------------- camera caches
     def _on_color_image(self, msg: CompressedImage):
@@ -679,6 +757,72 @@ class SkillsBase(Node):
         collision filtering. Returns None if depth/caminfo/TF are unavailable."""
         return self._depth_to_cloud(None, target_frame)
 
+    @staticmethod
+    def bundle_camera_frame(bundle):
+        """Optical frame id the bundle's depth (and so bundle_detection_point's
+        output) is expressed in, or None. The depth frame is authoritative;
+        camera_info's is the fallback."""
+        if bundle is None:
+            return None
+        return (bundle.depth_image.header.frame_id
+                or bundle.camera_info.header.frame_id or None)
+
+    def bundle_detection_point(self, bundle, det, min_depth=DEPTH_MIN_M):
+        """Back-project detection `det` of DetectionBundle `bundle` to a single
+        (x, y, z) point IN THE BUNDLE CAMERA'S OWN OPTICAL FRAME, or None.
+
+        Uses only what the bundle carries — yolo_server attaches each camera's
+        aligned depth + color intrinsics — so this works for ANY camera the
+        detector runs on without the skills node subscribing to it. That is what
+        makes the hand-camera visual servo possible (the node caches head depth
+        only). Alignment is the precondition: `depth_image` must be depth
+        resampled onto the color grid the boxes were measured in.
+
+        Deprojects the CENTRAL QUARTER of the box and takes the median, matching
+        _detection_point — box edges pick up background depth, and on a small
+        part that background is the support surface, which would bias the range.
+        Pair with bundle_camera_frame for the frame the point is expressed in.
+
+        `min_depth` overrides the DEPTH_MIN_M floor on valid depth. The default
+        (0.1 m) is tuned for the head camera and would clip a hand camera that is
+        deliberately CLOSER than that to its target, so a close-range caller must
+        lower it — see grasp.py's visual servo."""
+        if bundle is None or det is None:
+            return None
+        depth_msg, info = bundle.depth_image, bundle.camera_info
+        if not depth_msg.data or not info.width or not info.height:
+            self.get_logger().warn(
+                'bundle_detection_point: bundle carries no depth/caminfo — is '
+                'yolo_server new enough to attach them?')
+            return None
+        try:
+            depth = decode_compressed_depth_image(depth_msg).astype(np.float32) / 1000.0
+        except (ValueError, TypeError) as e:
+            self.get_logger().warn(f'bundle_detection_point: depth decode failed: {e}')
+            return None
+        h, w = depth.shape
+        if (int(info.height), int(info.width)) != (h, w):
+            self.get_logger().warn(
+                f'bundle_detection_point: depth {h}x{w} != caminfo '
+                f'{info.height}x{info.width} — depth is not aligned to the color '
+                'grid the boxes were measured in')
+            return None
+        cx_box = (det.bbox_min.x + det.bbox_max.x) / 2.0
+        cy_box = (det.bbox_min.y + det.bbox_max.y) / 2.0
+        half_w = max(1.0, abs(det.bbox_max.x - det.bbox_min.x) * 0.25)
+        half_h = max(1.0, abs(det.bbox_max.y - det.bbox_min.y) * 0.25)
+        u0, u1 = max(0, int(round(cx_box - half_w))), min(w, int(round(cx_box + half_w)))
+        v0, v1 = max(0, int(round(cy_box - half_h))), min(h, int(round(cy_box + half_h)))
+        if u1 <= u0 or v1 <= v0:
+            return None
+        mask = np.zeros((h, w), dtype=bool)
+        mask[v0:v1, u0:u1] = True
+        fx, fy, cx, cy = info.k[0], info.k[4], info.k[2], info.k[5]
+        pts = deproject_mask(mask, depth, fx, fy, cx, cy, min_depth, DEPTH_MAX_M)
+        if pts is None or len(pts) == 0:
+            return None
+        return np.median(pts, axis=0)
+
     def plan_grasp(self, cloud, frame, gripper_name, scene_cloud=None, arm=''):
         """Send an (N, 3) object cloud to the graspgen service. Pass an optional
         (M, 3) `scene_cloud` (same frame) to have the server collision-filter
@@ -710,7 +854,8 @@ class SkillsBase(Node):
 
     # ------------------------------------------------------- motion primitives
     def move_frame_to(self, frame, pose,
-                      outer_gh=None, duration_sec=3, do_plan=True):
+                      outer_gh=None, duration_sec=3, do_plan=True,
+                      slow_mode=False):
         """Send a frame to `pose` (position + orientation, in the pelvis frame) via
         /frame_task as a single combined move to the full target pose (target
         position + target orientation reached together).
@@ -718,16 +863,25 @@ class SkillsBase(Node):
         `frame` is the URDF frame to drive (GRASP_FRAMES[arm], the GraspGenX
         gripper-base frame, for grasping). Pass the skill's goal handle as outer_gh
         so a skill cancel promptly cancels the in-flight frame_task goal too. Returns
-        whether the move reached the target."""
+        whether the move reached the target.
+
+        `slow_mode` asks the frame_task server to run this goal at
+        SLOW_MODE_SCALE (1/4) arm speed — for delicate moves near an object or a
+        held payload. NOTE it does not stretch `duration_sec`, which is a
+        TIMEOUT: a slow move covers ~1/4 the distance in the same budget, so
+        callers must lengthen the duration themselves (see SLOW_MODE_TIME_SCALE
+        at the skill call sites)."""
         x, y, z = float(pose.position.x), float(pose.position.y), float(pose.position.z)
         quat = (pose.orientation.x, pose.orientation.y, pose.orientation.z, pose.orientation.w)
         target = Pose()
         target.position = Point(x=x, y=y, z=z)
         target.orientation = Quaternion(
             x=float(quat[0]), y=float(quat[1]), z=float(quat[2]), w=float(quat[3]))
-        return self._send_frame_move(frame, target, duration_sec, outer_gh, do_plan)
+        return self._send_frame_move(frame, target, duration_sec, outer_gh, do_plan,
+                                     slow_mode=slow_mode)
 
-    def _send_frame_move(self, frame, pose, duration_sec, outer_gh, do_plan):
+    def _send_frame_move(self, frame, pose, duration_sec, outer_gh, do_plan,
+                         slow_mode=False):
         """Command ONE /frame_task goal: drive `frame` to `pose` (a Pose already in
         the pelvis frame) over `duration_sec`, returning whether it reached the
         target (gated on the server's streamed IK convergence). The building block
@@ -736,6 +890,7 @@ class SkillsBase(Node):
         goal.frame_names = [frame]
         goal.frame_targets = [pose]
         goal.plan = do_plan
+        goal.slow_mode = bool(slow_mode)
         x, y, z = pose.position.x, pose.position.y, pose.position.z
         # Preserve fractional seconds (int() truncation silently shortened the
         # motion budget, e.g. 1.8s -> 1s).
@@ -744,7 +899,8 @@ class SkillsBase(Node):
             sec=whole, nanosec=int(round((float(duration_sec) - whole) * 1e9)))
 
         self.get_logger().info(
-            f'frame_task: {frame} -> ({x:.3f}, {y:.3f}, {z:.3f}) in {duration_sec}s')
+            f'frame_task: {frame} -> ({x:.3f}, {y:.3f}, {z:.3f}) in {duration_sec}s'
+            + (' [SLOW]' if slow_mode else ''))
 
         # Log the frame_task server's streamed IK convergence (errors_linear /
         # errors_angular, one entry per driven frame) so a skill's approach/contact
@@ -809,10 +965,33 @@ class SkillsBase(Node):
         ang = quat_geodesic((q.x, q.y, q.z, q.w), target_quat)
         return lin, ang
 
+    def goto_named_config(self, name, duration_sec=0.0, plan=False,
+                          result_timeout=60.0, outer_gh=None):
+        """Drive the arms to the frame_task server's named configuration `name`
+        (e.g. 't_pose', 'home') via the /named_config action. `duration_sec`
+        0 = the server's default move timeout; `plan`=True requests the planned
+        move instead of the direct IK descent. Returns True when the server
+        reports success. Pass the outer skill goal handle as `outer_gh` so
+        canceling the skill also cancels the in-flight arm move."""
+        goal = NamedConfig.Goal()
+        goal.plan = bool(plan)
+        goal.config_name = name
+        goal.duration.sec = int(duration_sec)
+        goal.duration.nanosec = int((duration_sec - int(duration_sec)) * 1e9)
+        response = self._send_action(self.named_config_cli, goal,
+                                     result_timeout=result_timeout,
+                                     outer_gh=outer_gh)
+        ok = (response is not None
+              and response.status == GoalStatus.STATUS_SUCCEEDED
+              and response.result.success)
+        self.get_logger().info(
+            f'named_config {name!r}: {"reached" if ok else "FAILED"}')
+        return ok
+
     def servo_frame_to_world(self, frame, world_pose, fallback_pose, outer_gh=None,
                              duration_sec=10.0, max_iter=SERVO_ITER,
                              lin_tol=SERVO_LIN_TOL, ang_tol=SERVO_ANG_TOL,
-                             do_plan=True):
+                             do_plan=True, slow_mode=False):
         """Drive `frame` to `world_pose` (a Pose in WORLD_FRAME), compensating for
         pelvis drift during the motion. Each iteration re-resolves the fixed world
         target into the LIVE pelvis frame, commands frame_task there, then MEASURES
@@ -828,13 +1007,20 @@ class SkillsBase(Node):
 
         `do_plan` is forwarded to every frame_task move: pass False for a short,
         committed straight-in move (e.g. pre-grasp -> contact) where collision-aware
-        planning would fight the intended approach into the object."""
+        planning would fight the intended approach into the object.
+
+        `slow_mode` is likewise forwarded to every move of the servo, including
+        the drift-fix iterations and the no-world-anchor fallback, so the whole
+        servo runs at one speed. The CALLER scales `duration_sec` by
+        SLOW_MODE_TIME_SCALE; the short per-iteration drift-fix budget is scaled
+        here, since callers never see it."""
         if world_pose is None:
             self.get_logger().warn(
                 f'servo[{frame}]: no {WORLD_FRAME} anchor; direct pelvis move '
                 '(pelvis-drift compensation OFF)')
             return self.move_frame_to(frame, fallback_pose, outer_gh=outer_gh,
-                                      duration_sec=duration_sec, do_plan=do_plan)
+                                      duration_sec=duration_sec, do_plan=do_plan,
+                                      slow_mode=slow_mode)
         tp = np.array([world_pose.position.x, world_pose.position.y,
                        world_pose.position.z])
         tq = (world_pose.orientation.x, world_pose.orientation.y,
@@ -848,10 +1034,15 @@ class SkillsBase(Node):
                 self.get_logger().warn(
                     f'servo[{frame}]: lost {WORLD_FRAME} TF; pelvis fallback')
                 return self.move_frame_to(frame, fallback_pose, outer_gh=outer_gh,
-                                          duration_sec=duration_sec, do_plan=do_plan)
-            dur = duration_sec if i == 0 else 3.0   # iter 0 = full approach; later = drift fixes
+                                          duration_sec=duration_sec, do_plan=do_plan,
+                                          slow_mode=slow_mode)
+            # iter 0 = full approach (caller already scaled it for slow mode);
+            # later = short drift fixes, scaled here so they too reach at 1/4 speed.
+            dur = duration_sec if i == 0 else (
+                3.0 * (SLOW_MODE_TIME_SCALE if slow_mode else 1.0))
             ok = self.move_frame_to(frame, pelvis_pose, outer_gh=outer_gh,
-                                    duration_sec=dur, do_plan=do_plan)
+                                    duration_sec=dur, do_plan=do_plan,
+                                    slow_mode=slow_mode)
             lin, ang = self._world_frame_error(frame, tp, tq)
             if lin is None:                    # could not measure -> pelvis-frame result
                 return ok
@@ -890,7 +1081,13 @@ class SkillsBase(Node):
 
     def set_gripper(self, arm, position_mm, speed=1.0):
         """Direct position command (mm); used to pre-open to a measured grasp
-        width. Full open/close go through the dedicated services below."""
+        width. Full open/close go through the dedicated services below.
+
+        Cancels any grip-hold loop on this arm FIRST: this is the one funnel
+        every aperture command goes through (open_gripper included), so an
+        explicit position always wins over a hold that would otherwise keep
+        re-closing on top of it."""
+        self._stop_grip_hold(arm)
         req = SetGripperPosition.Request()
         req.position = float(position_mm)
         req.speed = float(speed)
@@ -928,7 +1125,11 @@ class SkillsBase(Node):
         """Open the gripper by `amount`, a fraction of its full range where 0 is
         fully closed and 1 is fully open (default 1 = fully open). Commanded as a
         position so intermediate openings are honored. Waits GRIPPER_SETTLE_SEC
-        after commanding so the fingers finish moving before the arm does."""
+        after commanding so the fingers finish moving before the arm does.
+
+        This is what ENDS a grip-hold loop (via set_gripper): the hold started by
+        close_gripper runs until the gripper is opened, outliving the skill that
+        grasped."""
         amount = min(max(float(amount), 0.0), 1.0)
         if not self.set_gripper(arm, amount * GRIPPER_MAX_WIDTH_MM):
             return False
@@ -942,13 +1143,94 @@ class SkillsBase(Node):
         object at that force. A force-based close rather than a position command —
         the fingers seek and grip the object at `force_n` (N) whatever its width.
         Waits GRIPPER_SETTLE_SEC after triggering so the fingers finish closing
-        before the arm moves (the /close service returns almost immediately)."""
+        before the arm moves (the /close service returns almost immediately).
+
+        Then starts the GRIP-HOLD LOOP (_grip_hold_loop): a background thread
+        that re-asserts the grip at GRIP_HOLD_RATE_HZ so a Dynamixel overload
+        can't quietly drop the object. It keeps running after this call and
+        after the skill returns — the object is still held — until the gripper
+        is opened. Every caller of close_gripper gets this."""
         if not self.set_gripper_force(arm, force_n):
             return False
         if not self._trigger_gripper(self.gripper_close_clis[arm], f'close({arm})'):
             return False
         self.get_clock().sleep_for(RclpyDuration(seconds=GRIPPER_SETTLE_SEC))   # let the fingers finish closing before the arm moves
+        # Only now, so the loop's first tick can't race the initial close.
+        self._start_grip_hold(arm)
         return True
+
+    # ------------------------------------------------------------- grip hold
+    def _start_grip_hold(self, arm):
+        """Start (or restart) the background grip-hold loop for `arm`. Safe to
+        call when one is already running — the old thread is stopped first, so
+        there is never more than one loop per arm."""
+        self._stop_grip_hold(arm)
+        stop = threading.Event()
+        thread = threading.Thread(target=self._grip_hold_loop, args=(arm, stop),
+                                  name=f'grip_hold_{arm}', daemon=True)
+        self._grip_hold[arm] = (thread, stop)
+        thread.start()
+        self.get_logger().info(
+            f'gripper {arm}: grip-hold loop started at {GRIP_HOLD_RATE_HZ:.0f} Hz '
+            '(reset_overload + close); runs until the gripper is opened')
+
+    def _stop_grip_hold(self, arm):
+        """Stop the grip-hold loop for `arm` and WAIT for its thread to finish,
+        so no tick is in flight when the caller then commands the gripper —
+        otherwise a stray re-close would race the open it is about to send."""
+        entry = self._grip_hold.pop(arm, None)
+        if entry is None:
+            return
+        thread, stop = entry
+        stop.set()
+        thread.join(timeout=2.0)
+        if thread.is_alive():
+            self.get_logger().warn(
+                f'gripper {arm}: grip-hold thread did not stop within 2s; '
+                'it will exit on its next tick')
+        else:
+            self.get_logger().info(f'gripper {arm}: grip-hold loop stopped')
+
+    def _grip_hold_loop(self, arm, stop):
+        """Re-assert the grip on `arm` until `stop` is set: every tick, call
+        reset_overload (clear any Dynamixel overload without releasing) and then
+        close (re-drive the fingers shut at the force set by close_gripper).
+
+        Runs on its own thread. That is safe here because the node spins a
+        MultiThreadedExecutor over one ReentrantCallbackGroup, so blocking on a
+        service future off the executor thread does not deadlock it. Calls go
+        through _wait_future directly rather than _call_service so that failures
+        can be throttled — at this rate _call_service's per-failure error log
+        would be ~10 lines/s against a dead service.
+
+        Failures are never fatal: a tick that fails is logged (throttled) and
+        the loop simply tries again."""
+        period = 1.0 / GRIP_HOLD_RATE_HZ
+        calls = ((self.gripper_reset_clis[arm], 'reset_overload'),
+                 (self.gripper_close_clis[arm], 'close'))
+        fails = 0
+        while not stop.is_set():
+            ok, failed = True, ''
+            for client, label in calls:
+                if stop.is_set():
+                    return
+                result = None
+                if client.service_is_ready():
+                    result = self._wait_future(
+                        client.call_async(Trigger.Request()),
+                        GRIP_HOLD_CALL_TIMEOUT_SEC)
+                if result is None or not result.success:
+                    ok, failed = False, label
+            if ok:
+                fails = 0
+            else:
+                if fails % GRIP_HOLD_WARN_EVERY == 0:
+                    self.get_logger().warn(
+                        f'gripper {arm}: grip-hold {failed} failed '
+                        f'({fails + 1} consecutive tick(s)); still retrying')
+                fails += 1
+            if stop.wait(period):
+                break
 
     def _validated_arm(self, goal):
         arm = goal.arm.strip().lower()

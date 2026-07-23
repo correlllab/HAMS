@@ -222,6 +222,12 @@ def sim_loop(task, viewer=True, layout=None, style=None, seed=None):
         # are the knobs to dial back if the ray cast (main thread) hurts RTF.
         lidar_az_rays=360, lidar_el_rays=56,
         lidar_rate_hz=10.0, lidar_max_range=40.0, lidar_min_range=0.1,
+        # 200 Hz IMU matches the real MID-360 (ICM-40609); the bridge default is
+        # 100 Hz. FAST-LIO integrates the IMU to propagate between the 10 Hz lidar
+        # scans, and the walking gait's high-frequency accelerations alias badly
+        # at 100 Hz -> pose drift/divergence. 200 Hz gives cleaner propagation
+        # through the gait wobble. (IMU sensor reads are cheap vs the ray cast.)
+        imu_rate_hz=200.0,
         lidar_body=f"{pfx}livox_link",
         lidar_exclude_body=f"{pfx}torso_link",
         imu_quat_sensor=f"{pfx}livox_imu_quat",

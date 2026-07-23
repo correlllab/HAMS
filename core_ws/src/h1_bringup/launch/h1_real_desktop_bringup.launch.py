@@ -4,10 +4,12 @@ from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import (
     DeclareLaunchArgument,
+    IncludeLaunchDescription,
     TimerAction,
 )
 from launch.conditions import IfCondition
-from launch.substitutions import LaunchConfiguration
+from launch.launch_description_sources import PythonLaunchDescriptionSource
+from launch.substitutions import AndSubstitution, LaunchConfiguration, PythonExpression
 from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
 
@@ -33,33 +35,6 @@ def generate_launch_description():
     # False; all nodes below share this parameter.
     sim_time_param = {'use_sim_time': False}
 
-    # --- CPU affinity (soft pin, i7-14700F hybrid: 0-15 P-cores, 16-27 E-cores) ---
-    # Give MJPC's lowerbody controller (and the mjpc_lowerbody_core planner it
-    # Popens, which inherits this mask) the 12 fast P-core threads 0-11 to itself,
-    # sized to plan_threads: 12 in config/mjpc_real.yaml so the planner threadpool
-    # fills exactly those cores and nothing else contends.
-    #
-    # The 200Hz base estimator gets its OWN dedicated P-core (12). It used to share
-    # 0-11 with the planner, so when the 12 planner threads saturated those cores the
-    # estimator's DDS receive thread starved -> rt/lowstate stopped draining -> frozen
-    # velocity + dead-reckoning drift + the controller's state-stale safe-hold. A
-    # dedicated core keeps the estimator's receive+filter loop scheduled.
-    #
-    # Core 13 is reserved for eno1's network-RX IRQ/softirq, which is pinned on the
-    # HOST (see README "Network / DDS tuning" step 3 + scripts/pin_net_irq.sh). eno1
-    # has a single RX queue, and irqbalance was parking its IRQ on core 11 -> every
-    # /lowstate + tf packet was processed in softirq on a core the planner had
-    # saturated, so the 500Hz robot state arrived at niraj at ~400Hz with multi-second
-    # stalls. Keeping the NIC softirq on its own core, off the RT set (0-12), fixes it.
-    #
-    # Everything else (vision model servers, rviz) is pushed onto 14-27 so it can't
-    # steal a P-core mid-balance-loop or the network core. SOFT reservation: taskset
-    # pins these processes but host/kernel threads can still float onto 0-13 (add
-    # isolcpus=0-13 to the kernel cmdline for a hard reservation).
-    MJPC_CPUS = 'taskset -c 0-11'       # lowerbody controller + planner (plan_threads=12)
-    ESTIMATOR_CPUS = 'taskset -c 12'    # dedicated core for the 200Hz base estimator
-    OTHER_CPUS = 'taskset -c 14-27'     # vision servers, rviz, everything else (13 = NIC IRQ)
-
     # Per-model debug logging + visualization toggles, shared by the graspgen,
     # gemini, sam, and skills nodes. Both on by default; disable with
     # `model_logging:=false model_visualization:=false` at launch. clear_logs (on
@@ -81,17 +56,38 @@ def generate_launch_description():
         # (start_position_verified:=true). Defaults to false so a bare launch
         # never auto-commands the legs on the real robot.
         DeclareLaunchArgument('start_position_verified', default_value='false'),
+        # Which controller drives the legs once start_position_verified:=true.
+        # 'almi' (default) = the switchable RL controller pinned to the ALMI
+        # policy; 'fame' | 'walk' pin the other RL policies; 'mjpc' restores
+        # the MJPC balance controller and gates the RL node off — only one
+        # lower-body controller may feed /safety/lowcmd_lower_in. Every leg
+        # path stays behind the start_position_verified interlock, and the RL
+        # node additionally holds at the pre-pose crouch until the operator
+        # confirms:  ros2 service call /lowerbody/confirm_engage std_srvs/srv/Trigger
+        DeclareLaunchArgument('lowerbody', default_value='almi'),
         DeclareLaunchArgument('use_skills', default_value='true'),
         DeclareLaunchArgument('model_logging', default_value='true'),
         DeclareLaunchArgument('model_visualization', default_value='true'),
         DeclareLaunchArgument('model_clear_logs', default_value='true'),
+
+        # Both hand/wrist RealSense cameras and their camera->link static TFs.
+        # These live on the companion desktop (the wrists' USB runs here), while
+        # the head camera comes up with the onboard driver bringup
+        # (h1_real_drivers.launch.py). Equivalent of
+        # `ros2 launch cl_realsense h12_hand_cameras.launch.py`.
+        IncludeLaunchDescription(
+            PythonLaunchDescriptionSource(
+                os.path.join(
+                    get_package_share_directory('cl_realsense'),
+                    'launch', 'h12_hand_cameras.launch.py')
+            )
+        ),
 
         # vision foundation-model services (gemini + sam, served by model_server)
         Node(
             package='model_server',
             executable='gemini_server',
             name='gemini_server',
-            prefix=OTHER_CPUS,
             parameters=[sim_time_param, model_log_params],
             output='screen',
         ),
@@ -99,7 +95,6 @@ def generate_launch_description():
             package='model_server',
             executable='sam_server',
             name='sam_server',
-            prefix=OTHER_CPUS,
             parameters=[sim_time_param, model_log_params],
             output='screen',
         ),
@@ -116,7 +111,6 @@ def generate_launch_description():
             package='model_server',
             executable='yolo_server',
             name='yolo_server',
-            prefix=OTHER_CPUS,
             parameters=[sim_time_param, model_log_params],
             output='screen',
         ),
@@ -131,7 +125,6 @@ def generate_launch_description():
             package='model_server',
             executable='graspgen_server',
             name='graspgen_server',
-            prefix=OTHER_CPUS,
             parameters=[sim_time_param, model_log_params],
             output='screen',
             condition=IfCondition(LaunchConfiguration('use_skills')),
@@ -140,67 +133,106 @@ def generate_launch_description():
             package='h12_skills',
             executable='skills',
             name='h12_skills',
-            prefix=OTHER_CPUS,
             parameters=[sim_time_param, model_log_params],
             output='screen',
             condition=IfCondition(LaunchConfiguration('use_skills')),
         ),
 
-        # Switchable lower-body RL controller (walk / FAME stand-squat).
-        # Auto-engages the FAME standing policy; switch via /lowerbody/start_walk
-        # or /lowerbody/set_policy (waits for a safe handover before committing).
-        # Only launched once the start position has been verified.
+        # Switchable lower-body RL controller (almi / fame / walk) — launched
+        # only when lowerbody:= names an RL policy AND the operator has verified
+        # the start position; the MJPC controller below is gated off in that
+        # case. The chosen policy is pinned as active_policy (fame/walk still
+        # auto-switch between themselves on /cmd_vel; almi never auto-switches —
+        # it stands AND walks itself).
+        Node(
+            package='h12_lowerbody_rl',
+            executable='lowerbody_controller_node',
+            name='lowerbody_controller_node',
+            parameters=[sim_time_param,
+                        {'active_policy': LaunchConfiguration('lowerbody'),
+                         # The elastic band is a SIM fixture; on real there is
+                         # no /elastic_band/toggle service, so the release path
+                         # only costs a 1 s blocking wait_for_service inside the
+                         # engage tick (first policy command then computed from
+                         # 1 s-stale state) plus a redundant second LSTM reset.
+                         # The operator lowers the gantry instead.
+                         'disable_elastic_band': False,
+                         # Startup seed for the LIVE IMU trim (adjust during a
+                         # run with rqt_reconfigure sliders or ros2 param set).
+                         # Negative pitch = anti-lean bias (policy believes it
+                         # pitches further forward and fights harder); the
+                         # hanging-plumb static calibration would be +0.264.
+                         'imu_offset_roll_deg': 2.0,
+                         'imu_offset_pitch_deg': -2.5,
+                         'imu_offset_yaw_deg': 0.0}],
+            output='screen',
+            condition=IfCondition(AndSubstitution(
+                LaunchConfiguration('start_position_verified'),
+                PythonExpression(
+                    ["'", LaunchConfiguration('lowerbody'), "' != 'mjpc'"]),
+            )),
+        ),
+
+        # DISABLED. Read-only sim-vs-real gap diagnostic for the RL controller
+        # above -- watches /safety/lowcmd_lower_in, /lowstate, /lowcmd for
+        # control-loop timing gaps, safety-layer clamp deltas, and tracking
+        # error. Waits for the operator's /lowerbody/confirm_engage arming step
+        # itself (see sim2real_gap_monitor's docstring), so it is safe to bring
+        # up alongside the controller rather than after it is armed.
+        # Purely diagnostic -- nothing in the control path reads it, so leaving
+        # it out changes no robot behaviour. Uncomment to get the gap report back.
         # Node(
         #     package='h12_lowerbody_rl',
-        #     executable='lowerbody_controller_node',
-        #     name='lowerbody_controller_node',
-        #     parameters=[sim_time_param, {'active_policy': 'fame'}],
+        #     executable='sim2real_gap_monitor',
+        #     name='sim2real_gap_monitor',
         #     output='screen',
-        #     condition=IfCondition(LaunchConfiguration('start_position_verified')),
+        #     condition=IfCondition(AndSubstitution(
+        #         LaunchConfiguration('start_position_verified'),
+        #         PythonExpression(
+        #             ["'", LaunchConfiguration('lowerbody'), "' != 'mjpc'"]),
+        #     )),
         # ),
 
 
-        Node(
-            package='h12_deploy_mjpc',
-            executable='estimator_node',
-            name='h12_deploy_mjpc_estimator',   # MUST match the yaml key
-            prefix=ESTIMATOR_CPUS,
-            parameters=[
-                sim_time_param,
-                os.path.join(get_package_share_directory('h1_bringup'),
-                            'config', 'mjpc_real.yaml'),
-            ],
-            output='screen',
-            condition=IfCondition(LaunchConfiguration('start_position_verified')),
+        # Node(
+        #     package='h12_deploy_mjpc',
+        #     executable='estimator_node',
+        #     name='h12_deploy_mjpc_estimator',   # MUST match the yaml key
+        #     parameters=[
+        #         sim_time_param,
+        #         os.path.join(get_package_share_directory('h1_bringup'),
+        #                     'config', 'mjpc_real.yaml'),
+        #     ],
+        #     output='screen',
+        #     condition=IfCondition(LaunchConfiguration('start_position_verified')),
 
-        ),
+        # ),
 
-        # --- MJPC lower-body balance controller (spawns mjpc_lowerbody_core) ---
-        Node(
-            package='h12_deploy_mjpc',
-            executable='mjpc_deploy_lowerbody_controller',
-            name='mjpc_deploy_lowerbody_controller',   # MUST match the yaml key
-            # taskset pins THIS launcher; the mjpc_lowerbody_core it Popens inherits
-            # the 0-11 affinity mask (see controller_launcher.py). plan_threads (yaml)
-            # caps its planner threadpool to match.
-            prefix=MJPC_CPUS,
-            parameters=[
-                sim_time_param,
-                os.path.join(get_package_share_directory('h1_bringup'),
-                            'config', 'mjpc_real.yaml'),
-            ],
-            # mjpc resolves task model XMLs relative to MJPC_TASKS_DIR; without it
-            # the model is null -> mj_makeData segfault on startup.
-            additional_env={'MJPC_TASKS_DIR': '/home/code/mujoco_mpc/build/mjpc/tasks'},
-            output='screen',
-            condition=IfCondition(LaunchConfiguration('start_position_verified')),
-        ),
+        # # --- MJPC lower-body balance controller (spawns mjpc_lowerbody_core) ---
+        # Node(
+        #     package='h12_deploy_mjpc',
+        #     executable='mjpc_deploy_lowerbody_controller',
+        #     name='mjpc_deploy_lowerbody_controller',   # MUST match the yaml key
+        #     parameters=[
+        #         sim_time_param,
+        #         os.path.join(get_package_share_directory('h1_bringup'),
+        #                     'config', 'mjpc_real.yaml'),
+        #     ],
+        #     # mjpc resolves task model XMLs relative to MJPC_TASKS_DIR; without it
+        #     # the model is null -> mj_makeData segfault on startup.
+        #     additional_env={'MJPC_TASKS_DIR': '/home/code/mujoco_mpc/build/mjpc/tasks'},
+        #     output='screen',
+        #     condition=IfCondition(AndSubstitution(
+        #         LaunchConfiguration('start_position_verified'),
+        #         PythonExpression(
+        #             ["'", LaunchConfiguration('lowerbody'), "' == 'mjpc'"]),
+        #     )),
+        # ),
 
         Node(
             package='rviz2',
             executable='rviz2',
             name='rviz2_sim',
-            prefix=OTHER_CPUS,
             arguments=['-d',default_rviz],
             parameters=[sim_time_param],
             output='screen',

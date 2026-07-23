@@ -8,9 +8,9 @@ from launch.actions import (
     SetEnvironmentVariable,
     TimerAction,
 )
-from launch.conditions import IfCondition
+from launch.conditions import IfCondition, LaunchConfigurationEquals, LaunchConfigurationNotEquals
 from launch.launch_description_sources import PythonLaunchDescriptionSource
-from launch.substitutions import LaunchConfiguration
+from launch.substitutions import AndSubstitution, LaunchConfiguration, PythonExpression
 from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
 
@@ -69,6 +69,17 @@ def generate_launch_description():
         # mp4 (written on shutdown). Reads rt/lowstate + the estimator + rt/mjpc/plan;
         # commands nothing. use_mjpc_viz:=false for a clean bringup.
         DeclareLaunchArgument('use_mjpc_viz', default_value='true'),
+        # Which controller drives the legs. 'almi' (default) = the switchable RL
+        # controller (h12_lowerbody_rl lowerbody_controller_node): ALMI stands,
+        # hands off to the walk policy on /cmd_vel, and follows nav2. 'fame' /
+        # 'walk' pin that same RL controller to those policies instead. The RL
+        # controller launches for any value != 'mjpc'. NOTE: the MJPC nodes
+        # below are currently COMMENTED OUT, so 'mjpc' launches NO leg
+        # controller (legs uncontrolled) — the RL controller is the only working
+        # sim option right now, which is why the default is 'almi'. Only the SIM
+        # bringup defaults to almi; the real-robot bringup still defaults to mjpc
+        # behind the start_position_verified interlock.
+        DeclareLaunchArgument('lowerbody', default_value='almi'),  # almi | almi27 | fame | walk
         DeclareLaunchArgument('model_logging', default_value='true'),
         DeclareLaunchArgument('model_visualization', default_value='true'),
         DeclareLaunchArgument('model_clear_logs', default_value='true'),
@@ -144,68 +155,86 @@ def generate_launch_description():
             output='screen',
         ),
 
-        # Switchable lower-body RL controller (walk / FAME stand-squat).
-        # Auto-engages the FAME standing policy; switch via /lowerbody/start_walk
-        # or /lowerbody/set_policy (waits for a safe handover before committing).
+        # Switchable lower-body RL controller (almi / fame / walk) — launched
+        # only when lowerbody:= names an RL policy; the MJPC controller below
+        # is gated off in that case. The chosen policy is pinned as
+        # active_policy (fame/walk still auto-switch between themselves on
+        Node(
+            package='h12_lowerbody_rl',
+            executable='lowerbody_controller_node',
+            name='lowerbody_controller_node',
+            parameters=[sim_time_param,
+                        {'active_policy': LaunchConfiguration('lowerbody'),  # almi/almi27/fame/walk
+                         # Sim auto-engages after the pre-pose settles (unattended
+                         # runs); the operator-confirm arming gate is a REAL-robot
+                         # step (see h1_real_desktop_bringup.launch.py).
+                         'engage_wait_for_confirm': False,
+                         # Sim's IMU has no mounting bias to correct (the live
+                         # trim sliders still work for experiments).
+                         'imu_offset_roll_deg': 0.0,
+                         'imu_offset_pitch_deg': 0.0,
+                         'imu_offset_yaw_deg': 0.0}],
+            output='screen',
+        ),
+
+        # --- MJPC lower-body base estimator (RW-EKF) -> rt/sportmodestate_est ---
         # Node(
-        #     package='h12_lowerbody_rl',
-        #     executable='lowerbody_controller_node',
-        #     name='lowerbody_controller_node',
-        #     parameters=[sim_time_param, {'active_policy': 'fame'}],
+        #     package='h12_deploy_mjpc',
+        #     executable='estimator_node',
+        #     name='h12_deploy_mjpc_estimator',   # MUST match the yaml key
+        #     parameters=[
+        #         sim_time_param,
+        #         os.path.join(get_package_share_directory('h1_bringup'),
+        #                     'config', 'mjpc_sim.yaml'),
+        #     ],
         #     output='screen',
         # ),
 
-        # --- MJPC lower-body base estimator (RW-EKF) -> rt/sportmodestate_est ---
-        Node(
-            package='h12_deploy_mjpc',
-            executable='estimator_node',
-            name='h12_deploy_mjpc_estimator',   # MUST match the yaml key
-            parameters=[
-                sim_time_param,
-                os.path.join(get_package_share_directory('h1_bringup'),
-                            'config', 'mjpc_sim.yaml'),
-            ],
-            output='screen',
-        ),
-
-        # --- MJPC lower-body balance controller (spawns mjpc_lowerbody_core) ---
-        Node(
-            package='h12_deploy_mjpc',
-            executable='mjpc_deploy_lowerbody_controller',
-            name='mjpc_deploy_lowerbody_controller',   # MUST match the yaml key
-            parameters=[
-                sim_time_param,
-                os.path.join(get_package_share_directory('h1_bringup'),
-                            'config', 'mjpc_sim.yaml'),
-            ],
-            # mjpc resolves task model XMLs relative to MJPC_TASKS_DIR; without it
-            # the model is null -> mj_makeData segfault on startup.
-            additional_env={'MJPC_TASKS_DIR': '/home/code/mujoco_mpc/build/mjpc/tasks'},
-            output='screen',
-        ),
+        # # --- MJPC lower-body balance controller (spawns mjpc_lowerbody_core) ---
+        # Node(
+        #     package='h12_deploy_mjpc',
+        #     executable='mjpc_deploy_lowerbody_controller',
+        #     name='mjpc_deploy_lowerbody_controller',   # MUST match the yaml key
+        #     parameters=[
+        #         sim_time_param,
+        #         os.path.join(get_package_share_directory('h1_bringup'),
+        #                     'config', 'mjpc_sim.yaml'),
+        #     ],
+        #     # mjpc resolves task model XMLs relative to MJPC_TASKS_DIR; without it
+        #     # the model is null -> mj_makeData segfault on startup.
+        #     additional_env={'MJPC_TASKS_DIR': '/home/code/mujoco_mpc/build/mjpc/tasks'},
+        #     output='screen',
+        #     condition=LaunchConfigurationEquals('lowerbody', 'mjpc'),
+        # ),
 
         # --- MJPC plan debug visualizer (measured robot + blue ghost of the plan) ---
         # Subscribes only: rt/lowstate + rt/sportmodestate_est (the estimator above) +
         # rt/mjpc/plan (published by the controller's planner thread). Writes an mp4 on
         # shutdown. Nothing in the control path depends on it.
-        Node(
-            package='h12_deploy_mjpc',
-            executable='mjpc_debug_visualizer',
-            name='mjpc_debug_visualizer',   # MUST match the yaml key
-            parameters=[
-                sim_time_param,
-                os.path.join(get_package_share_directory('h1_bringup'),
-                            'config', 'mjpc_sim.yaml'),
-            ],
-            # MJPC_TASKS_DIR: the viewer loads the SAME staged task XML as the
-            # controller, so the plan's qpos rows line up with its model.
-            # MUJOCO_GL=osmesa: offscreen software GL -- needs no GPU, and unlike egl
-            # it works under both compose and `docker run --gpus all`.
-            additional_env={'MJPC_TASKS_DIR': '/home/code/mujoco_mpc/build/mjpc/tasks',
-                            'MUJOCO_GL': 'osmesa'},
-            output='screen',
-            condition=IfCondition(LaunchConfiguration('use_mjpc_viz')),
-        ),
+        # Node(
+        #     package='h12_deploy_mjpc',
+        #     executable='mjpc_debug_visualizer',
+        #     name='mjpc_debug_visualizer',   # MUST match the yaml key
+        #     parameters=[
+        #         sim_time_param,
+        #         os.path.join(get_package_share_directory('h1_bringup'),
+        #                     'config', 'mjpc_sim.yaml'),
+        #     ],
+        #     # MJPC_TASKS_DIR: the viewer loads the SAME staged task XML as the
+        #     # controller, so the plan's qpos rows line up with its model.
+        #     # MUJOCO_GL=osmesa: offscreen software GL -- needs no GPU, and unlike egl
+        #     # it works under both compose and `docker run --gpus all`.
+        #     additional_env={'MJPC_TASKS_DIR': '/home/code/mujoco_mpc/build/mjpc/tasks',
+        #                     'MUJOCO_GL': 'osmesa'},
+        #     output='screen',
+        #     # Viz reads rt/mjpc/plan, which only exists when the MJPC
+        #     # controller is the active lower body.
+        #     condition=IfCondition(AndSubstitution(
+        #         LaunchConfiguration('use_mjpc_viz'),
+        #         PythonExpression(
+        #             ["'", LaunchConfiguration('lowerbody'), "' == 'mjpc'"]),
+        #     )),
+        # ),
 
 
         # graspgen_server: GraspGenX 6-DOF grasp-planning service (`graspgen`).
@@ -267,3 +296,4 @@ def generate_launch_description():
         #     ],
         # ),
     ])
+

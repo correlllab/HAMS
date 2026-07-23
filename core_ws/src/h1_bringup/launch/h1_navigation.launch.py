@@ -79,25 +79,31 @@ def generate_launch_description():
         parameters=[
             {'target_frame': 'pelvis'},
             {'use_sim_time': use_sim_time},
-            # Height band in pelvis frame. Tight enough to exclude the
-            # robot's own head/neck (above) and feet (well below); wide
-            # enough to catch knee-to-chest height obstacles at distance.
-            # Pelvis sits ~1.03 m above the floor, so -0.90 collapses returns
-            # from ~0.13 m up (was -0.55 ≈ 0.48 m / knee height) to catch low
-            # shelves and table legs/aprons. Lower bound is a floor-clearance
-            # margin: drop further only until the floor/own-feet start marking.
-            {'min_height': -0.90},
-            {'max_height': 0.55},
+            # Height band per the real-verified reference implementation
+            # (correlllab/fast_lio_nav2_humanoid nav2.launch.py: -0.65..+0.65
+            # from pelvis). The previous in-tree -0.90 had drifted from that
+            # and put the FLOOR inside the band once the ALMI crouch lowered
+            # the pelvis to ~0.78 m — measured 2026-07-19 as a uniform lethal
+            # ring at every bearing in the local costmap ("Collision Ahead"
+            # aborts). The verified -0.65 keeps the floor out in every stance.
+            {'min_height': -0.65},
+            {'max_height': 0.65},   # verified reference value
             {'angle_min': -3.14159},
             {'angle_max': 3.14159},
             {'angle_increment': 0.0087},
             # range_min is the 2D horizontal distance from the pelvis origin
-            # after transforming the cloud to target_frame. The H1 body
-            # envelope is ≤ 0.35 m horizontal from pelvis, so 0.6 m drops
-            # every self-return (legs in mid-stride, arms hanging, torso)
-            # while leaving close-but-not-on-robot obstacles visible.
-            {'range_min': 0.6},
-            {'range_max': 6.0},
+            # after transforming the cloud to target_frame. 0.6 m covered the
+            # hanging-arm envelope, but with the IK holding the arms at home
+            # (and during named-config motions) the hands reach 0.6-0.8 m from
+            # the pelvis: measured 2026-07-19, ~25% of scan returns landed
+            # inside 0.8 m concentrated in the forward +/-60 deg cone, marking
+            # LETHAL cells inside the robot's own footprint and locking nav2
+            # into "Collision Ahead" aborts (self-marks also defeat raytrace
+            # clearing — the arm re-marks the cell every scan). 0.9 m keeps the
+            # whole arm workspace inside the blind ring; the costmap inflation
+            # covers the wider near-field gap.
+            {'range_min': 0.9},
+            {'range_max': 3.0},    # verified reference value
             {'use_inf': True},
             {'scan_time': 0.0333},
             {'transform_tolerance': 0.05},
