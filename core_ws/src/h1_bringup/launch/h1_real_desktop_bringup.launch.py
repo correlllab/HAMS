@@ -105,13 +105,18 @@ def generate_launch_description():
             )
         ),
 
-        # vision foundation-model services (gemini + sam, served by model_server)
+        # vision foundation-model services (gemini + sam, served by model_server).
+        # Gated on use_skills: they exist only to feed the grasp pipeline, and
+        # their startup traffic (esp. GPU model loads) floods DDS and starves
+        # rt/lowstate -> the upper MPC sees stale state and drops to damping. A
+        # motion-only test (use_skills:=false) must NOT bring them up.
         Node(
             package='model_server',
             executable='gemini_server',
             name='gemini_server',
             parameters=[sim_time_param, model_log_params],
             output='screen',
+            condition=IfCondition(LaunchConfiguration('use_skills')),
         ),
         Node(
             package='model_server',
@@ -119,6 +124,7 @@ def generate_launch_description():
             name='sam_server',
             parameters=[sim_time_param, model_log_params],
             output='screen',
+            condition=IfCondition(LaunchConfiguration('use_skills')),
         ),
 
         # yolo_server: YOLO-World open-vocabulary detection publisher. Subscribes
@@ -135,6 +141,7 @@ def generate_launch_description():
             name='yolo_server',
             parameters=[sim_time_param, model_log_params],
             output='screen',
+            condition=IfCondition(LaunchConfiguration('use_skills')),
         ),
 
         # graspgen_server + h12_skills: the GraspGenX planning service and the
