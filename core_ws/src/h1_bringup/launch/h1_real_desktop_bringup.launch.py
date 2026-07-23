@@ -198,7 +198,8 @@ def generate_launch_description():
             condition=IfCondition(AndSubstitution(
                 LaunchConfiguration('start_position_verified'),
                 PythonExpression(
-                    ["'", LaunchConfiguration('lowerbody'), "' != 'mjpc'"]),
+                    ["'", LaunchConfiguration('lowerbody'),
+                     "' not in ('mjpc', 'none')"]),
             )),
         ),
 
@@ -216,7 +217,8 @@ def generate_launch_description():
             condition=IfCondition(AndSubstitution(
                 LaunchConfiguration('start_position_verified'),
                 PythonExpression(
-                    ["'", LaunchConfiguration('lowerbody'), "' != 'mjpc'"]),
+                    ["'", LaunchConfiguration('lowerbody'),
+                     "' not in ('mjpc', 'none')"]),
             )),
         ),
 
