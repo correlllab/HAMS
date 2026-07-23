@@ -90,6 +90,42 @@ class SpatialMemoryComparisonTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "same episodes"):
             validate_comparable([first, second])
 
+    def test_custom_labels_distinguish_resolution_variants(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            dataset = Path(temp_dir) / "dataset"
+            dataset.mkdir()
+            paths = []
+            for resolution in (256, 512):
+                path = dataset / f"faiss_{resolution}.json"
+                path.write_text(
+                    json.dumps(fake_report(path, "embodied_agent", [1.0, 1.0])),
+                    encoding="utf-8",
+                )
+                paths.append(path)
+            output = compare(
+                dataset,
+                paths,
+                dataset / "resolution_comparison",
+                labels=["FAISS (256x256)", "FAISS (512x512)"],
+            )
+            payload = json.loads(
+                (output / "comparison.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(
+                [method["label"] for method in payload["methods"]],
+                ["FAISS (256x256)", "FAISS (512x512)"],
+            )
+
+    def test_custom_label_count_must_match_results(self):
+        first = fake_report(Path("a.json"), "latest_only", [1.0])
+        second = fake_report(Path("b.json"), "embodied_agent", [1.0])
+        from benchmarks.spatial_memory.compare import build_comparison
+
+        with self.assertRaisesRegex(ValueError, "labels"):
+            build_comparison(
+                [first, second], Path("."), labels=["only one label"]
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

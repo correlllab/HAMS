@@ -172,16 +172,22 @@ def _relative_path(path: Path, start: Path) -> str:
     return os.path.relpath(path.resolve(), start=start.resolve()).replace(os.sep, "/")
 
 
-def build_comparison(reports: list[dict], dataset_dir: Path) -> dict:
+def build_comparison(
+    reports: list[dict],
+    dataset_dir: Path,
+    labels: list[str] | None = None,
+) -> dict:
     validate_comparable(reports)
+    if labels is not None and len(labels) != len(reports):
+        raise ValueError("custom labels must match the number of result files")
     methods = []
-    for report in reports:
+    for index, report in enumerate(reports):
         metrics = {
             name: _metric_stats(report, name, kind)
             for name, _label, kind, _direction in COMPARISON_METRICS
         }
         methods.append({
-            "label": _display_label(report),
+            "label": labels[index] if labels is not None else _display_label(report),
             "adapter": report.get("adapter"),
             "adapter_spec": report.get("adapter_spec"),
             "adapter_kwargs": report.get("adapter_kwargs", {}),
@@ -297,10 +303,11 @@ def compare(
     dataset_dir: Path,
     result_paths: list[Path],
     output_dir: Path | None = None,
+    labels: list[str] | None = None,
 ) -> Path:
     dataset_dir = Path(dataset_dir).resolve()
     reports = [_load(Path(path).resolve()) for path in result_paths]
-    comparison = build_comparison(reports, dataset_dir)
+    comparison = build_comparison(reports, dataset_dir, labels=labels)
     if output_dir is None:
         timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
         output_dir = dataset_dir / "comparisons" / timestamp
@@ -323,6 +330,12 @@ def main() -> None:
     parser.add_argument("--dataset", required=True)
     parser.add_argument("--results", action="append", default=[])
     parser.add_argument("--adapter", action="append", default=[])
+    parser.add_argument(
+        "--label",
+        action="append",
+        default=[],
+        help="optional display label repeated once per result",
+    )
     parser.add_argument("--output", default=None)
     args = parser.parse_args()
     if bool(args.results) == bool(args.adapter):
@@ -333,10 +346,13 @@ def main() -> None:
         if args.results
         else _select_latest_for_adapters(dataset_dir, args.adapter)
     )
+    if args.label and len(args.label) != len(result_paths):
+        raise SystemExit("repeat --label exactly once per selected result")
     compare(
         dataset_dir=dataset_dir,
         result_paths=result_paths,
         output_dir=Path(args.output) if args.output else None,
+        labels=args.label or None,
     )
 
 
