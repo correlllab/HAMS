@@ -1,0 +1,5 @@
+method,n,success_rate,good_rate,closed_rate,errored,final_err_mm_mean,post_grasp_err_mm_mean,lift_dz_m_mean,dur_s_mean,max_disp_mm_mean,path_len_mm_mean,mean_speed_mms_mean,rms_radial_mm_mean,sway_area_mm2_mean,rms_long_mm_mean,rms_lat_mm_mean,ellipse_ratio_mean,yaw_rms_deg_mean,yaw_range_deg_mean,z_rms_mm_mean,mpf_hz_mean
+centroid,30,100.0,100.0,100.0,0,5.947,10.617,0.089,64.14,4.507,76.957,1.199,0.816,4.91,0.694,0.427,0.401,0.251,1.433,3.389,0.299
+centroid_vs,30,100.0,100.0,100.0,0,0.907,5.323,0.087,69.027,4.573,79.333,1.149,0.793,4.6,0.676,0.41,0.4,0.239,1.434,3.299,0.299
+pca,30,0.0,0.0,6.7,28,,,0.097,19.847,27.357,245.953,12.658,9.456,968.047,5.903,7.172,0.532,16.942,91.621,2.508,0.37
+skill,30,0.0,0.0,100.0,0,,,0.0,28.963,7.333,63.32,2.186,1.616,6.017,0.202,1.603,0.124,0.499,1.791,1.412,0.308
