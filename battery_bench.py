@@ -220,13 +220,20 @@ def run(bench, method, screw, arm, success_dz):
     #   2) close GENTLY and WAIT for the grasp to complete.
     #   3) lift STRAIGHT UP with NO further servoing — re-nudging after the grasp, or a
     #      too-hard squeeze, forces the light part back out.
-    CORR_ITERS = int(os.environ.get('BATT_SERVO_ITER', '4')) if method == 'servo' else 0
+    # Two corrections, not four: enough to center to ~1-2mm (each step cuts the error
+    # to ~a third), which grips reliably, without the visible "go there, re-nudge 4x"
+    # hesitation. One was too few when the first move landed far off. noservo=0 (open).
+    CORR_ITERS = int(os.environ.get('BATT_SERVO_ITER', '2')) if method == 'servo' else 0
     WAIT_GRASP = float(os.environ.get('BATT_WAIT_GRASP', '6.0'))
-    # MODERATE close: the sim jaw drives to fully-closed at kp*error, so the default
-    # 15 N becomes ~580 N at the pads and can eject a light part. 6 N (~240 N at the
-    # pads) is the sweet spot from the sweep: reliably lifts, well under the ejecting
-    # 580 N. Below ~6 N the jaw stalls before it clamps and the part drops.
+    SETTLE_SEC = float(os.environ.get('BATT_SETTLE_SEC', '2.0'))    # arm rest before close
+    # DON'T close all the way. The sim's /close drives the jaw to FULLY closed, so the
+    # grip force is kp*(large error) ~ 580 N and ejects a light part. Instead command
+    # the jaw to a target aperture just PAST the object width: it presses with a bounded
+    # force kp*(small error), a controlled grip that holds without flinging. A well-
+    # centered grasp sticks; a miss reaches the commanded aperture on air (no object,
+    # ~0 force) and drops on the lift — exactly the clean pass/fail the experiment wants.
     GRIP_N = float(os.environ.get('BATT_GRIP_FORCE_N', '6.0'))
+    GRASP_TARGET_MM = float(os.environ.get('BATT_GRASP_TARGET_MM', '38.0'))  # jaw closes TO here
     GRIP_ABOVE_BASE_M = float(os.environ.get('BATT_GRIP_ABOVE_BASE', '0.068'))
     nail0 = bench.gt_pos_pelvis(screw)                            # the pose noservo commits to
     # DECIDE how low to go from the screw's OWN GT height (generalises across screw
@@ -254,7 +261,14 @@ def run(bench, method, screw, arm, success_dz):
         if (_fm is not None and _n is not None) else 999.0
     rec['approach_ok'] = rec['final_err_mm'] < CLOSE_GATE_MM
     rec['servo_iters'] = CORR_ITERS
-    # GRASP: gentle close, WAIT for it to complete — NO servoing after this.
+    # SETTLE: let the arm come fully to rest at the grasp pose, then DO NOT command it
+    # again until the lift — so it holds dead still while the gripper closes (no
+    # fidgeting during the grasp). The lift below is the only post-position arm motion.
+    time.sleep(SETTLE_SEC)
+    # GRASP: the sim jaw is a position drive — a partial target stalls in mid-air before
+    # it reaches the object, so it MUST be commanded fully closed; the force is bounded
+    # by kp (set from GRIP_N). 6 N -> ~240 N at the pads: reliably holds, well under the
+    # 580 N (15 N) that ejects. WAIT for the grasp to complete. NO servoing after this.
     rec['executed'] = True
     bench.close_gripper(arm, force_n=GRIP_N)
     time.sleep(WAIT_GRASP)
