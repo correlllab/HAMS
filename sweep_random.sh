@@ -28,6 +28,9 @@ OUTC=/home/code/core_ws/benchmark_results/sweep_battery_random
 LOG=$ROOT/sweep_random.log
 POSFILE=$ROOT/RANDOM_POSITIONS.json
 PW="${SUDO_PW:-Unitreeh12}"
+# fail-fast: 3 consecutive topple/crash trials => stack broke; auto-restart up to
+# MAXRESTARTS then HALT (don't waste hours). Legit misses still write JSON and don't count.
+MAXRESTARTS=${MAXRESTARTS:-2}; RESTARTS=0
 # EXACT validated grasp config (same as the standing tier that gave clean grasps)
 AENV="ALMI_HOVER_FROZEN=0 ALMI_ENGAGE_RETRY=10 STAB_SIM=30 ALMI_RELEASE_SETTLE=6 ALMI_PELVIS_MIN=0.92 ALMI_REACH_SETTLE=6 ALMI_DESCEND_STEPS=6 ALMI_MOVE_SEC=8 ALMI_DESCEND_SETTLE=3 ALMI_SERVO_ITER=4 ALMI_CONV_MM=6 BATT_WELD_MAX_ERR_MM=12 BATT_GRIP_FORCE_N=6 BATT_TOPDOWN_PITCH=80 BATT_HOVER_M=0.10 BATT_FINGER_SINK=-0.002 BATT_HOLD_SEC=1.5"
 
@@ -41,14 +44,15 @@ SUDO docker cp "$ROOT/battery_bench.py"  hams_ros:/tmp/battery_bench.py  >/dev/n
 SUDO docker cp "$ROOT/trial_recorder.py" hams_ros:/tmp/trial_recorder.py >/dev/null 2>&1
 if [ "$(RX 'pgrep -c -f lib/h12_lowerbody_rl/lowerbody_controller_node')" -lt 1 ]; then
   say "ALMI controller not running -> starting it"
-  SUDO docker exec -d hams_ros bash -lc 'source /opt/ros/humble/setup.bash; source /home/code/core_ws/install/setup.bash; ros2 run h12_lowerbody_rl lowerbody_controller_node --ros-args -p use_sim_time:=true -p active_policy:=almi -p engage_wait_for_confirm:=false -p disable_elastic_band:=false > /tmp/lowerbody.log 2>&1'
+  # /safety/heartbeat remapped away — see restart_standing.sh (sim has no legit publisher).
+  SUDO docker exec -d hams_ros bash -lc 'source /opt/ros/humble/setup.bash; source /home/code/core_ws/install/setup.bash; ros2 run h12_lowerbody_rl lowerbody_controller_node --ros-args -p use_sim_time:=true -p active_policy:=almi -p engage_wait_for_confirm:=false -p disable_elastic_band:=false -r /safety/heartbeat:=/safety/heartbeat_ignored > /tmp/lowerbody.log 2>&1'
   sleep 12
 fi
 
 run_method(){   # $1=label  $2=ALMI_SERVO_ITER
   local M=$1 SI=$2 d="$OUTC/$1"
   RX "mkdir -p $d"
-  local T
+  local T consec=0
   for T in $(seq 1 "$N"); do
     local TT=$(printf '%02d' "$T")
     RX "test -f $d/trial_$TT.json" && { say "$M trial $TT exists -> skip"; continue; }
@@ -64,9 +68,27 @@ run_method(){   # $1=label  $2=ALMI_SERVO_ITER
     RX "cp -f /tmp/tel_$M.csv $d/trial_${TT}_telemetry.csv" >/dev/null 2>&1
     local r=$(RX "cat $d/trial_$TT.json 2>/dev/null" | python3 -c "import sys,json
 try:
- d=json.load(sys.stdin);print('success=%s good=%s dz=%s'%(d.get('success'),d.get('good_grasp'),d.get('screw_lift_dz')))
-except: print('NO-JSON')" 2>/dev/null)
+ d=json.load(sys.stdin)
+ pe=d.get('post_grasp_err_mm'); sa=d.get('standing_after')
+ hf=(pe is None or (isinstance(pe,(int,float)) and pe>100) or sa is False)
+ print('success=%s good=%s post_err=%s dz=%s%s'%(d.get('success'),d.get('good_grasp'),pe,d.get('screw_lift_dz'),' TOPPLE' if hf else ''))
+except: print('NO-JSON TOPPLE')" 2>/dev/null)
     say "$M trial $TT (spawn $PB): $r"
+    case "$r" in *TOPPLE*) consec=$((consec+1));; *) consec=0;; esac
+    if [ "$consec" -ge 3 ]; then
+      say "!! $M: 3 consecutive topple/crash trials -> stack broke"
+      if [ "$RESTARTS" -lt "$MAXRESTARTS" ]; then
+        RESTARTS=$((RESTARTS+1)); say "-> recovery restart #$RESTARTS/$MAXRESTARTS via restart_standing.sh"
+        bash "$ROOT/restart_standing.sh" >/dev/null 2>&1
+        SUDO docker cp "$ROOT/almi_grasp.py"     hams_ros:/tmp/almi_grasp.py     >/dev/null 2>&1
+        SUDO docker cp "$ROOT/battery_bench.py"  hams_ros:/tmp/battery_bench.py  >/dev/null 2>&1
+        SUDO docker cp "$ROOT/trial_recorder.py" hams_ros:/tmp/trial_recorder.py >/dev/null 2>&1
+        consec=0
+      else
+        say "!! HALT: still toppling after $RESTARTS restarts. Stopping (resumable) — fix ALMI/heartbeat then resume."
+        exit 1
+      fi
+    fi
   done
   local tot=$(RX "ls $d/trial_*.json 2>/dev/null | wc -l")
   say "=== $M DONE: $tot trials ==="

@@ -39,5 +39,11 @@ for i in $(seq 1 90); do
   [ "${n:-0}" -ge 1 ] && { say "frame_task up"; break; }; sleep 3
 done
 say "starting ALMI lowerbody controller"
-SUDO docker exec -d hams_ros bash -lc 'source /opt/ros/humble/setup.bash; source /home/code/core_ws/install/setup.bash; ros2 run h12_lowerbody_rl lowerbody_controller_node --ros-args -p use_sim_time:=true -p active_policy:=almi -p engage_wait_for_confirm:=false -p disable_elastic_band:=false > /tmp/lowerbody.log 2>&1'
+# NOTE: /safety/heartbeat is remapped away. In this sim container nothing legitimately
+# publishes that topic (the real robot's safety_node does; the sim does not), so ALMI is
+# meant to run heartbeat-free. A stray/stale publisher stuck at False makes the controller
+# latch its legs silent and the robot collapses on release. Remapping the subscription to
+# an unused topic restores the intended heartbeat-free behaviour (the safety RELAY still
+# clips/estops on real joint-limit violations independently).
+SUDO docker exec -d hams_ros bash -lc 'source /opt/ros/humble/setup.bash; source /home/code/core_ws/install/setup.bash; ros2 run h12_lowerbody_rl lowerbody_controller_node --ros-args -p use_sim_time:=true -p active_policy:=almi -p engage_wait_for_confirm:=false -p disable_elastic_band:=false -r /safety/heartbeat:=/safety/heartbeat_ignored > /tmp/lowerbody.log 2>&1'
 sleep 12; say "restart complete"

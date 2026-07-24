@@ -18,6 +18,9 @@ SCREW=${SWEEP_SCREW:-screw_27}
 OUTC=/home/code/core_ws/benchmark_results/sweep_battery_standing
 LOG=$ROOT/sweep_standing.log
 PW=Unitreeh12
+# fail-fast: after 3 consecutive topple/crash trials (not legit misses) the stack is broken
+# (bad heartbeat/TF) -> auto-restart up to MAXRESTARTS, then HALT rather than waste hours.
+MAXRESTARTS=${MAXRESTARTS:-2}; RESTARTS=0
 # validated ALMI recipe (spawn-lower drop-fix is in the sim env; these are the run knobs)
 # EXACT 2/2-validated config (no shortcuts). The aggressive faster config left the arm
 # in a pose where the pad-TF read failed, the servo loop bailed, and it closed 115mm
@@ -37,14 +40,17 @@ SUDO docker cp "$ROOT/trial_recorder.py" hams_ros:/tmp/trial_recorder.py >/dev/n
 # make sure the ALMI lowerbody controller is up before we start
 if [ "$(RX 'pgrep -c -f lib/h12_lowerbody_rl/lowerbody_controller_node')" -lt 1 ]; then
   say "ALMI controller not running -> starting it"
-  SUDO docker exec -d hams_ros bash -lc 'source /opt/ros/humble/setup.bash; source /home/code/core_ws/install/setup.bash; ros2 run h12_lowerbody_rl lowerbody_controller_node --ros-args -p use_sim_time:=true -p active_policy:=almi -p engage_wait_for_confirm:=false -p disable_elastic_band:=false > /tmp/lowerbody.log 2>&1'
+  # /safety/heartbeat remapped away: a stray/stale False publisher latches the legs silent
+  # and the robot collapses on release; in this sim nothing legitimately publishes it, so
+  # ALMI is meant to run heartbeat-free. (Safety relay still clips/estops on real limits.)
+  SUDO docker exec -d hams_ros bash -lc 'source /opt/ros/humble/setup.bash; source /home/code/core_ws/install/setup.bash; ros2 run h12_lowerbody_rl lowerbody_controller_node --ros-args -p use_sim_time:=true -p active_policy:=almi -p engage_wait_for_confirm:=false -p disable_elastic_band:=false -r /safety/heartbeat:=/safety/heartbeat_ignored > /tmp/lowerbody.log 2>&1'
   sleep 12
 fi
 
 run_method(){   # $1=label  $2=ALMI_SERVO_ITER
   local M=$1 SI=$2 d="$OUTC/$1"
   RX "mkdir -p $d"
-  local T
+  local T consec=0
   for T in $(seq 1 "$N"); do
     local TT=$(printf '%02d' "$T")
     RX "test -f $d/trial_$TT.json" && { say "$M trial $TT exists -> skip"; continue; }
@@ -53,11 +59,32 @@ run_method(){   # $1=label  $2=ALMI_SERVO_ITER
     SUDO timeout 600 docker exec hams_ros bash -lc "source /opt/ros/humble/setup.bash; source /home/code/core_ws/install/setup.bash; cd /tmp && $AENV ALMI_SERVO_ITER=$SI OUT=$d/trial_$TT.json python3 almi_grasp.py $SCREW > $d/trial_$TT.log 2>&1"
     RX "pkill -TERM -f trial_recorder.py" >/dev/null 2>&1; sleep 0.4
     RX "cp -f /tmp/tel_$M.csv $d/trial_${TT}_telemetry.csv" >/dev/null 2>&1
+    # TOPPLE = crash/no-record, gross miss (>100mm), or robot not standing after — i.e. the
+    # stack broke. A legit open-loop MISS still writes a valid JSON (good=False) and does NOT
+    # count, so honest centroid misses never trip the fail-fast.
     local r=$(RX "cat $d/trial_$TT.json 2>/dev/null" | python3 -c "import sys,json
 try:
- d=json.load(sys.stdin);print('success=%s good=%s stand_after=%s post_err=%s dz=%s'%(d.get('success'),d.get('good_grasp'),d.get('standing_after'),d.get('post_grasp_err_mm'),d.get('screw_lift_dz')))
-except Exception as e: print('NO-JSON/'+str(e))" 2>/dev/null)
+ d=json.load(sys.stdin)
+ pe=d.get('post_grasp_err_mm'); sa=d.get('standing_after')
+ hf=(pe is None or (isinstance(pe,(int,float)) and pe>100) or sa is False)
+ print('success=%s good=%s stand_after=%s post_err=%s dz=%s%s'%(d.get('success'),d.get('good_grasp'),sa,pe,d.get('screw_lift_dz'),' TOPPLE' if hf else ''))
+except Exception as e: print('NO-JSON/'+str(e)+' TOPPLE')" 2>/dev/null)
     say "$M trial $TT: $r"
+    case "$r" in *TOPPLE*) consec=$((consec+1));; *) consec=0;; esac
+    if [ "$consec" -ge 3 ]; then
+      say "!! $M: 3 consecutive topple/crash trials -> stack broke (bad heartbeat/TF, robot not standing)"
+      if [ "$RESTARTS" -lt "$MAXRESTARTS" ]; then
+        RESTARTS=$((RESTARTS+1)); say "-> recovery restart #$RESTARTS/$MAXRESTARTS via restart_standing.sh"
+        bash "$ROOT/restart_standing.sh" >/dev/null 2>&1
+        SUDO docker cp "$ROOT/almi_grasp.py"     hams_ros:/tmp/almi_grasp.py     >/dev/null 2>&1
+        SUDO docker cp "$ROOT/battery_bench.py"  hams_ros:/tmp/battery_bench.py  >/dev/null 2>&1
+        SUDO docker cp "$ROOT/trial_recorder.py" hams_ros:/tmp/trial_recorder.py >/dev/null 2>&1
+        consec=0
+      else
+        say "!! HALT: still toppling after $RESTARTS restarts. Stopping so we don't waste hours — fix ALMI/heartbeat then resume (sweep is resumable)."
+        exit 1
+      fi
+    fi
   done
   local tot=$(RX "ls $d/trial_*.json 2>/dev/null | wc -l")
   local succ=$(RX "cat $d/trial_*.json 2>/dev/null" | python3 -c "import sys,json;n=0
