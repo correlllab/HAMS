@@ -23,9 +23,13 @@ There are no per-policy start services — drive /cmd_vel (e.g. from nav2) and t
 controller stands or walks to match. Set ``auto_switch:=false`` to pin the robot to
 ``active_policy`` (pure stand or pure walk).
 
-A third, experimental policy ``almi`` (ALMI-Open LSTM) both stands at cmd=0 and
-locomotes, so it needs no switching: ``active_policy:=almi`` pins it regardless
-of ``auto_switch`` (the auto-switch only ever toggles fame<->walk).
+The stand side of the auto-switch is the startup policy when it can stand:
+``active_policy:=almi`` gives almi(stand) <-> walk(locomote), exactly like the
+default fame <-> walk. (ALMI can in principle locomote itself, but its
+from-stand gait engagement proved unreliable — envelope-tested 2026-07-20 — so
+under auto_switch it serves as the stand/manipulation policy and the proven
+walk policy handles velocity tracking.) ``auto_switch:=false`` pins the
+startup policy outright.
 
 Interfaces
 ----------
@@ -33,6 +37,10 @@ sub  /lowstate                 (unitree_hg/LowState)   robot state
 sub  /cmd_vel                  (geometry_msgs/Twist)   velocity command -> policy + walk
 sub  /lowerbody/squat_cmd      (std_msgs/Float32)      base-height / squat (FAME)
 sub  /left_ee_pose             (geometry_msgs/PoseStamped)  frame_task-ready signal
+sub  /safety/heartbeat         (std_msgs/Bool)         safety-layer liveness; a False
+                                                       beat OR silence for
+                                                       heartbeat_timeout latches this
+                                                       node silent (see watchdog)
 pub  /safety/lowcmd_lower_in   (unitree_hg/LowCmd)     12-joint leg setpoints
 pub  /lowerbody/active_policy  (std_msgs/String, latched)  active policy ("idle" when none)
 srv  /lowerbody/confirm_engage (std_srvs/Trigger)      operator go-ahead: engage the
@@ -49,7 +57,7 @@ from geometry_msgs.msg import PoseStamped, Twist
 from rcl_interfaces.msg import FloatingPointRange, ParameterDescriptor, SetParametersResult
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy
-from std_msgs.msg import Float32, String
+from std_msgs.msg import Bool, Float32, String
 from std_srvs.srv import Trigger
 from unitree_hg.msg import LowCmd, LowState
 
@@ -57,6 +65,7 @@ from h12_lowerbody_rl.policy import (
     NUM_LEG_JOINTS,
     NUM_POLICY_JOINTS,
     AlmiPolicy,
+    Almi27Policy,
     FamePolicy,
     LegCommand,
     RobotState,
@@ -75,12 +84,27 @@ from h12_lowerbody_rl.policy_manager import GateConfig, PolicyManager
 
 MOTOR_MODE_PR = 1
 
+# Safety-layer liveness flag (published by safety_node at 10 Hz: True while
+# commands are relayed, False once its estop latches). The watchdog below arms
+# on the FIRST beat received — so a bringup where the safety node comes up
+# later (or a sim without one) is not tripped by startup silence — and then
+# latches this node silent on a False beat or on heartbeat_timeout of silence.
+SAFETY_HEARTBEAT_TOPIC = "/safety/heartbeat"
+
 # Policy registry keys (see LowerBodyControllerNode.__init__).
 FAME = "fame"   # RMA balance/stand policy (does not locomote)
 WALK = "walk"   # TorchScript walk policy (follows /cmd_vel)
-ALMI = "almi"   # ALMI LSTM policy (stands at cmd=0 AND follows /cmd_vel).
-                # Experimental: auto_switch only toggles fame<->walk, so an
-                # active "almi" is naturally pinned — it never auto-switches.
+ALMI = "almi"   # ALMI LSTM policy: superb stand (incl. under arm motion), but
+                # its from-stand gait engagement is unreliable (LSTM was only
+                # ever trained with the command present from episode start) —
+                # so under auto_switch it serves as a STAND policy and hands
+                # locomotion to walk, exactly like fame does.
+ALMI27 = "almi27"  # wrist-inclusive ALMI (27-DoF/77-d obs, trained adversarially
+                   # under full arm+wrist motion); same stand role as ALMI.
+
+# Policies that can serve as the auto-switch stand side. The locomotion side
+# is always the walk policy (the proven velocity tracker).
+STAND_CAPABLE = (FAME, ALMI, ALMI27)
 
 # Pre-pose: before engaging the policy, PD-drive the legs to the incoming policy's
 # nominal crouch (band-held) and wait until they settle there. The RMA policy warms
@@ -115,6 +139,7 @@ class LowerBodyControllerNode(Node):
         self.declare_parameter("walk_config", _share("policies", "walk", "walk.yaml"))
         self.declare_parameter("fame_config", _share("policies", "fame", "fame.yaml"))
         self.declare_parameter("almi_config", _share("policies", "almi", "almi.yaml"))
+        self.declare_parameter("almi27_config", _share("policies", "almi27", "almi27.yaml"))
         # IMU mounting/calibration trim (deg): what the raw quaternion reads
         # when the torso is known to be level (e.g. measured hanging plumb).
         # Positive pitch = reads tilted forward, positive roll = tilted right.
@@ -129,13 +154,20 @@ class LowerBodyControllerNode(Node):
                     from_value=-IMU_OFFSET_RANGE_DEG, to_value=IMU_OFFSET_RANGE_DEG,
                     step=0.0)]))
         self.declare_parameter("default_height_cmd", 1.0)
-        # Auto-switch stand<->walk from ||[vx, vy, wz]|| with hysteresis (rise > fall):
-        # engage walk above rise, fall back to FAME below fall. auto_switch:=false
-        # pins the robot to active_policy. rise sits at the handover gate's cmd_eps
-        # (0.10); fall below it so walk->FAME's stop gate can also pass.
+        # Auto-switch stand<->walk from ||[vx, vy, wz]||: engage walk above rise,
+        # fall back to stand at or below fall. auto_switch:=false pins the robot
+        # to active_policy. rise 0.05 so a real velocity command starts walking
+        # (small enough to catch nav2's fine-approach commands). fall 0.0 so once
+        # walking the robot STAYS in walk for ANY nonzero command and only returns
+        # to stand at an exactly-zero command -- it never drops out of walk on
+        # small mid-path dips. (The fall check is <=, see _tick, so 0.0 fires at
+        # 0.) Both stay <= the handover gate's cmd_eps (0.10) so walk->stand's
+        # stop gate can still pass. NOTE: /cmd_vel is latched, so if a publisher
+        # stops mid-command the last (nonzero) value holds and the robot keeps
+        # walking -- publish an explicit zero to stand.
         self.declare_parameter("auto_switch", True)
-        self.declare_parameter("auto_switch_rise_norm", 0.10)
-        self.declare_parameter("auto_switch_fall_norm", 0.05)
+        self.declare_parameter("auto_switch_rise_norm", 0.05)
+        self.declare_parameter("auto_switch_fall_norm", 0.0)
         # Seconds to ramp the pre-pose target from the measured leg pose to the
         # policy's nominal (cosine blend; see the PREPOSE block above). Starting
         # at the measured pose means zero initial PD error, so full gains apply
@@ -155,12 +187,19 @@ class LowerBodyControllerNode(Node):
         self.declare_parameter("band_wait_for_frame_task", True)
         self.declare_parameter("band_release_topic", "/left_ee_pose")
         self.declare_parameter("band_max_wait", 30.0)
+        # Seconds of /safety/heartbeat silence (after the first beat) before
+        # this node latches silent. The heartbeat runs at 10 Hz, so 0.5 s =
+        # five consecutive missed beats — enough slack for scheduler jitter,
+        # short enough that a dead safety node stops leg commands within half
+        # a second.
+        self.declare_parameter("heartbeat_timeout", 0.5)
 
         control_hz = float(self.get_parameter("control_hz").value)
         startup_policy = str(self.get_parameter("active_policy").value).strip().lower()
         walk_cfg = self.get_parameter("walk_config").value
         fame_cfg = self.get_parameter("fame_config").value
         almi_cfg = self.get_parameter("almi_config").value
+        almi27_cfg = self.get_parameter("almi27_config").value
         self._imu_corr = self._build_imu_corr()
         self.add_on_set_parameters_callback(self._on_set_parameters)
         self._height_cmd = float(self.get_parameter("default_height_cmd").value)
@@ -177,6 +216,7 @@ class LowerBodyControllerNode(Node):
             "walk": WalkPolicy(walk_cfg),
             "fame": FamePolicy(fame_cfg),
             "almi": AlmiPolicy(almi_cfg),
+            "almi27": Almi27Policy(almi27_cfg),
         }
         if not policies["fame"].has_encoder:
             self.get_logger().warn(
@@ -195,10 +235,17 @@ class LowerBodyControllerNode(Node):
         self._frame_task_ready = not bool(self.get_parameter("band_wait_for_frame_task").value)
         self._band_cli = self.create_client(Trigger, "/elastic_band/toggle")
         self._awaiting_band_release = False  # policy committed, band not yet released
+        self._band_release_inflight = False  # a toggle call is dispatched, awaiting result
+        self._band_wait_warned = False       # rate-limit the "service not ready" warning
         self._request_time: float | None = None  # when the pending activation was asked
         self._prepose_pass = 0   # consecutive ticks the legs have held at nominal (pre-engage)
         self._prepose_ticks = 0  # total pre-pose ticks so far (ramp phase + settle timeout)
         self._prepose_start_q: np.ndarray | None = None  # measured legs at first pre-pose tick
+
+        # safety-heartbeat watchdog state (see SAFETY_HEARTBEAT_TOPIC)
+        self._hb_timeout = float(self.get_parameter("heartbeat_timeout").value)
+        self._hb_last: float | None = None  # monotonic stamp of the last healthy beat
+        self._hb_dead = False               # latched: never publishes again once True
 
         lowstate_qos = QoSProfile(reliability=ReliabilityPolicy.BEST_EFFORT,
                                   history=HistoryPolicy.KEEP_LAST, depth=1)
@@ -211,6 +258,8 @@ class LowerBodyControllerNode(Node):
         self.create_subscription(
             PoseStamped, self.get_parameter("band_release_topic").value,
             self._on_frame_task_ready, 10)
+        self.create_subscription(
+            Bool, SAFETY_HEARTBEAT_TOPIC, self._on_heartbeat, 10)
         self._cmd_pub = self.create_publisher(LowCmd, "/safety/lowcmd_lower_in", 10)
         self._active_pub = self.create_publisher(String, "/lowerbody/active_policy", latched)
         self._confirm_srv = self.create_service(
@@ -218,9 +267,15 @@ class LowerBodyControllerNode(Node):
         self._publish_active()
 
         self.create_timer(1.0 / control_hz, self._tick)
+        # Auto-switch sides: the startup policy is the stand side when it can
+        # stand (fame or almi); walk is always the locomotion side. A startup
+        # policy of "walk" gets fame as its stand side (legacy behavior).
+        self._stand_policy = startup_policy if startup_policy in STAND_CAPABLE else FAME
+
         self.get_logger().info(
             f"lowerbody_controller ready: policies={self._manager.names()}, "
-            f"auto_switch={self._auto_switch} (rise={self._auto_rise}, fall={self._auto_fall}), "
+            f"auto_switch={self._auto_switch} "
+            f"(stand={self._stand_policy!r} <-> walk, rise={self._auto_rise}, fall={self._auto_fall}), "
             f"control_hz={control_hz}. Policy follows /cmd_vel; no start services."
         )
 
@@ -255,6 +310,28 @@ class LowerBodyControllerNode(Node):
 
     def _on_frame_task_ready(self, _msg: PoseStamped) -> None:
         self._frame_task_ready = True
+
+    def _on_heartbeat(self, msg: Bool) -> None:
+        # First beat ARMS the watchdog; a False beat means the safety layer's
+        # estop latched (it keeps publishing False after the latch — see
+        # safety_node._publish_heartbeat), so leg commands are pointless at
+        # best and a fight against the latch at worst.
+        if self._hb_dead:
+            return
+        if not msg.data:
+            self._trip_heartbeat("safety layer reports estop latched (heartbeat False)")
+            return
+        self._hb_last = time.monotonic()
+
+    def _trip_heartbeat(self, reason: str) -> None:
+        """Latch the node silent: log once, and _tick never publishes again.
+        Deliberately NOT recoverable at runtime — the safety layer's own latch
+        needs a safety_node restart, so this node restarts with it."""
+        self._hb_dead = True
+        self.get_logger().error(
+            f"SAFETY HEARTBEAT LOST: {reason} — stopping all "
+            "/safety/lowcmd_lower_in output (latched; restart this node once "
+            "the safety layer is back)")
 
     def _on_confirm_engage(self, _req, resp):
         pending = self._manager.desired_name if self._manager.is_pending() else None
@@ -310,19 +387,34 @@ class LowerBodyControllerNode(Node):
         self._cmd_pub.publish(cmd_msg)
 
     def _release_band(self, reason: str) -> None:
-        if self._band_released:
+        # Called every tick while awaiting release. Only mark the band released
+        # once the sim's toggle actually succeeds — NOT before the service check.
+        # The old code set _band_released=True up front, so if /elastic_band/toggle
+        # wasn't discovered yet (a startup race, likelier with the slower non-
+        # headless MuJoCo viewer) it gave up permanently and the robot hung from
+        # the band forever: it would even switch to walk on /cmd_vel but never
+        # move. Now it retries every tick until the service is ready and the call
+        # returns success.
+        if self._band_released or self._band_release_inflight:
             return
-        self._band_released = True
-        if not self._band_cli.service_is_ready() and not self._band_cli.wait_for_service(timeout_sec=1.0):
-            self.get_logger().warn("elastic band toggle service unavailable — band NOT released")
-            return
+        if not self._band_cli.service_is_ready():
+            if not self._band_wait_warned:
+                self.get_logger().warn(
+                    "elastic band toggle service not ready yet — retrying until it appears")
+                self._band_wait_warned = True
+            return  # do NOT mark released; retry on a later tick (non-blocking)
+        self._band_release_inflight = True
         self.get_logger().info(f"releasing elastic band ({reason})")
-        fut = self._band_cli.call_async(Trigger.Request())
-        fut.add_done_callback(
-            lambda f: self.get_logger().info(
-                f"elastic band toggle: {f.result().message}" if f.result() else "elastic band toggle call failed"
-            )
-        )
+        self._band_cli.call_async(Trigger.Request()).add_done_callback(self._on_band_toggled)
+
+    def _on_band_toggled(self, fut) -> None:
+        self._band_release_inflight = False
+        result = fut.result()
+        if result is None:
+            self.get_logger().warn("elastic band toggle call failed — will retry")
+            return  # leave _band_released False so the next tick retries
+        self._band_released = True
+        self.get_logger().info(f"elastic band toggle: {result.message}")
 
     def _state_from_lowstate(self, msg: LowState) -> RobotState:
         q = np.array([msg.motor_state[i].q for i in range(NUM_POLICY_JOINTS)], dtype=np.float32)
@@ -336,6 +428,18 @@ class LowerBodyControllerNode(Node):
 
     # -- main loop -----------------------------------------------------------
     def _tick(self) -> None:
+        # Safety-heartbeat watchdog: once tripped (False beat, or silence past
+        # heartbeat_timeout after the first beat), publish NOTHING — no policy
+        # step, no pre-pose, no band release. Checked before anything else so
+        # every publish path in this tick is behind the gate.
+        if self._hb_dead:
+            return
+        if (self._hb_last is not None
+                and time.monotonic() - self._hb_last > self._hb_timeout):
+            self._trip_heartbeat(
+                f"no /safety/heartbeat for {self._hb_timeout:.1f}s "
+                "(safety node died or stopped publishing)")
+            return
         if self._lowstate is None:
             return
         state = self._state_from_lowstate(self._lowstate)
@@ -349,10 +453,13 @@ class LowerBodyControllerNode(Node):
         if self._auto_switch and not self._manager.is_idle() and not self._manager.is_pending():
             cmd_norm = float(np.linalg.norm(self._cmd))
             active = self._manager.active_name
-            if active == FAME and cmd_norm > self._auto_rise:
+            if active == self._stand_policy and cmd_norm > self._auto_rise:
                 self._request_policy(WALK, require_stop=False)
-            elif active == WALK and cmd_norm < self._auto_fall:
-                self._request_policy(FAME, require_stop=True)
+            elif active == WALK and cmd_norm <= self._auto_fall:
+                # <= (not <) so a fall threshold of 0.0 returns to stand at an
+                # exactly-zero command; a norm is never < 0, so strict < would
+                # never fire at 0 and the robot would stay in walk forever.
+                self._request_policy(self._stand_policy, require_stop=True)
 
         if self._manager.is_pending():
             if self._manager.is_idle():

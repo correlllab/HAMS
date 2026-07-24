@@ -395,6 +395,12 @@ class AlmiPolicy(Policy):
         cmd_norm = float(np.linalg.norm(cmd))
         if not self._walking and cmd_norm >= self.ONSET_RISE:
             self.reset(state)   # episode-start condition: memory zeroed, cmd present
+            # Use the freshly-seeded (full) command on this very tick: the
+            # LSTM's first post-reset step must see the command at full scale,
+            # exactly as at a training episode start — the smoother's stale
+            # pre-seed value here weakens the gait-commitment step.
+            cmd = self._cmd_filt.copy()
+            cmd_norm = float(np.linalg.norm(cmd))
         elif self._walking and cmd_norm < self.ONSET_FALL:
             self._walking = False
 
@@ -419,6 +425,66 @@ class AlmiPolicy(Policy):
         self._obs[30:51] = dqj
         self._obs[51:63] = self._action
         self._obs[63:65] = (left_sin_phase, right_sin_phase)
+
+        with torch.no_grad():
+            self._action = self._policy(torch.from_numpy(self._obs).unsqueeze(0)).numpy().squeeze()
+        target = self._action * self._action_scale + self._default_angles[:NUM_LEG_JOINTS]
+        target = _clip_leg_positions(target, self._lower_limit, self._upper_limit)
+        return LegCommand(target_q=target, kp=self._kps, kd=self._kds)
+
+
+class Almi27Policy(AlmiPolicy):
+    """ALMI27: wrist-inclusive ALMI. Observes ALL 27 joints (77-d obs) including
+    the six wrist DoF, so the legs are aware of full arm + wrist motion — trained
+    adversarially against a learned upper policy driving the whole upper body,
+    with stronger pushes and motor-strength randomization.
+
+    Identical control to :class:`AlmiPolicy` (stateful LSTM, 12 leg actions,
+    stand<->walk onset reset, cmd gain/EMA); only the observation is the full
+    27-DoF view instead of the 21-DoF wrist-blind one, so ``compute`` is the only
+    override and the offsets grow (q/dq blocks 21->27, obs 65->77). ``default_angles``
+    and ``num_obs`` come from ``almi27.yaml`` (27 entries / 77).
+    """
+
+    name = "almi27"
+    #: full /lowstate order, all 27 joints (no wrist drop).
+    OBS_JOINT_IDX = np.arange(NUM_POLICY_JOINTS)
+
+    def compute(self, state: RobotState) -> LegCommand:
+        if self._t_start is None:
+            self._t_start = state.t
+
+        cmd = self._effective_cmd(state.cmd)
+        cmd_norm = float(np.linalg.norm(cmd))
+        if not self._walking and cmd_norm >= self.ONSET_RISE:
+            self.reset(state)   # episode-start condition: memory zeroed, cmd present
+            cmd = self._cmd_filt.copy()
+            cmd_norm = float(np.linalg.norm(cmd))
+        elif self._walking and cmd_norm < self.ONSET_FALL:
+            self._walking = False
+
+        q27 = state.q[self.OBS_JOINT_IDX]
+        dq27 = state.dq[self.OBS_JOINT_IDX]
+        qj = (q27 - self._default_angles) * self._dof_pos_scale
+        dqj = dq27 * self._dof_vel_scale
+        gravity = gravity_from_quat_walk(state.quat)
+        omega = state.gyro * self._ang_vel_scale
+
+        if cmd_norm < self.STAND_CMD_EPS:
+            left_sin_phase = right_sin_phase = 0.0
+        else:
+            phase = ((state.t - self._t_start) % self.GAIT_PERIOD) / self.GAIT_PERIOD
+            left_sin_phase = np.sin(2 * np.pi * phase)
+            right_sin_phase = np.sin(2 * np.pi * ((phase + self.PHASE_OFFSET) % 1.0))
+
+        # 77-d obs: gyro(3) grav(3) cmd(3) (q27-def)(27) dq27(27) prev_action(12) phase(2)
+        self._obs[0:3] = omega
+        self._obs[3:6] = gravity
+        self._obs[6:9] = cmd * self._cmd_scale
+        self._obs[9:36] = qj
+        self._obs[36:63] = dqj
+        self._obs[63:75] = self._action
+        self._obs[75:77] = (left_sin_phase, right_sin_phase)
 
         with torch.no_grad():
             self._action = self._policy(torch.from_numpy(self._obs).unsqueeze(0)).numpy().squeeze()

@@ -349,7 +349,7 @@ def run(bench, method, screw, arm, success_dz):
     # A miss fails every check -> no weld -> it drops -> honest pass/fail. Especially
     # important for the small nail, where an edge touch could otherwise look grasped.
     WELD = os.environ.get('BATT_WELD', '1').strip().lower() not in ('0', 'off', 'false', 'no')
-    WELD_MAX_ERR = float(os.environ.get('BATT_WELD_MAX_ERR_MM', '12.0'))
+    WELD_MAX_ERR = float(os.environ.get('BATT_WELD_MAX_ERR_MM', '7.0'))
     WELD_MIN_FORCE = float(os.environ.get('BATT_WELD_MIN_FORCE_N', '40.0'))
     _padxy = _pad_mid_xy(bench, arm)
     _objxy = bench.gt_pos_pelvis(screw)
