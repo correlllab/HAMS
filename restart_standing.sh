@@ -17,21 +17,23 @@ SUDO docker compose -f "$COMPOSE" --profile robocasa run -d --remove-orphans \
      --name hams_sim_robocasa robocasa /home/code/h12_sim_scripts/launch_robocasa.sh --task BatteryWorkcell >/dev/null 2>&1
 for i in $(seq 1 80); do SUDO docker logs hams_sim_robocasa 2>&1 | grep -q "ROS bridges up" && { say "sim bridges up"; break; }; sleep 3; done
 
-# --- ros: create if missing (first time builds core_ws, ~15min), else restart ---
-if ! SUDO docker ps -a --format '{{.Names}}' | grep -q '^hams_ros$'; then
-  say "creating hams_ros (first run: colcon-builds core_ws, can take ~15 min)"
-  SUDO docker compose -f "$COMPOSE" --profile ros run -d --remove-orphans --name hams_ros ros \
-    bash -c 'source /opt/ros/humble/setup.bash
-      source /opt/livox_ws/install/setup.bash 2>/dev/null || true
-      [ -f /home/code/core_ws/install/setup.bash ] || ( cd /home/code/core_ws && colcon build --symlink-install )
-      source /home/code/core_ws/install/setup.bash
-      set -a; source /home/code/docker/.env 2>/dev/null; set +a
-      ros2 launch h1_bringup h1_sim_bringup.launch.py use_rviz:=false use_nav:=false use_mjpc:=false use_skills:=true' >/dev/null 2>&1
-  for i in $(seq 1 300); do SUDO docker exec hams_ros test -f /home/code/core_ws/install/setup.bash 2>/dev/null && break; sleep 5; done
-else
-  say "re-latching ros bringup"
-  SUDO docker restart hams_ros >/dev/null 2>&1
-fi
+# --- ros: ALWAYS remove + recreate fresh (never a plain `docker restart`). A restart keeps
+# transient-local/static TF latched from the PREVIOUS sim run; after the fresh sim's clock
+# resets low, that stale TF sits "in the future" and tf2 rejects every new transform
+# (TF_OLD_DATA x1000s) -> frame_task can't converge -> the arm never reaches -> ALMI topples
+# mid-reach. A full recreate starts every node with an empty TF buffer against the fresh sim.
+# The colcon build only runs the first time (install/ is host-mounted), so recreate is ~30-60s.
+SUDO docker rm -f hams_ros >/dev/null 2>&1
+sleep 2
+say "recreating hams_ros bringup FRESH (clears stale cross-sim TF)"
+SUDO docker compose -f "$COMPOSE" --profile ros run -d --remove-orphans --name hams_ros ros \
+  bash -c 'source /opt/ros/humble/setup.bash
+    source /opt/livox_ws/install/setup.bash 2>/dev/null || true
+    [ -f /home/code/core_ws/install/setup.bash ] || ( cd /home/code/core_ws && colcon build --symlink-install )
+    source /home/code/core_ws/install/setup.bash
+    set -a; source /home/code/docker/.env 2>/dev/null; set +a
+    ros2 launch h1_bringup h1_sim_bringup.launch.py use_rviz:=false use_nav:=false use_mjpc:=false use_skills:=true' >/dev/null 2>&1
+for i in $(seq 1 300); do SUDO docker exec hams_ros test -f /home/code/core_ws/install/setup.bash 2>/dev/null && break; sleep 5; done
 
 # wait for frame_task, then start ALMI
 for i in $(seq 1 90); do
