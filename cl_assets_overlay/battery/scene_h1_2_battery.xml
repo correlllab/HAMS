@@ -1,0 +1,306 @@
+<mujoco model="h1_2_magpie + arpa_battery_cell">
+  <include file="../mujoco_assets/h1_2_magpie.xml"/>
+
+  <!-- pin the global meshdir to the robot's mesh root (see ROBOT_MESHDIR note) -->
+  <compiler angle="radian" meshdir="../meshes" autolimits="true"/>
+
+  <visual>
+    <global offwidth="1920" offheight="1080"/>
+  </visual>
+
+  <option>
+    <flag multiccd="enable"/>
+  </option>
+
+  <asset>
+    <material name="gantry_gray" rgba="0.9 0.9 0.9 1" specular="0.3" shininess="0.3" />
+    <material name="pillar_gray" rgba="0.9 0.9 0.9 1" specular="0.3" shininess="0.3" />
+    <material name="actuator_gray" rgba="0.75 0.75 0.75 1" specular="0.3" shininess="0.3" />
+    <material name="actuator_plate" rgba="0.0 0.0 0.5 1" specular="0.3" shininess="0.3" />
+    <material name="arm_mount_gray" rgba="0.75 0.75 0.75 1" specular="0.3" shininess="0.3" />
+    <material name="screw_steel" rgba="0.55 0.55 0.58 1" specular="0.6" shininess="0.5" />
+    <material name="battery_black" rgba="0.1 0.1 0.1 1" specular="0.3" shininess="0.7" />
+    <mesh name="battery" file="../battery/meshes/battery.stl" />
+    <mesh name="screw_head" file="../battery/meshes/screw_head.stl" scale="0.001 0.001 0.001" />
+    <material name="room_wall" rgba="0.74 0.88 0.72 1" specular="0.1" shininess="0.05" />
+    <texture type="skybox" builtin="gradient" rgb1="0.78 0.90 0.78" rgb2="0.55 0.75 0.58" width="512" height="3072"/>
+    <!-- <texture type="2d" name="groundplane" builtin="flat" mark="edge"
+             rgb1="0.62 0.58 0.52" rgb2="0.1 0.2 0.3" markrgb="0.8 0.8 0.8" width="300" height="300"/> -->
+
+  </asset>
+
+  <worldbody>
+    <body name="arpa_cell" pos="1.080000 0.066000 0.000000" euler="0.000000 0.000000 -1.570796">
+
+
+      <body name="gantry_link" pos="0 0 1.9419">
+        <geom name="gantry_beam" type="box" size="1.5494 0.075 0.075" material="gantry_gray" group="2" />
+
+
+        <body name="pillar_left_link" pos="1.4744 0 -1.00845">
+          <geom name="pillar_left" type="box" size="0.075 0.075 0.9335" material="pillar_gray" group="2" />
+          <body name="left_leg_link" pos="0 0 -0.925">
+            <geom name="left_leg" type="box" size="0.5 0.5 0.025" material="pillar_gray" group="2" />
+          </body>
+        </body>
+
+
+        <body name="pillar_right_link" pos="-1.4744 0 -1.00845">
+          <geom name="pillar_right" type="box" size="0.075 0.075 0.9335" material="pillar_gray" group="2" />
+          <body name="right_leg_link" pos="0 0 -0.925">
+            <geom name="right_leg" type="box" size="0.5 0.5 0.025" material="pillar_gray" group="2" />
+          </body>
+        </body>
+
+
+        <body name="battery_link" pos="0.067 -0.0235 -1.1419" euler="0 0 1.57">
+          <geom name="battery" type="mesh" mesh="battery" material="battery_black" mass="400" contype="0" conaffinity="0" group="2" />
+
+          <geom name="battery_collision" type="box" size="0.6125 1.06 0.055" pos="0 0 0.055" group="3" friction="1 0.005 0.001" condim="4" priority="1" solref="0.004 1" solimp="0.95 0.99 0.001" />
+        </body>
+
+
+        <body name="linear_actuator_link" pos="0 0 -0.11375">
+          <geom name="actuator_rail" type="box" size="1.29 0.075 0.03375" material="actuator_gray" group="2" />
+
+
+          <body name="actuator_motor_link" pos="1.245 -0.2425 0">
+            <geom name="actuator_motor" type="box" size="0.0475 0.1675 0.0475" material="actuator_gray" group="2" />
+          </body>
+
+
+          <body name="linear_actuator_plate_link" pos="0 0 -0.04375">
+            <joint name="carriage_slide" type="slide" axis="1 0 0" range="-0.9756 0.9244" damping="50" />
+            <geom name="carriage_plate" type="box" size="0.13 0.075 0.01" mass="5" material="actuator_plate" group="2" />
+
+
+            <body name="arm_mount_plate" pos="0 0 -0.014" euler="0 0 3.14159">
+              <geom name="arm_mount" type="box" size="0.1 0.21 0.004" mass="0.5" material="arm_mount_gray" group="2" />
+              <site name="arm_mount_site" pos="0 0 -0.004" size="0.01" rgba="0 1 0 0.3" />
+            </body>
+          </body>
+        </body>
+      </body>
+    </body>
+    <body name="screw_01" pos="1.658813 -0.863980 0.910000" euler="0.000000 0.000000 1.570000">
+      <joint name="screw_01_free" type="free" />
+      <geom name="screw_01_head_visual" type="mesh" mesh="screw_head" euler="1.5707963 0 0" pos="0 0 0.011262" material="screw_steel" contype="0" conaffinity="0" density="0" group="2" />
+      <geom name="screw_01_head_collision" type="cylinder" size="0.008255 0.002500" pos="0 0 0.002500" group="3" mass="0.00418" material="screw_steel" friction="1 0.005 0.001" solref="0.004 1" solimp="0.95 0.99 0.001" priority="1" />
+      <geom name="screw_01_shaft" type="cylinder" size="0.003175 0.009525" pos="0 0 -0.004525" mass="0.00382" material="screw_steel" contype="0" conaffinity="0" group="2" />
+    <site name="screw_01_target" pos="0 0 0.002500" size="0.005" rgba="1.0 0.78 0.12 0.9" /></body>
+    <body name="screw_02" pos="1.658894 -0.762380 0.910000" euler="0.000000 0.000000 1.570000">
+      <joint name="screw_02_free" type="free" />
+      <geom name="screw_02_head_visual" type="mesh" mesh="screw_head" euler="1.5707963 0 0" pos="0 0 0.011262" material="screw_steel" contype="0" conaffinity="0" density="0" group="2" />
+      <geom name="screw_02_head_collision" type="cylinder" size="0.008255 0.002500" pos="0 0 0.002500" group="3" mass="0.00418" material="screw_steel" friction="1 0.005 0.001" solref="0.004 1" solimp="0.95 0.99 0.001" priority="1" />
+      <geom name="screw_02_shaft" type="cylinder" size="0.003175 0.009525" pos="0 0 -0.004525" mass="0.00382" material="screw_steel" contype="0" conaffinity="0" group="2" />
+    <site name="screw_02_target" pos="0 0 0.002500" size="0.005" rgba="1.0 0.78 0.12 0.9" /></body>
+    <body name="screw_03" pos="1.658975 -0.660780 0.910000" euler="0.000000 0.000000 1.570000">
+      <joint name="screw_03_free" type="free" />
+      <geom name="screw_03_head_visual" type="mesh" mesh="screw_head" euler="1.5707963 0 0" pos="0 0 0.011262" material="screw_steel" contype="0" conaffinity="0" density="0" group="2" />
+      <geom name="screw_03_head_collision" type="cylinder" size="0.008255 0.002500" pos="0 0 0.002500" group="3" mass="0.00418" material="screw_steel" friction="1 0.005 0.001" solref="0.004 1" solimp="0.95 0.99 0.001" priority="1" />
+      <geom name="screw_03_shaft" type="cylinder" size="0.003175 0.009525" pos="0 0 -0.004525" mass="0.00382" material="screw_steel" contype="0" conaffinity="0" group="2" />
+    <site name="screw_03_target" pos="0 0 0.002500" size="0.005" rgba="1.0 0.78 0.12 0.9" /></body>
+    <body name="screw_04" pos="1.659056 -0.559180 0.910000" euler="0.000000 0.000000 1.570000">
+      <joint name="screw_04_free" type="free" />
+      <geom name="screw_04_head_visual" type="mesh" mesh="screw_head" euler="1.5707963 0 0" pos="0 0 0.011262" material="screw_steel" contype="0" conaffinity="0" density="0" group="2" />
+      <geom name="screw_04_head_collision" type="cylinder" size="0.008255 0.002500" pos="0 0 0.002500" group="3" mass="0.00418" material="screw_steel" friction="1 0.005 0.001" solref="0.004 1" solimp="0.95 0.99 0.001" priority="1" />
+      <geom name="screw_04_shaft" type="cylinder" size="0.003175 0.009525" pos="0 0 -0.004525" mass="0.00382" material="screw_steel" contype="0" conaffinity="0" group="2" />
+    <site name="screw_04_target" pos="0 0 0.002500" size="0.005" rgba="1.0 0.78 0.12 0.9" /></body>
+    <body name="screw_05" pos="1.659137 -0.457580 0.910000" euler="0.000000 0.000000 1.570000">
+      <joint name="screw_05_free" type="free" />
+      <geom name="screw_05_head_visual" type="mesh" mesh="screw_head" euler="1.5707963 0 0" pos="0 0 0.011262" material="screw_steel" contype="0" conaffinity="0" density="0" group="2" />
+      <geom name="screw_05_head_collision" type="cylinder" size="0.008255 0.002500" pos="0 0 0.002500" group="3" mass="0.00418" material="screw_steel" friction="1 0.005 0.001" solref="0.004 1" solimp="0.95 0.99 0.001" priority="1" />
+      <geom name="screw_05_shaft" type="cylinder" size="0.003175 0.009525" pos="0 0 -0.004525" mass="0.00382" material="screw_steel" contype="0" conaffinity="0" group="2" />
+    <site name="screw_05_target" pos="0 0 0.002500" size="0.005" rgba="1.0 0.78 0.12 0.9" /></body>
+    <body name="screw_06" pos="1.659218 -0.355980 0.910000" euler="0.000000 0.000000 1.570000">
+      <joint name="screw_06_free" type="free" />
+      <geom name="screw_06_head_visual" type="mesh" mesh="screw_head" euler="1.5707963 0 0" pos="0 0 0.011262" material="screw_steel" contype="0" conaffinity="0" density="0" group="2" />
+      <geom name="screw_06_head_collision" type="cylinder" size="0.008255 0.002500" pos="0 0 0.002500" group="3" mass="0.00418" material="screw_steel" friction="1 0.005 0.001" solref="0.004 1" solimp="0.95 0.99 0.001" priority="1" />
+      <geom name="screw_06_shaft" type="cylinder" size="0.003175 0.009525" pos="0 0 -0.004525" mass="0.00382" material="screw_steel" contype="0" conaffinity="0" group="2" />
+    <site name="screw_06_target" pos="0 0 0.002500" size="0.005" rgba="1.0 0.78 0.12 0.9" /></body>
+    <body name="screw_07" pos="1.659298 -0.254380 0.910000" euler="0.000000 0.000000 1.570000">
+      <joint name="screw_07_free" type="free" />
+      <geom name="screw_07_head_visual" type="mesh" mesh="screw_head" euler="1.5707963 0 0" pos="0 0 0.011262" material="screw_steel" contype="0" conaffinity="0" density="0" group="2" />
+      <geom name="screw_07_head_collision" type="cylinder" size="0.008255 0.002500" pos="0 0 0.002500" group="3" mass="0.00418" material="screw_steel" friction="1 0.005 0.001" solref="0.004 1" solimp="0.95 0.99 0.001" priority="1" />
+      <geom name="screw_07_shaft" type="cylinder" size="0.003175 0.009525" pos="0 0 -0.004525" mass="0.00382" material="screw_steel" contype="0" conaffinity="0" group="2" />
+    <site name="screw_07_target" pos="0 0 0.002500" size="0.005" rgba="1.0 0.78 0.12 0.9" /></body>
+    <body name="screw_08" pos="1.659379 -0.152780 0.910000" euler="0.000000 0.000000 1.570000">
+      <joint name="screw_08_free" type="free" />
+      <geom name="screw_08_head_visual" type="mesh" mesh="screw_head" euler="1.5707963 0 0" pos="0 0 0.011262" material="screw_steel" contype="0" conaffinity="0" density="0" group="2" />
+      <geom name="screw_08_head_collision" type="cylinder" size="0.008255 0.002500" pos="0 0 0.002500" group="3" mass="0.00418" material="screw_steel" friction="1 0.005 0.001" solref="0.004 1" solimp="0.95 0.99 0.001" priority="1" />
+      <geom name="screw_08_shaft" type="cylinder" size="0.003175 0.009525" pos="0 0 -0.004525" mass="0.00382" material="screw_steel" contype="0" conaffinity="0" group="2" />
+    <site name="screw_08_target" pos="0 0 0.002500" size="0.005" rgba="1.0 0.78 0.12 0.9" /></body>
+    <body name="screw_09" pos="1.659460 -0.051180 0.910000" euler="0.000000 0.000000 1.570000">
+      <joint name="screw_09_free" type="free" />
+      <geom name="screw_09_head_visual" type="mesh" mesh="screw_head" euler="1.5707963 0 0" pos="0 0 0.011262" material="screw_steel" contype="0" conaffinity="0" density="0" group="2" />
+      <geom name="screw_09_head_collision" type="cylinder" size="0.008255 0.002500" pos="0 0 0.002500" group="3" mass="0.00418" material="screw_steel" friction="1 0.005 0.001" solref="0.004 1" solimp="0.95 0.99 0.001" priority="1" />
+      <geom name="screw_09_shaft" type="cylinder" size="0.003175 0.009525" pos="0 0 -0.004525" mass="0.00382" material="screw_steel" contype="0" conaffinity="0" group="2" />
+    <site name="screw_09_target" pos="0 0 0.002500" size="0.005" rgba="1.0 0.78 0.12 0.9" /></body>
+    <body name="screw_10" pos="1.659541 0.050420 0.910000" euler="0.000000 0.000000 1.570000">
+      <joint name="screw_10_free" type="free" />
+      <geom name="screw_10_head_visual" type="mesh" mesh="screw_head" euler="1.5707963 0 0" pos="0 0 0.011262" material="screw_steel" contype="0" conaffinity="0" density="0" group="2" />
+      <geom name="screw_10_head_collision" type="cylinder" size="0.008255 0.002500" pos="0 0 0.002500" group="3" mass="0.00418" material="screw_steel" friction="1 0.005 0.001" solref="0.004 1" solimp="0.95 0.99 0.001" priority="1" />
+      <geom name="screw_10_shaft" type="cylinder" size="0.003175 0.009525" pos="0 0 -0.004525" mass="0.00382" material="screw_steel" contype="0" conaffinity="0" group="2" />
+    <site name="screw_10_target" pos="0 0 0.002500" size="0.005" rgba="1.0 0.78 0.12 0.9" /></body>
+    <body name="screw_11" pos="1.659622 0.152020 0.910000" euler="0.000000 0.000000 1.570000">
+      <joint name="screw_11_free" type="free" />
+      <geom name="screw_11_head_visual" type="mesh" mesh="screw_head" euler="1.5707963 0 0" pos="0 0 0.011262" material="screw_steel" contype="0" conaffinity="0" density="0" group="2" />
+      <geom name="screw_11_head_collision" type="cylinder" size="0.008255 0.002500" pos="0 0 0.002500" group="3" mass="0.00418" material="screw_steel" friction="1 0.005 0.001" solref="0.004 1" solimp="0.95 0.99 0.001" priority="1" />
+      <geom name="screw_11_shaft" type="cylinder" size="0.003175 0.009525" pos="0 0 -0.004525" mass="0.00382" material="screw_steel" contype="0" conaffinity="0" group="2" />
+    <site name="screw_11_target" pos="0 0 0.002500" size="0.005" rgba="1.0 0.78 0.12 0.9" /></body>
+    <body name="screw_12" pos="1.659703 0.253620 0.910000" euler="0.000000 0.000000 1.570000">
+      <joint name="screw_12_free" type="free" />
+      <geom name="screw_12_head_visual" type="mesh" mesh="screw_head" euler="1.5707963 0 0" pos="0 0 0.011262" material="screw_steel" contype="0" conaffinity="0" density="0" group="2" />
+      <geom name="screw_12_head_collision" type="cylinder" size="0.008255 0.002500" pos="0 0 0.002500" group="3" mass="0.00418" material="screw_steel" friction="1 0.005 0.001" solref="0.004 1" solimp="0.95 0.99 0.001" priority="1" />
+      <geom name="screw_12_shaft" type="cylinder" size="0.003175 0.009525" pos="0 0 -0.004525" mass="0.00382" material="screw_steel" contype="0" conaffinity="0" group="2" />
+    <site name="screw_12_target" pos="0 0 0.002500" size="0.005" rgba="1.0 0.78 0.12 0.9" /></body>
+    <body name="screw_13" pos="1.659784 0.355220 0.910000" euler="0.000000 0.000000 1.570000">
+      <joint name="screw_13_free" type="free" />
+      <geom name="screw_13_head_visual" type="mesh" mesh="screw_head" euler="1.5707963 0 0" pos="0 0 0.011262" material="screw_steel" contype="0" conaffinity="0" density="0" group="2" />
+      <geom name="screw_13_head_collision" type="cylinder" size="0.008255 0.002500" pos="0 0 0.002500" group="3" mass="0.00418" material="screw_steel" friction="1 0.005 0.001" solref="0.004 1" solimp="0.95 0.99 0.001" priority="1" />
+      <geom name="screw_13_shaft" type="cylinder" size="0.003175 0.009525" pos="0 0 -0.004525" mass="0.00382" material="screw_steel" contype="0" conaffinity="0" group="2" />
+    <site name="screw_13_target" pos="0 0 0.002500" size="0.005" rgba="1.0 0.78 0.12 0.9" /></body>
+    <body name="screw_14" pos="1.659865 0.456820 0.910000" euler="0.000000 0.000000 1.570000">
+      <joint name="screw_14_free" type="free" />
+      <geom name="screw_14_head_visual" type="mesh" mesh="screw_head" euler="1.5707963 0 0" pos="0 0 0.011262" material="screw_steel" contype="0" conaffinity="0" density="0" group="2" />
+      <geom name="screw_14_head_collision" type="cylinder" size="0.008255 0.002500" pos="0 0 0.002500" group="3" mass="0.00418" material="screw_steel" friction="1 0.005 0.001" solref="0.004 1" solimp="0.95 0.99 0.001" priority="1" />
+      <geom name="screw_14_shaft" type="cylinder" size="0.003175 0.009525" pos="0 0 -0.004525" mass="0.00382" material="screw_steel" contype="0" conaffinity="0" group="2" />
+    <site name="screw_14_target" pos="0 0 0.002500" size="0.005" rgba="1.0 0.78 0.12 0.9" /></body>
+    <body name="screw_15" pos="1.659946 0.558420 0.910000" euler="0.000000 0.000000 1.570000">
+      <joint name="screw_15_free" type="free" />
+      <geom name="screw_15_head_visual" type="mesh" mesh="screw_head" euler="1.5707963 0 0" pos="0 0 0.011262" material="screw_steel" contype="0" conaffinity="0" density="0" group="2" />
+      <geom name="screw_15_head_collision" type="cylinder" size="0.008255 0.002500" pos="0 0 0.002500" group="3" mass="0.00418" material="screw_steel" friction="1 0.005 0.001" solref="0.004 1" solimp="0.95 0.99 0.001" priority="1" />
+      <geom name="screw_15_shaft" type="cylinder" size="0.003175 0.009525" pos="0 0 -0.004525" mass="0.00382" material="screw_steel" contype="0" conaffinity="0" group="2" />
+    <site name="screw_15_target" pos="0 0 0.002500" size="0.005" rgba="1.0 0.78 0.12 0.9" /></body>
+    <body name="screw_16" pos="1.660027 0.660020 0.910000" euler="0.000000 0.000000 1.570000">
+      <joint name="screw_16_free" type="free" />
+      <geom name="screw_16_head_visual" type="mesh" mesh="screw_head" euler="1.5707963 0 0" pos="0 0 0.011262" material="screw_steel" contype="0" conaffinity="0" density="0" group="2" />
+      <geom name="screw_16_head_collision" type="cylinder" size="0.008255 0.002500" pos="0 0 0.002500" group="3" mass="0.00418" material="screw_steel" friction="1 0.005 0.001" solref="0.004 1" solimp="0.95 0.99 0.001" priority="1" />
+      <geom name="screw_16_shaft" type="cylinder" size="0.003175 0.009525" pos="0 0 -0.004525" mass="0.00382" material="screw_steel" contype="0" conaffinity="0" group="2" />
+    <site name="screw_16_target" pos="0 0 0.002500" size="0.005" rgba="1.0 0.78 0.12 0.9" /></body>
+    <body name="screw_17" pos="1.660107 0.761620 0.910000" euler="0.000000 0.000000 1.570000">
+      <joint name="screw_17_free" type="free" />
+      <geom name="screw_17_head_visual" type="mesh" mesh="screw_head" euler="1.5707963 0 0" pos="0 0 0.011262" material="screw_steel" contype="0" conaffinity="0" density="0" group="2" />
+      <geom name="screw_17_head_collision" type="cylinder" size="0.008255 0.002500" pos="0 0 0.002500" group="3" mass="0.00418" material="screw_steel" friction="1 0.005 0.001" solref="0.004 1" solimp="0.95 0.99 0.001" priority="1" />
+      <geom name="screw_17_shaft" type="cylinder" size="0.003175 0.009525" pos="0 0 -0.004525" mass="0.00382" material="screw_steel" contype="0" conaffinity="0" group="2" />
+    <site name="screw_17_target" pos="0 0 0.002500" size="0.005" rgba="1.0 0.78 0.12 0.9" /></body>
+    <body name="screw_18" pos="1.660188 0.863220 0.910000" euler="0.000000 0.000000 1.570000">
+      <joint name="screw_18_free" type="free" />
+      <geom name="screw_18_head_visual" type="mesh" mesh="screw_head" euler="1.5707963 0 0" pos="0 0 0.011262" material="screw_steel" contype="0" conaffinity="0" density="0" group="2" />
+      <geom name="screw_18_head_collision" type="cylinder" size="0.008255 0.002500" pos="0 0 0.002500" group="3" mass="0.00418" material="screw_steel" friction="1 0.005 0.001" solref="0.004 1" solimp="0.95 0.99 0.001" priority="1" />
+      <geom name="screw_18_shaft" type="cylinder" size="0.003175 0.009525" pos="0 0 -0.004525" mass="0.00382" material="screw_steel" contype="0" conaffinity="0" group="2" />
+    <site name="screw_18_target" pos="0 0 0.002500" size="0.005" rgba="1.0 0.78 0.12 0.9" /></body>
+    <body name="screw_19" pos="0.452813 -0.863020 0.910000" euler="0.000000 0.000000 1.570000">
+      <joint name="screw_19_free" type="free" />
+      <geom name="screw_19_head_visual" type="mesh" mesh="screw_head" euler="1.5707963 0 0" pos="0 0 0.011262" material="screw_steel" contype="0" conaffinity="0" density="0" group="2" />
+      <geom name="screw_19_head_collision" type="cylinder" size="0.008255 0.002500" pos="0 0 0.002500" group="3" mass="0.00418" material="screw_steel" friction="1 0.005 0.001" solref="0.004 1" solimp="0.95 0.99 0.001" priority="1" />
+      <geom name="screw_19_shaft" type="cylinder" size="0.003175 0.009525" pos="0 0 -0.004525" mass="0.00382" material="screw_steel" contype="0" conaffinity="0" group="2" />
+    <site name="screw_19_target" pos="0 0 0.002500" size="0.005" rgba="1.0 0.78 0.12 0.9" /></body>
+    <body name="screw_20" pos="0.452894 -0.761420 0.910000" euler="0.000000 0.000000 1.570000">
+      <joint name="screw_20_free" type="free" />
+      <geom name="screw_20_head_visual" type="mesh" mesh="screw_head" euler="1.5707963 0 0" pos="0 0 0.011262" material="screw_steel" contype="0" conaffinity="0" density="0" group="2" />
+      <geom name="screw_20_head_collision" type="cylinder" size="0.008255 0.002500" pos="0 0 0.002500" group="3" mass="0.00418" material="screw_steel" friction="1 0.005 0.001" solref="0.004 1" solimp="0.95 0.99 0.001" priority="1" />
+      <geom name="screw_20_shaft" type="cylinder" size="0.003175 0.009525" pos="0 0 -0.004525" mass="0.00382" material="screw_steel" contype="0" conaffinity="0" group="2" />
+    <site name="screw_20_target" pos="0 0 0.002500" size="0.005" rgba="1.0 0.78 0.12 0.9" /></body>
+    <body name="screw_21" pos="0.452975 -0.659820 0.910000" euler="0.000000 0.000000 1.570000">
+      <joint name="screw_21_free" type="free" />
+      <geom name="screw_21_head_visual" type="mesh" mesh="screw_head" euler="1.5707963 0 0" pos="0 0 0.011262" material="screw_steel" contype="0" conaffinity="0" density="0" group="2" />
+      <geom name="screw_21_head_collision" type="cylinder" size="0.008255 0.002500" pos="0 0 0.002500" group="3" mass="0.00418" material="screw_steel" friction="1 0.005 0.001" solref="0.004 1" solimp="0.95 0.99 0.001" priority="1" />
+      <geom name="screw_21_shaft" type="cylinder" size="0.003175 0.009525" pos="0 0 -0.004525" mass="0.00382" material="screw_steel" contype="0" conaffinity="0" group="2" />
+    <site name="screw_21_target" pos="0 0 0.002500" size="0.005" rgba="1.0 0.78 0.12 0.9" /></body>
+    <body name="screw_22" pos="0.453056 -0.558220 0.910000" euler="0.000000 0.000000 1.570000">
+      <joint name="screw_22_free" type="free" />
+      <geom name="screw_22_head_visual" type="mesh" mesh="screw_head" euler="1.5707963 0 0" pos="0 0 0.011262" material="screw_steel" contype="0" conaffinity="0" density="0" group="2" />
+      <geom name="screw_22_head_collision" type="cylinder" size="0.008255 0.002500" pos="0 0 0.002500" group="3" mass="0.00418" material="screw_steel" friction="1 0.005 0.001" solref="0.004 1" solimp="0.95 0.99 0.001" priority="1" />
+      <geom name="screw_22_shaft" type="cylinder" size="0.003175 0.009525" pos="0 0 -0.004525" mass="0.00382" material="screw_steel" contype="0" conaffinity="0" group="2" />
+    <site name="screw_22_target" pos="0 0 0.002500" size="0.005" rgba="1.0 0.78 0.12 0.9" /></body>
+    <body name="screw_23" pos="0.453137 -0.456620 0.910000" euler="0.000000 0.000000 1.570000">
+      <joint name="screw_23_free" type="free" />
+      <geom name="screw_23_head_visual" type="mesh" mesh="screw_head" euler="1.5707963 0 0" pos="0 0 0.011262" material="screw_steel" contype="0" conaffinity="0" density="0" group="2" />
+      <geom name="screw_23_head_collision" type="cylinder" size="0.008255 0.002500" pos="0 0 0.002500" group="3" mass="0.00418" material="screw_steel" friction="1 0.005 0.001" solref="0.004 1" solimp="0.95 0.99 0.001" priority="1" />
+      <geom name="screw_23_shaft" type="cylinder" size="0.003175 0.009525" pos="0 0 -0.004525" mass="0.00382" material="screw_steel" contype="0" conaffinity="0" group="2" />
+    <site name="screw_23_target" pos="0 0 0.002500" size="0.005" rgba="1.0 0.78 0.12 0.9" /></body>
+    <body name="screw_24" pos="0.453218 -0.355020 0.910000" euler="0.000000 0.000000 1.570000">
+      <joint name="screw_24_free" type="free" />
+      <geom name="screw_24_head_visual" type="mesh" mesh="screw_head" euler="1.5707963 0 0" pos="0 0 0.011262" material="screw_steel" contype="0" conaffinity="0" density="0" group="2" />
+      <geom name="screw_24_head_collision" type="cylinder" size="0.008255 0.002500" pos="0 0 0.002500" group="3" mass="0.00418" material="screw_steel" friction="1 0.005 0.001" solref="0.004 1" solimp="0.95 0.99 0.001" priority="1" />
+      <geom name="screw_24_shaft" type="cylinder" size="0.003175 0.009525" pos="0 0 -0.004525" mass="0.00382" material="screw_steel" contype="0" conaffinity="0" group="2" />
+    <site name="screw_24_target" pos="0 0 0.002500" size="0.005" rgba="1.0 0.78 0.12 0.9" /></body>
+    <body name="screw_25" pos="0.453299 -0.253420 0.910000" euler="0.000000 0.000000 1.570000">
+      <joint name="screw_25_free" type="free" />
+      <geom name="screw_25_head_visual" type="mesh" mesh="screw_head" euler="1.5707963 0 0" pos="0 0 0.011262" material="screw_steel" contype="0" conaffinity="0" density="0" group="2" />
+      <geom name="screw_25_head_collision" type="cylinder" size="0.008255 0.002500" pos="0 0 0.002500" group="3" mass="0.00418" material="screw_steel" friction="1 0.005 0.001" solref="0.004 1" solimp="0.95 0.99 0.001" priority="1" />
+      <geom name="screw_25_shaft" type="cylinder" size="0.003175 0.009525" pos="0 0 -0.004525" mass="0.00382" material="screw_steel" contype="0" conaffinity="0" group="2" />
+    <site name="screw_25_target" pos="0 0 0.002500" size="0.005" rgba="1.0 0.78 0.12 0.9" /></body>
+    <body name="screw_26" pos="0.453380 -0.151820 0.910000" euler="0.000000 0.000000 1.570000">
+      <joint name="screw_26_free" type="free" />
+      <geom name="screw_26_head_visual" type="mesh" mesh="screw_head" euler="1.5707963 0 0" pos="0 0 0.011262" material="screw_steel" contype="0" conaffinity="0" density="0" group="2" />
+      <geom name="screw_26_head_collision" type="cylinder" size="0.008255 0.002500" pos="0 0 0.002500" group="3" mass="0.00418" material="screw_steel" friction="1 0.005 0.001" solref="0.004 1" solimp="0.95 0.99 0.001" priority="1" />
+      <geom name="screw_26_shaft" type="cylinder" size="0.003175 0.009525" pos="0 0 -0.004525" mass="0.00382" material="screw_steel" contype="0" conaffinity="0" group="2" />
+    <site name="screw_26_target" pos="0 0 0.002500" size="0.005" rgba="1.0 0.78 0.12 0.9" /></body>
+    <body name="screw_27" pos="0.453461 -0.050220 0.910000" euler="0.000000 0.000000 1.570000">
+      <joint name="screw_27_free" type="free" />
+      <geom name="screw_27_head_visual" type="mesh" mesh="screw_head" euler="1.5707963 0 0" pos="0 0 0.011262" material="screw_steel" contype="0" conaffinity="0" density="0" group="2" />
+      <geom name="screw_27_head_collision" type="cylinder" size="0.008255 0.002500" pos="0 0 0.002500" group="3" mass="0.00418" material="screw_steel" friction="1 0.005 0.001" solref="0.004 1" solimp="0.95 0.99 0.001" priority="1" />
+      <geom name="screw_27_shaft" type="cylinder" size="0.003175 0.009525" pos="0 0 -0.004525" mass="0.00382" material="screw_steel" contype="0" conaffinity="0" group="2" />
+    <site name="screw_27_target" pos="0 0 0.002500" size="0.005" rgba="1.0 0.78 0.12 0.9" /></body>
+    <body name="screw_28" pos="0.453542 0.051380 0.910000" euler="0.000000 0.000000 1.570000">
+      <joint name="screw_28_free" type="free" />
+      <geom name="screw_28_head_visual" type="mesh" mesh="screw_head" euler="1.5707963 0 0" pos="0 0 0.011262" material="screw_steel" contype="0" conaffinity="0" density="0" group="2" />
+      <geom name="screw_28_head_collision" type="cylinder" size="0.008255 0.002500" pos="0 0 0.002500" group="3" mass="0.00418" material="screw_steel" friction="1 0.005 0.001" solref="0.004 1" solimp="0.95 0.99 0.001" priority="1" />
+      <geom name="screw_28_shaft" type="cylinder" size="0.003175 0.009525" pos="0 0 -0.004525" mass="0.00382" material="screw_steel" contype="0" conaffinity="0" group="2" />
+    <site name="screw_28_target" pos="0 0 0.002500" size="0.005" rgba="1.0 0.78 0.12 0.9" /></body>
+    <body name="screw_29" pos="0.453622 0.152980 0.910000" euler="0.000000 0.000000 1.570000">
+      <joint name="screw_29_free" type="free" />
+      <geom name="screw_29_head_visual" type="mesh" mesh="screw_head" euler="1.5707963 0 0" pos="0 0 0.011262" material="screw_steel" contype="0" conaffinity="0" density="0" group="2" />
+      <geom name="screw_29_head_collision" type="cylinder" size="0.008255 0.002500" pos="0 0 0.002500" group="3" mass="0.00418" material="screw_steel" friction="1 0.005 0.001" solref="0.004 1" solimp="0.95 0.99 0.001" priority="1" />
+      <geom name="screw_29_shaft" type="cylinder" size="0.003175 0.009525" pos="0 0 -0.004525" mass="0.00382" material="screw_steel" contype="0" conaffinity="0" group="2" />
+    <site name="screw_29_target" pos="0 0 0.002500" size="0.005" rgba="1.0 0.78 0.12 0.9" /></body>
+    <body name="screw_30" pos="0.453703 0.254580 0.910000" euler="0.000000 0.000000 1.570000">
+      <joint name="screw_30_free" type="free" />
+      <geom name="screw_30_head_visual" type="mesh" mesh="screw_head" euler="1.5707963 0 0" pos="0 0 0.011262" material="screw_steel" contype="0" conaffinity="0" density="0" group="2" />
+      <geom name="screw_30_head_collision" type="cylinder" size="0.008255 0.002500" pos="0 0 0.002500" group="3" mass="0.00418" material="screw_steel" friction="1 0.005 0.001" solref="0.004 1" solimp="0.95 0.99 0.001" priority="1" />
+      <geom name="screw_30_shaft" type="cylinder" size="0.003175 0.009525" pos="0 0 -0.004525" mass="0.00382" material="screw_steel" contype="0" conaffinity="0" group="2" />
+    <site name="screw_30_target" pos="0 0 0.002500" size="0.005" rgba="1.0 0.78 0.12 0.9" /></body>
+    <body name="screw_31" pos="0.453784 0.356180 0.910000" euler="0.000000 0.000000 1.570000">
+      <joint name="screw_31_free" type="free" />
+      <geom name="screw_31_head_visual" type="mesh" mesh="screw_head" euler="1.5707963 0 0" pos="0 0 0.011262" material="screw_steel" contype="0" conaffinity="0" density="0" group="2" />
+      <geom name="screw_31_head_collision" type="cylinder" size="0.008255 0.002500" pos="0 0 0.002500" group="3" mass="0.00418" material="screw_steel" friction="1 0.005 0.001" solref="0.004 1" solimp="0.95 0.99 0.001" priority="1" />
+      <geom name="screw_31_shaft" type="cylinder" size="0.003175 0.009525" pos="0 0 -0.004525" mass="0.00382" material="screw_steel" contype="0" conaffinity="0" group="2" />
+    <site name="screw_31_target" pos="0 0 0.002500" size="0.005" rgba="1.0 0.78 0.12 0.9" /></body>
+    <body name="screw_32" pos="0.453865 0.457780 0.910000" euler="0.000000 0.000000 1.570000">
+      <joint name="screw_32_free" type="free" />
+      <geom name="screw_32_head_visual" type="mesh" mesh="screw_head" euler="1.5707963 0 0" pos="0 0 0.011262" material="screw_steel" contype="0" conaffinity="0" density="0" group="2" />
+      <geom name="screw_32_head_collision" type="cylinder" size="0.008255 0.002500" pos="0 0 0.002500" group="3" mass="0.00418" material="screw_steel" friction="1 0.005 0.001" solref="0.004 1" solimp="0.95 0.99 0.001" priority="1" />
+      <geom name="screw_32_shaft" type="cylinder" size="0.003175 0.009525" pos="0 0 -0.004525" mass="0.00382" material="screw_steel" contype="0" conaffinity="0" group="2" />
+    <site name="screw_32_target" pos="0 0 0.002500" size="0.005" rgba="1.0 0.78 0.12 0.9" /></body>
+    <body name="screw_33" pos="0.453946 0.559380 0.910000" euler="0.000000 0.000000 1.570000">
+      <joint name="screw_33_free" type="free" />
+      <geom name="screw_33_head_visual" type="mesh" mesh="screw_head" euler="1.5707963 0 0" pos="0 0 0.011262" material="screw_steel" contype="0" conaffinity="0" density="0" group="2" />
+      <geom name="screw_33_head_collision" type="cylinder" size="0.008255 0.002500" pos="0 0 0.002500" group="3" mass="0.00418" material="screw_steel" friction="1 0.005 0.001" solref="0.004 1" solimp="0.95 0.99 0.001" priority="1" />
+      <geom name="screw_33_shaft" type="cylinder" size="0.003175 0.009525" pos="0 0 -0.004525" mass="0.00382" material="screw_steel" contype="0" conaffinity="0" group="2" />
+    <site name="screw_33_target" pos="0 0 0.002500" size="0.005" rgba="1.0 0.78 0.12 0.9" /></body>
+    <body name="screw_34" pos="0.454027 0.660980 0.910000" euler="0.000000 0.000000 1.570000">
+      <joint name="screw_34_free" type="free" />
+      <geom name="screw_34_head_visual" type="mesh" mesh="screw_head" euler="1.5707963 0 0" pos="0 0 0.011262" material="screw_steel" contype="0" conaffinity="0" density="0" group="2" />
+      <geom name="screw_34_head_collision" type="cylinder" size="0.008255 0.002500" pos="0 0 0.002500" group="3" mass="0.00418" material="screw_steel" friction="1 0.005 0.001" solref="0.004 1" solimp="0.95 0.99 0.001" priority="1" />
+      <geom name="screw_34_shaft" type="cylinder" size="0.003175 0.009525" pos="0 0 -0.004525" mass="0.00382" material="screw_steel" contype="0" conaffinity="0" group="2" />
+    <site name="screw_34_target" pos="0 0 0.002500" size="0.005" rgba="1.0 0.78 0.12 0.9" /></body>
+    <body name="screw_35" pos="0.454108 0.762580 0.910000" euler="0.000000 0.000000 1.570000">
+      <joint name="screw_35_free" type="free" />
+      <geom name="screw_35_head_visual" type="mesh" mesh="screw_head" euler="1.5707963 0 0" pos="0 0 0.011262" material="screw_steel" contype="0" conaffinity="0" density="0" group="2" />
+      <geom name="screw_35_head_collision" type="cylinder" size="0.008255 0.002500" pos="0 0 0.002500" group="3" mass="0.00418" material="screw_steel" friction="1 0.005 0.001" solref="0.004 1" solimp="0.95 0.99 0.001" priority="1" />
+      <geom name="screw_35_shaft" type="cylinder" size="0.003175 0.009525" pos="0 0 -0.004525" mass="0.00382" material="screw_steel" contype="0" conaffinity="0" group="2" />
+    <site name="screw_35_target" pos="0 0 0.002500" size="0.005" rgba="1.0 0.78 0.12 0.9" /></body>
+    <body name="screw_36" pos="0.454189 0.864180 0.910000" euler="0.000000 0.000000 1.570000">
+      <joint name="screw_36_free" type="free" />
+      <geom name="screw_36_head_visual" type="mesh" mesh="screw_head" euler="1.5707963 0 0" pos="0 0 0.011262" material="screw_steel" contype="0" conaffinity="0" density="0" group="2" />
+      <geom name="screw_36_head_collision" type="cylinder" size="0.008255 0.002500" pos="0 0 0.002500" group="3" mass="0.00418" material="screw_steel" friction="1 0.005 0.001" solref="0.004 1" solimp="0.95 0.99 0.001" priority="1" />
+      <geom name="screw_36_shaft" type="cylinder" size="0.003175 0.009525" pos="0 0 -0.004525" mass="0.00382" material="screw_steel" contype="0" conaffinity="0" group="2" />
+    <site name="screw_36_target" pos="0 0 0.002500" size="0.005" rgba="1.0 0.78 0.12 0.9" /></body>
+    <geom name="wall_xpos" type="box" pos="4.5 0.0 1.4" size="0.05 4.5 1.4" material="room_wall" group="2" />
+    <geom name="wall_xneg" type="box" pos="-3.5 0.0 1.4" size="0.05 4.5 1.4" material="room_wall" group="2" />
+    <geom name="wall_ypos" type="box" pos="0.5 4.5 1.4" size="4.0 0.05 1.4" material="room_wall" group="2" />
+    <geom name="wall_yneg" type="box" pos="0.5 -4.5 1.4" size="4.0 0.05 1.4" material="room_wall" group="2" />
+  </worldbody>
+</mujoco>

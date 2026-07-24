@@ -19,6 +19,24 @@ positions are picked once and are identical for both methods (fair comparison).
   **NEVER touch `/home/guest/Downloads/HAMS-test-grasping`** (a live checkout).
 - All the scripts + the tuned harness are already in this repo. Do not re-tune the grasp.
 
+## Step 0 — get the code (submodules + CL_Assets battery-scene overlay)
+The CL_Assets battery scene is NOT pushed to the CL_Assets remote — it's vendored into
+this repo as an overlay, so you do NOT need write access to CL_Assets.
+```bash
+git checkout grasp-2method-comparison
+# init submodules; CL_Assets will FAIL to check out its pin (that commit is unpushed) —
+# that error is EXPECTED and fine, the other submodules still init:
+git submodule update --init --recursive || true
+git lfs install && git lfs pull
+# put CL_Assets on the remote base, then overlay the battery-scene changes:
+cd CL_Assets && git fetch origin && git checkout origin/test/grasping && cd ..
+bash apply_cl_assets_overlay.sh      # copies the raised-nail scene + fingertip marker in
+# build the images:
+docker/scripts/docker_build.sh robocasa ros
+```
+Verify the overlay took: `grep -c 'pos="0.067 -0.0235 -1.1419"' CL_Assets/battery/scene_h1_2_battery.xml`
+should be ≥1 (the raised battery_link). If it's 0, re-run `bash apply_cl_assets_overlay.sh`.
+
 ## Step 1 — set docker/.env (standing-tier config)
 Ensure these lines in `docker/.env` (edit if needed):
 ```
