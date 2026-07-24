@@ -45,7 +45,7 @@ PLACE_RESERVE_SEC = 60.0
 # clear of the surface before the carry. Planned (collision-aware) and run in
 # SLOW mode so it doesn't jerk the just-grasped object; the duration is the
 # slow-mode-scaled budget (~4x, so a slow move still reaches over RETRACT_HEIGHT).
-RETRACT_HEIGHT = 0.15
+RETRACT_HEIGHT = 0.03
 RETRACT_SEC = 20.0
 # Debug TF (RViz): the detected place point / commanded place pose.
 PLACE_TARGET_FRAME = 'pick_place_target_frame'

@@ -162,7 +162,7 @@ def generate_launch_description():
                          # Negative pitch = anti-lean bias (policy believes it
                          # pitches further forward and fights harder); the
                          # hanging-plumb static calibration would be +0.264.
-                         'imu_offset_roll_deg': 2.0,
+                         'imu_offset_roll_deg': 0.0,
                          'imu_offset_pitch_deg': -2.5,
                          'imu_offset_yaw_deg': 0.0}],
             output='screen',
@@ -183,7 +183,9 @@ def generate_launch_description():
                 os.path.join(get_package_share_directory('h1_bringup'),
                             'config', 'mjpc_real.yaml'),
             ],
-            output='screen',
+            # 'log' (not 'screen') mutes the node's periodic [est] stdout from the
+            # console — it still goes to the ROS log files.
+            output='log',
             condition=IfCondition(LaunchConfiguration('start_position_verified')),
 
         ),

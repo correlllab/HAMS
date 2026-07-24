@@ -130,9 +130,8 @@ TIER2_AZ_HALFWIDTH_DEG = 15.0
 # leveled and are dropped.
 GRASP_YUP_TOL_DEG = 55.0
 
-# Pitch below horizontal of the synthetic top_down grasp. NOT 90: straight
-# down is unreachable for the H1 arm — this reuses the tier-1 orientation and
-# only steepens the pitch (see _top_down_pose).
+# Pitch below horizontal of the synthetic top_down grasp. See _top_down_pose;
+# the approach points DOWN and FORWARD, away from the robot (pelvis +X).
 TOP_DOWN_PITCH_DEG = 80.0
 
 
@@ -171,7 +170,7 @@ FAILURE_RETRACT_SEC = 3.0
 # Fraction of the gripper's full range the jaws are set to BEFORE the approach
 # (the final close is force-based, so there is no closed-fraction knob). 1.0 is
 # fully open; 0.5 leaves the jaws half-open so they approach already half-closed.
-OPEN_PERCENT = 0.3
+OPEN_PERCENT = 1.0
 # Metres to back off along the grasp's +Z approach axis for the pre-grasp.
 # With a visual-servo goal the servo takes over FROM here (it drives the last
 # stretch in to VISUAL_SERVO_DEPTH_M), so this doubles as the servo's start
@@ -213,11 +212,15 @@ APPROACH_IMAGE_WAIT_SEC = 3.0
 # base, so "centered at depth D" = "on the approach ray, D ahead of the
 # camera". The finger contact point sits 0.0706 m in front of the camera.
 #
-# Target camera->object depth [m]. 0.0706 would put the object at the fingers,
-# but the D405's depth floor (~0.07 m) sits right there — 0.10 is conservative
-# by design (object ends ~2.9 cm beyond the fingertips; the loop can never
-# drive the hand into the object).
-VISUAL_SERVO_DEPTH_M = 0.095
+# Target camera->object depth [m] — a REAL drive target near where the fingers
+# should sit (~95-100 mm; the finger contact point is 70.6 mm ahead of the
+# camera, so the object ends ~25-30 mm beyond the fingertips). The servo drives
+# depth TO this, so it must be a sensible value, not a band-center trick: an
+# earlier (0,105) one-sided band centered the setpoint at 52.5 mm and made the
+# servo plunge toward it whenever the object started beyond 105 mm, overshooting
+# into the part and disturbing X/Y. Paired with VISUAL_SERVO_RANGE_TOL_M for the
+# accepted band (98, 102) mm.
+VISUAL_SERVO_DEPTH_M = 0.10
 # Per-axis convergence tolerances [m], set from real runs (2026-07-21), not
 # theory. The binding limit is the ARM: frame_task settles to ~1.2 mm residual,
 # so corrections under ~2 mm don't execute and <4 mm lateral is unreachable.
@@ -226,9 +229,9 @@ VISUAL_SERVO_DEPTH_M = 0.095
 #   Y (along the jaw span) — pre-opened to 106 mm, so far more forgiving.
 #   range — decides whether the jaws close around the part or above it.
 # Keep X <= Y: inverting them is backwards for a parallel gripper.
-VISUAL_SERVO_X_TOL_M = 0.002
+VISUAL_SERVO_X_TOL_M = 0.001
 VISUAL_SERVO_Y_TOL_M = 0.010
-VISUAL_SERVO_RANGE_TOL_M = 0.005
+VISUAL_SERVO_RANGE_TOL_M = 0.002
 # Wall-clock budget for the whole loop [s] (~VISUAL_SERVO_MOVE_SEC per
 # iteration). The goal's own timeout still wins.
 VISUAL_SERVO_TIMEOUT_SEC = 90.0
@@ -242,7 +245,7 @@ VISUAL_SERVO_DETECT_WAIT_SEC = 5.0
 # bundle is still used for its aligned depth + intrinsics; only the BOX comes
 # from Gemini (see _servo_measure_gemini). Set False to go back to the YOLO
 # hand-detector servo.
-SERVO_USE_GEMINI = True
+SERVO_USE_GEMINI = False
 # Per-query timeout for the servo's Gemini box [s]. A Gemini call is
 # seconds-to-minutes — far slower than a frame_task iteration — so a Gemini
 # servo is deliberately slow-but-general. The LOST timer is stretched to match
@@ -268,17 +271,21 @@ VISUAL_SERVO_MAX_RETRACTS = 2
 # Stall detection: an iteration counts as progress only if it beats the best
 # error by EPS; STALL_ITERS non-improving iterations end the run with the
 # residual in the message (both reset after a back-off).
-VISUAL_SERVO_STALL_ITERS = 8
+VISUAL_SERVO_STALL_ITERS = 5
 VISUAL_SERVO_STALL_EPS_M = 0.001
 # Proportional gain (<1 so a bad depth sample can't fling the hand and the
 # loop damps rather than oscillates).
 VISUAL_SERVO_GAIN = 0.6
 # Largest single correction [m] — bounds what one mis-detection can do.
 VISUAL_SERVO_MAX_STEP_M = 0.05
+# If depth is already in range but X/Y are NOT aligned, back off this far along
+# the approach axis (increasing camera->object depth) to regain lateral room,
+# instead of nudging X/Y while parked close to the part.
+VISUAL_SERVO_ZBACK_M = 0.02
 # Per-iteration frame_task move duration [s]. Sized to INCLUDE the server's
 # steady-state hold — cutting the hold short bakes in gravity droop
 # (~5 mm/iteration observed).
-VISUAL_SERVO_MOVE_SEC = 15.0
+VISUAL_SERVO_MOVE_SEC = 4.0
 # Pause after each move before the next measurement [s], so the loop doesn't
 # act on a frame captured mid-move.
 VISUAL_SERVO_POST_MOVE_SLEEP_SEC = 0.25
@@ -288,7 +295,7 @@ VISUAL_SERVO_POST_MOVE_SLEEP_SEC = 0.25
 # transform is suspect; recover any camera-to-finger offset by MEASURING the
 # mount, not by re-introducing a trim here). Positive X sits the object
 # further right in the image / hand further back in pelvis +X.
-VISUAL_SERVO_TARGET_XY_M = (0.0135, 0.002)
+VISUAL_SERVO_TARGET_XY_M = (0.012, 0.0)
 # Depth floor for the servo's back-projection [m] — base's DEPTH_MIN_M (0.1)
 # sits ABOVE the target depth and would reject the needed measurements.
 VISUAL_SERVO_MIN_DEPTH_M = 0.04
@@ -324,6 +331,14 @@ SERVO_ANG_TOL = 0.10
 # rejecting reachable candidates as "unreachable" and burning through the pool.
 APPROACH_LIN_TOL = 0.05
 APPROACH_ANG_TOL = 0.20
+# The pre-grasp approach (move_to_candidate_approach) is executed as a series of
+# straight-line, UNPLANNED, SLOW-mode Cartesian segments of at most this length
+# (from the staging pose to the pre-grasp), rather than one planned/world-servo
+# move — see _linear_approach. The visual servo still runs AFTER it.
+LINEAR_APPROACH_SEG_M = 0.10
+# Per-segment frame_task budget [s] (already the slow-mode-scaled value the
+# server needs to cover LINEAR_APPROACH_SEG_M at 1/4 speed).
+LINEAR_APPROACH_SEG_SEC = 10.0
 
 
 # ============================== visualization ================================
@@ -434,6 +449,16 @@ class GraspSkill:
         if arm is None:   # auto-select: the arm currently closest to the object
             arm = self._closest_arm(centroid_p)
 
+        # --- staging: named config for the arm we are actually going to use.
+        # Joint-space (recorded on the robot), so it needs no IK/reach solve and
+        # lands the grasping arm in a repeatable pre-approach posture with the
+        # other arm parked at 'prep'.
+        stage_cfg = 'staging_right' if arm == 'right' else 'staging_left'
+        if not self.goto_named_config(stage_cfg, plan=True, slow_mode=True,
+                                      duration_sec=30.0, result_timeout=90.0,
+                                      outer_gh=gh):
+            return fail(f"move to {stage_cfg!r} staging config failed")
+
         # --- plan: ranked candidates ------------------------------------------
         if not run.phase('approach_grasp', 0.4):
             return run.result
@@ -495,7 +520,16 @@ class GraspSkill:
         if goal.visual_servo:
             servo_pose_p, err = self.servo(run, gh, arm, obj, targets, idx)
             if err:
-                return fail(err)
+                # A cancel or a timeout must still abort; but a genuine
+                # non-convergence closes ANYWAY at wherever the servo left the
+                # arm (best-effort) rather than giving up — the caller still
+                # retracts/raises after.
+                if gh.is_cancel_requested or run.remaining() <= 0.0:
+                    return fail(err)
+                self.get_logger().warn(
+                    f'grasp: visual servo did not converge ({err}) — closing '
+                    'anyway at the current pose (best-effort)')
+                servo_pose_p = self._frame_pose_in_pelvis(GRASP_FRAMES[arm])
         if CONFIRM_BEFORE_CONTACT:
             self.get_logger().info(
                 f'grasp: holding at pre-grasp for {obj!r} — press Enter on the '
@@ -859,33 +893,61 @@ class GraspSkill:
                         grasps_w=grasps_w, approaches_w=approaches_w,
                         have_world=have_world, centroid_w=centroid_w)
 
+    def _linear_approach(self, frame, target, run, gh, slow_mode=True):
+        """Move `frame` to `target` (a pelvis-frame Pose) as a series of
+        straight-line Cartesian segments of at most LINEAR_APPROACH_SEG_M, each
+        a DIRECT (unplanned) move, in slow mode. The target orientation is
+        commanded from the first segment; only the position is interpolated.
+        Returns True once every segment reached, or False on the first
+        unreachable segment / cancel / timeout (so the caller tries the next
+        candidate)."""
+        cur = self._frame_pose_in_pelvis(frame)
+        if cur is None:
+            return False
+        p0 = np.array([cur.position.x, cur.position.y, cur.position.z])
+        p1 = np.array([target.position.x, target.position.y, target.position.z])
+        n = max(1, int(math.ceil(float(np.linalg.norm(p1 - p0))
+                                 / LINEAR_APPROACH_SEG_M)))
+        self.get_logger().info(
+            f'grasp: linear approach {np.linalg.norm(p1 - p0) * 100:.0f}cm in {n} '
+            f'unplanned{" slow" if slow_mode else ""} step(s) of '
+            f'<= {LINEAR_APPROACH_SEG_M * 100:.0f}cm')
+        for k in range(1, n + 1):
+            if gh.is_cancel_requested or run.remaining() <= 0.0:
+                return False
+            pk = p0 + (float(k) / n) * (p1 - p0)
+            wp = Pose()
+            wp.position = Point(x=float(pk[0]), y=float(pk[1]), z=float(pk[2]))
+            wp.orientation = target.orientation
+            if not self.move_frame_to(
+                    frame, wp, outer_gh=gh, duration_sec=LINEAR_APPROACH_SEG_SEC,
+                    do_plan=False, slow_mode=slow_mode,
+                    lin_tol=APPROACH_LIN_TOL, ang_tol=APPROACH_ANG_TOL,
+                    stable_stop_msgs=FRAME_TASK_STABLE_STOP_MSGS,
+                    label=f'linear approach step {k}/{n}'):
+                return False
+        return True
+
     def move_to_candidate_approach(self, run, gh, obj, arm, cands, targets,
-                                   slow_mode=False):
+                                   slow_mode=True):
         """Walk the candidates strictly tier-major (1..7), best score first
-        within a tier, servoing GRASP_FRAMES[arm] to each pre-grasp until one
-        is reachable. Approach moves run on the generous APPROACH_DURATION_SEC
-        timeout; dead candidates still fail fast at plan time.
+        within a tier, reaching each pre-grasp via a series of straight-line,
+        UNPLANNED, SLOW-mode segments (_linear_approach) until one is reachable.
         Returns (index, None) of the committed candidate, or
         (None, abort-reason) on cancel/timeout or all-unreachable."""
         order = sorted(range(len(cands.grasps)),
                        key=lambda i: (cands.tiers[i], -cands.scores[i]))
         width_mm = cands.gripper_width * 1000.0
-        dur = APPROACH_DURATION_SEC * (SLOW_MODE_TIME_SCALE if slow_mode else 1.0)
         for i in order:
             self._publish_target_tf(targets, targets.approaches_w[i],
                                     targets.approaches_p[i])
             self.get_logger().info(
                 f'grasp {i} for {obj!r}: tier {cands.tiers[i]}, '
                 f'score {cands.scores[i]:.2f}, width {width_mm:.1f}mm')
-            if self.servo_frame_to_world(
-                    GRASP_FRAMES[arm],
-                    targets.approaches_w[i] if targets.have_world else None,
-                    targets.approaches_p[i], outer_gh=gh,
-                    duration_sec=dur, max_iter=SERVO_MAX_ITER,
-                    lin_tol=APPROACH_LIN_TOL, ang_tol=APPROACH_ANG_TOL,
-                    slow_mode=slow_mode,
-                    stable_stop_msgs=FRAME_TASK_STABLE_STOP_MSGS,
-                    label=f'pre-grasp approach, candidate {i}'):
+            # Straight-line, unplanned, slow segments to the pelvis-frame
+            # pre-grasp (no world anchoring). The visual servo runs AFTER this.
+            if self._linear_approach(GRASP_FRAMES[arm], targets.approaches_p[i],
+                                     run, gh, slow_mode=slow_mode):
                 return i, None
             if gh.is_cancel_requested or run.remaining() <= 0.0:
                 return None, 'canceled or timed out during approach'
@@ -962,10 +1024,6 @@ class GraspSkill:
         best_err, stalled = None, 0        # stall detection
         too_close_hits = 0                 # consecutive sub-MIN_RANGE readings
         last_z = pred_z = None             # depth plausibility band
-        # Two-phase servo: correct X/Y (lateral) first, and only START driving
-        # Z (depth) once X/Y are within tolerance. Latched — once depth is
-        # active it stays active (X/Y are still corrected alongside).
-        z_active = False
         # Only frames captured after this instant count, so the first
         # measurement describes the arm where it actually is.
         after = _stamp_tuple(self.get_clock().now().to_msg())
@@ -1064,20 +1122,24 @@ class GraspSkill:
             err = p_cam - target
             ex, ey = float(abs(err[0])), float(abs(err[1]))
             rng = float(abs(err[2]))
-            # Two-phase: start driving Z (depth) only once X/Y are within tol.
-            if (not z_active and ex <= VISUAL_SERVO_X_TOL_M
-                    and ey <= VISUAL_SERVO_Y_TOL_M):
-                z_active = True
-                best_err, stalled = None, 0    # new phase -> reset stall tracking
+            # If depth is already in range but X/Y are NOT aligned, back straight
+            # off along the approach axis (increase depth by ZBACK) to regain
+            # lateral room instead of nudging X/Y while parked close to the part.
+            # Moving the camera -ZBACK along its optical +Z pushes the object
+            # deeper by +ZBACK.
+            if (rng <= VISUAL_SERVO_RANGE_TOL_M
+                    and (ex > VISUAL_SERVO_X_TOL_M or ey > VISUAL_SERVO_Y_TOL_M)):
+                step = np.array([0.0, 0.0, -VISUAL_SERVO_ZBACK_M])
                 self.get_logger().info(
-                    f'grasp: visual servo X/Y aligned for {obj!r} — now driving '
-                    'Z (depth)')
-            # Move the camera BY the error (translating the camera by d shifts
-            # the object's camera coordinates by -d), gain-scaled and capped.
-            # Until depth is active, hold the Z component at zero (X/Y only).
-            step = VISUAL_SERVO_GAIN * err
-            if not z_active:
-                step[2] = 0.0
+                    f'grasp: depth in range but X/Y off (X {err[0] * 1000:+.1f}, '
+                    f'Y {err[1] * 1000:+.1f} mm) — backing off '
+                    f'{VISUAL_SERVO_ZBACK_M * 100:.0f}cm along the approach to '
+                    'regain lateral room')
+            else:
+                # Move the camera BY the error (translating the camera by d shifts
+                # the object's camera coordinates by -d), gain-scaled and capped.
+                # All three axes (X, Y, Z) corrected together.
+                step = VISUAL_SERVO_GAIN * err
             norm = float(np.linalg.norm(step))
             if norm > VISUAL_SERVO_MAX_STEP_M:
                 step *= VISUAL_SERVO_MAX_STEP_M / norm
@@ -1104,11 +1166,8 @@ class GraspSkill:
                 return pose, None
             # Stall detection: a run that stops improving will not start again on
             # its own — end it here with the residual, naming the axis out of
-            # tolerance, rather than at the timeout. Tracks only the axes being
-            # corrected (X/Y until depth is active, then all three), so the
-            # held-off depth error in the X/Y phase doesn't look like a stall.
-            active_err = err if z_active else np.array([err[0], err[1], 0.0])
-            err_norm = float(np.linalg.norm(active_err))
+            # tolerance, rather than at the timeout.
+            err_norm = float(np.linalg.norm(err))
             if best_err is None or err_norm < best_err - VISUAL_SERVO_STALL_EPS_M:
                 best_err, stalled = err_norm, 0
             else:
@@ -1660,8 +1719,9 @@ def _top_down_pose(centroid):
     back along the approach so the finger CONTACT point lands on the centroid.
     At 90 deg this collapses to the straight-down grasp."""
     pitch = math.radians(TOP_DOWN_PITCH_DEG)
+    # Approach points DOWN and FORWARD, away from the robot (pelvis +X).
     z_axis = np.array([math.cos(pitch), 0.0, -math.sin(pitch)])   # approach
-    x_axis = np.array([0.0, 1.0, 0.0])                            # fingers
+    x_axis = np.array([0.0, 1.0, 0.0])                            # fingers (pelvis +Y)
     y_axis = np.cross(z_axis, x_axis)                             # level wrist
     T = np.eye(4)
     T[:3, :3] = np.column_stack((x_axis, y_axis, z_axis))

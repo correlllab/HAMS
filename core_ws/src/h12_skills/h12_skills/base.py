@@ -893,7 +893,8 @@ class SkillsBase(Node):
     # ------------------------------------------------------- motion primitives
     def move_frame_to(self, frame, pose,
                       outer_gh=None, duration_sec=3, do_plan=True,
-                      slow_mode=False, label='', stable_stop_msgs=None):
+                      slow_mode=False, label='', stable_stop_msgs=None,
+                      lin_tol=0.01, ang_tol=0.05):
         """Send a frame to `pose` (position + orientation, in the pelvis frame) via
         /frame_task as a single combined move to the full target pose (target
         position + target orientation reached together).
@@ -917,7 +918,11 @@ class SkillsBase(Node):
         `stable_stop_msgs` (int, or None to disable): stop the move early and
         return once the server's streamed feedback repeats UNCHANGED for this
         many messages — the arm has settled and the server is only holding
-        steady state. See _send_frame_move."""
+        steady state. See _send_frame_move.
+
+        `lin_tol` / `ang_tol` [m, rad]: the final pelvis-frame error the move
+        must be within to count as REACHED (returns True). Loosen these for a
+        rough staging move that need not land exactly."""
         x, y, z = float(pose.position.x), float(pose.position.y), float(pose.position.z)
         quat = (pose.orientation.x, pose.orientation.y, pose.orientation.z, pose.orientation.w)
         target = Pose()
@@ -926,10 +931,12 @@ class SkillsBase(Node):
             x=float(quat[0]), y=float(quat[1]), z=float(quat[2]), w=float(quat[3]))
         return self._send_frame_move(frame, target, duration_sec, outer_gh, do_plan,
                                      slow_mode=slow_mode, label=label,
-                                     stable_stop_msgs=stable_stop_msgs)
+                                     stable_stop_msgs=stable_stop_msgs,
+                                     lin_tol=lin_tol, ang_tol=ang_tol)
 
     def _send_frame_move(self, frame, pose, duration_sec, outer_gh, do_plan,
-                         slow_mode=False, label='', stable_stop_msgs=None):
+                         slow_mode=False, label='', stable_stop_msgs=None,
+                         lin_tol=0.01, ang_tol=0.05):
         """Command ONE /frame_task goal: drive `frame` to `pose` (a Pose already in
         the pelvis frame) over `duration_sec`, returning whether it reached the
         target (gated on the server's streamed IK convergence). The building block
@@ -1013,7 +1020,7 @@ class SkillsBase(Node):
         # unreachable one. Gate on the last streamed pelvis-frame error instead
         # (loose vs the server's 1mm/2mrad to absorb feedback-vs-break jitter).
         if ok and last:
-            ok = last['lin'] < 0.01 and last['ang'] < 0.05
+            ok = last['lin'] < lin_tol and last['ang'] < ang_tol
         if last:
             self.get_logger().info(
                 f'frame_task[{tag}] done: lin={last["lin"] * 1000:.1f}mm '
