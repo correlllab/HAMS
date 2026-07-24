@@ -37,6 +37,10 @@ sub  /lowstate                 (unitree_hg/LowState)   robot state
 sub  /cmd_vel                  (geometry_msgs/Twist)   velocity command -> policy + walk
 sub  /lowerbody/squat_cmd      (std_msgs/Float32)      base-height / squat (FAME)
 sub  /left_ee_pose             (geometry_msgs/PoseStamped)  frame_task-ready signal
+sub  /safety/heartbeat         (std_msgs/Bool)         safety-layer liveness; a False
+                                                       beat OR silence for
+                                                       heartbeat_timeout latches this
+                                                       node silent (see watchdog)
 pub  /safety/lowcmd_lower_in   (unitree_hg/LowCmd)     12-joint leg setpoints
 pub  /lowerbody/active_policy  (std_msgs/String, latched)  active policy ("idle" when none)
 srv  /lowerbody/confirm_engage (std_srvs/Trigger)      operator go-ahead: engage the
@@ -53,7 +57,7 @@ from geometry_msgs.msg import PoseStamped, Twist
 from rcl_interfaces.msg import FloatingPointRange, ParameterDescriptor, SetParametersResult
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy
-from std_msgs.msg import Float32, String
+from std_msgs.msg import Bool, Float32, String
 from std_srvs.srv import Trigger
 from unitree_hg.msg import LowCmd, LowState
 
@@ -79,6 +83,13 @@ IMU_OFFSET_RANGE_DEG = 15.0
 from h12_lowerbody_rl.policy_manager import GateConfig, PolicyManager
 
 MOTOR_MODE_PR = 1
+
+# Safety-layer liveness flag (published by safety_node at 10 Hz: True while
+# commands are relayed, False once its estop latches). The watchdog below arms
+# on the FIRST beat received — so a bringup where the safety node comes up
+# later (or a sim without one) is not tripped by startup silence — and then
+# latches this node silent on a False beat or on heartbeat_timeout of silence.
+SAFETY_HEARTBEAT_TOPIC = "/safety/heartbeat"
 
 # Policy registry keys (see LowerBodyControllerNode.__init__).
 FAME = "fame"   # RMA balance/stand policy (does not locomote)
@@ -176,6 +187,12 @@ class LowerBodyControllerNode(Node):
         self.declare_parameter("band_wait_for_frame_task", True)
         self.declare_parameter("band_release_topic", "/left_ee_pose")
         self.declare_parameter("band_max_wait", 30.0)
+        # Seconds of /safety/heartbeat silence (after the first beat) before
+        # this node latches silent. The heartbeat runs at 10 Hz, so 0.5 s =
+        # five consecutive missed beats — enough slack for scheduler jitter,
+        # short enough that a dead safety node stops leg commands within half
+        # a second.
+        self.declare_parameter("heartbeat_timeout", 0.5)
 
         control_hz = float(self.get_parameter("control_hz").value)
         startup_policy = str(self.get_parameter("active_policy").value).strip().lower()
@@ -225,6 +242,11 @@ class LowerBodyControllerNode(Node):
         self._prepose_ticks = 0  # total pre-pose ticks so far (ramp phase + settle timeout)
         self._prepose_start_q: np.ndarray | None = None  # measured legs at first pre-pose tick
 
+        # safety-heartbeat watchdog state (see SAFETY_HEARTBEAT_TOPIC)
+        self._hb_timeout = float(self.get_parameter("heartbeat_timeout").value)
+        self._hb_last: float | None = None  # monotonic stamp of the last healthy beat
+        self._hb_dead = False               # latched: never publishes again once True
+
         lowstate_qos = QoSProfile(reliability=ReliabilityPolicy.BEST_EFFORT,
                                   history=HistoryPolicy.KEEP_LAST, depth=1)
         latched = QoSProfile(reliability=ReliabilityPolicy.RELIABLE,
@@ -236,6 +258,8 @@ class LowerBodyControllerNode(Node):
         self.create_subscription(
             PoseStamped, self.get_parameter("band_release_topic").value,
             self._on_frame_task_ready, 10)
+        self.create_subscription(
+            Bool, SAFETY_HEARTBEAT_TOPIC, self._on_heartbeat, 10)
         self._cmd_pub = self.create_publisher(LowCmd, "/safety/lowcmd_lower_in", 10)
         self._active_pub = self.create_publisher(String, "/lowerbody/active_policy", latched)
         self._confirm_srv = self.create_service(
@@ -286,6 +310,28 @@ class LowerBodyControllerNode(Node):
 
     def _on_frame_task_ready(self, _msg: PoseStamped) -> None:
         self._frame_task_ready = True
+
+    def _on_heartbeat(self, msg: Bool) -> None:
+        # First beat ARMS the watchdog; a False beat means the safety layer's
+        # estop latched (it keeps publishing False after the latch — see
+        # safety_node._publish_heartbeat), so leg commands are pointless at
+        # best and a fight against the latch at worst.
+        if self._hb_dead:
+            return
+        if not msg.data:
+            self._trip_heartbeat("safety layer reports estop latched (heartbeat False)")
+            return
+        self._hb_last = time.monotonic()
+
+    def _trip_heartbeat(self, reason: str) -> None:
+        """Latch the node silent: log once, and _tick never publishes again.
+        Deliberately NOT recoverable at runtime — the safety layer's own latch
+        needs a safety_node restart, so this node restarts with it."""
+        self._hb_dead = True
+        self.get_logger().error(
+            f"SAFETY HEARTBEAT LOST: {reason} — stopping all "
+            "/safety/lowcmd_lower_in output (latched; restart this node once "
+            "the safety layer is back)")
 
     def _on_confirm_engage(self, _req, resp):
         pending = self._manager.desired_name if self._manager.is_pending() else None
@@ -382,6 +428,18 @@ class LowerBodyControllerNode(Node):
 
     # -- main loop -----------------------------------------------------------
     def _tick(self) -> None:
+        # Safety-heartbeat watchdog: once tripped (False beat, or silence past
+        # heartbeat_timeout after the first beat), publish NOTHING — no policy
+        # step, no pre-pose, no band release. Checked before anything else so
+        # every publish path in this tick is behind the gate.
+        if self._hb_dead:
+            return
+        if (self._hb_last is not None
+                and time.monotonic() - self._hb_last > self._hb_timeout):
+            self._trip_heartbeat(
+                f"no /safety/heartbeat for {self._hb_timeout:.1f}s "
+                "(safety node died or stopped publishing)")
+            return
         if self._lowstate is None:
             return
         state = self._state_from_lowstate(self._lowstate)

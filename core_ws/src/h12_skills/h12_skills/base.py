@@ -75,6 +75,13 @@ ARM_DETECTION_TOPICS = {
     'left':  '/realsense/left_hand/color/image_raw/compressed/detections',
     'right': '/realsense/right_hand/color/image_raw/compressed/detections',
 }
+# The raw per-arm hand-camera color streams those bundles are derived from —
+# cached directly so a hand frame is available even when yolo_server's hand
+# channels are down (feeds the grasp skill's approach snapshot).
+ARM_COLOR_IMAGE_TOPICS = {
+    'left':  '/realsense/left_hand/color/image_raw/compressed',
+    'right': '/realsense/right_hand/color/image_raw/compressed',
+}
 
 # GraspGenX gripper-BASE frames (URDF frames whose axes match the GraspGenX
 # planning convention: +Z approach, +X finger-close, origin at the magpie gripper
@@ -181,6 +188,14 @@ SERVO_ANG_TOL = 0.02          # ~1.15 deg world-orientation convergence toleranc
 # the distance and the move would time out short of the target. Keep this at
 # 1 / SLOW_MODE_SCALE so a slow move gets the same reach as a full-speed one.
 SLOW_MODE_TIME_SCALE = 4.0
+
+# Frame-task early-stop (see _send_frame_move's stable_stop_msgs): a feedback is
+# counted as "unchanged" from the running reference when BOTH the linear and
+# angular error stay within these bands. Sized above the arm's steady-state
+# jitter (~0.1 mm / <1 mrad) so a settled hold is recognized, but well below any
+# real motion so an actually-converging move never trips it.
+FRAME_TASK_STABLE_EPS_LIN = 0.0005    # 0.5 mm
+FRAME_TASK_STABLE_EPS_ANG = 0.002     # 2 mrad
 
 # Skill action clients: name -> (action type, action server name). The same
 # table drives the action servers SkillsNode provides.
@@ -405,6 +420,7 @@ class SkillsBase(Node):
         self._latest_caminfo = None    # color CameraInfo (intrinsics + frame)
         self._latest_detections = None  # head-camera YOLO DetectionBundle
         self._latest_arm_detections = {arm: None for arm in ARM_DETECTION_TOPICS}
+        self._latest_arm_images = {arm: None for arm in ARM_COLOR_IMAGE_TOPICS}
         self.create_subscription(
             CompressedImage, COLOR_IMAGE_TOPIC, self._on_color_image,
             qos_profile_sensor_data, callback_group=self._cb_group)
@@ -421,6 +437,11 @@ class SkillsBase(Node):
             self.create_subscription(
                 DetectionBundle, topic,
                 lambda msg, a=arm: self._on_arm_detections(a, msg),
+                qos_profile_sensor_data, callback_group=self._cb_group)
+        for arm, topic in ARM_COLOR_IMAGE_TOPICS.items():
+            self.create_subscription(
+                CompressedImage, topic,
+                lambda msg, a=arm: self._on_arm_image(a, msg),
                 qos_profile_sensor_data, callback_group=self._cb_group)
 
         # Wait for the underlying endpoints (non-fatal).
@@ -456,6 +477,10 @@ class SkillsBase(Node):
         """Cache the latest hand-camera YOLO DetectionBundle for `arm`."""
         self._latest_arm_detections[arm] = msg
 
+    def _on_arm_image(self, arm, msg: CompressedImage):
+        """Cache the latest raw hand-camera color frame for `arm`."""
+        self._latest_arm_images[arm] = msg
+
     def latest_image(self):
         """Most recent head-camera color frame (sensor_msgs/CompressedImage), or None."""
         return self._latest_image
@@ -471,6 +496,11 @@ class SkillsBase(Node):
     def latest_arm_detections(self, arm):
         """Most recent hand-camera YOLO DetectionBundle for `arm`, or None."""
         return self._latest_arm_detections.get(arm)
+
+    def latest_arm_image(self, arm):
+        """Most recent raw hand-camera color frame for `arm`
+        (sensor_msgs/CompressedImage), or None."""
+        return self._latest_arm_images.get(arm)
 
     # --------------------------------------------------------------- debug TF
     def publish_tf(self, transform):
@@ -508,16 +538,20 @@ class SkillsBase(Node):
         t = float(goal.timeout.sec) + float(goal.timeout.nanosec) * 1e-9
         return t if t > 0.0 else default
 
-    def _wait_future(self, future, timeout_sec, outer_gh=None):
+    def _wait_future(self, future, timeout_sec, outer_gh=None, stop_event=None):
         """Block this (executor worker) thread until the future resolves.
         Safe under the MultiThreadedExecutor: other threads keep spinning.
         Polls in small increments so a cancel of the outer skill goal
-        (outer_gh) is noticed promptly. Returns None on timeout or cancel."""
+        (outer_gh) is noticed promptly. Returns None on timeout or cancel, or
+        when `stop_event` (an optional threading.Event) is set — the caller uses
+        that to bail out early (e.g. frame_task feedback gone stable)."""
         event = threading.Event()
         future.add_done_callback(lambda _f: event.set())
         deadline = time.monotonic() + max(0.0, timeout_sec)
         while not event.is_set():
             if outer_gh is not None and outer_gh.is_cancel_requested:
+                return None
+            if stop_event is not None and stop_event.is_set():
                 return None
             remaining = deadline - time.monotonic()
             if remaining <= 0.0:
@@ -539,12 +573,15 @@ class SkillsBase(Node):
         return result
 
     def _send_action(self, client, goal, feedback_cb=None,
-                     accept_timeout=10.0, result_timeout=120.0, outer_gh=None):
+                     accept_timeout=10.0, result_timeout=120.0, outer_gh=None,
+                     stop_event=None):
         """send_goal -> wait for acceptance -> wait for result.
         Returns the result response (with .status and .result), or None. If the
-        result wait fails (timeout or outer-skill cancel), the in-flight goal
-        is canceled ON THE SERVER — Future.cancel() would only drop the local
-        future and leave the robot executing an orphaned goal."""
+        result wait fails (timeout, outer-skill cancel, or `stop_event` set),
+        the in-flight goal is canceled ON THE SERVER — Future.cancel() would
+        only drop the local future and leave the robot executing an orphaned
+        goal. `stop_event` lets a feedback callback end the wait early (e.g.
+        frame_task feedback gone stable)."""
         if result_timeout <= 0.05:
             self.get_logger().error('no time left to send action goal')
             return None
@@ -553,7 +590,8 @@ class SkillsBase(Node):
         if handle is None or not handle.accepted:
             self.get_logger().error('action goal rejected or send timed out')
             return None
-        response = self._wait_future(handle.get_result_async(), result_timeout, outer_gh)
+        response = self._wait_future(handle.get_result_async(), result_timeout,
+                                     outer_gh, stop_event=stop_event)
         if response is None:
             self.get_logger().warn('canceling in-flight inner action goal')
             self._wait_future(handle.cancel_goal_async(), 2.0)
@@ -636,10 +674,10 @@ class SkillsBase(Node):
         scene_cloud, None) on success or (None, None, reason). Shared by the grasp
         skill (pick object) and pick_place (place target).
 
-        `box_provider(obj, run, gh) -> pixel-xyxy box or None` supplies the box;
-        it defaults to self._gemini_box, but the grasp skill passes self._yolo_box
-        for battery-workcell parts so the head-camera YOLO detector supplies the box
-        instead of Gemini.
+        `box_provider(obj, run, gh) -> pixel-xyxy box or None` supplies the box
+        (default self._gemini_box). The grasp skill runs its own split
+        detect_object/segment_object pipeline instead; pick_place uses this for
+        the place target.
 
         `use_sam` selects how the box becomes an object cloud:
           * True  (default) — SAM segments the box region and only the masked pixels
@@ -855,7 +893,7 @@ class SkillsBase(Node):
     # ------------------------------------------------------- motion primitives
     def move_frame_to(self, frame, pose,
                       outer_gh=None, duration_sec=3, do_plan=True,
-                      slow_mode=False):
+                      slow_mode=False, label='', stable_stop_msgs=None):
         """Send a frame to `pose` (position + orientation, in the pelvis frame) via
         /frame_task as a single combined move to the full target pose (target
         position + target orientation reached together).
@@ -870,7 +908,16 @@ class SkillsBase(Node):
         held payload. NOTE it does not stretch `duration_sec`, which is a
         TIMEOUT: a slow move covers ~1/4 the distance in the same budget, so
         callers must lengthen the duration themselves (see SLOW_MODE_TIME_SCALE
-        at the skill call sites)."""
+        at the skill call sites).
+
+        `label` names WHAT this move is for (e.g. 'contact descent'); it is
+        carried into every frame_task log line so a stalled or runaway move can
+        be attributed to the pipeline step that commanded it.
+
+        `stable_stop_msgs` (int, or None to disable): stop the move early and
+        return once the server's streamed feedback repeats UNCHANGED for this
+        many messages — the arm has settled and the server is only holding
+        steady state. See _send_frame_move."""
         x, y, z = float(pose.position.x), float(pose.position.y), float(pose.position.z)
         quat = (pose.orientation.x, pose.orientation.y, pose.orientation.z, pose.orientation.w)
         target = Pose()
@@ -878,19 +925,29 @@ class SkillsBase(Node):
         target.orientation = Quaternion(
             x=float(quat[0]), y=float(quat[1]), z=float(quat[2]), w=float(quat[3]))
         return self._send_frame_move(frame, target, duration_sec, outer_gh, do_plan,
-                                     slow_mode=slow_mode)
+                                     slow_mode=slow_mode, label=label,
+                                     stable_stop_msgs=stable_stop_msgs)
 
     def _send_frame_move(self, frame, pose, duration_sec, outer_gh, do_plan,
-                         slow_mode=False):
+                         slow_mode=False, label='', stable_stop_msgs=None):
         """Command ONE /frame_task goal: drive `frame` to `pose` (a Pose already in
         the pelvis frame) over `duration_sec`, returning whether it reached the
         target (gated on the server's streamed IK convergence). The building block
-        for move_frame_to."""
+        for move_frame_to.
+
+        `stable_stop_msgs`: if set, cancel the goal and return as soon as the
+        server's streamed (lin, ang) feedback repeats UNCHANGED for that many
+        messages — the arm has settled and the server is only holding steady
+        state (which otherwise runs to its hold timeout). The reached/not-reached
+        verdict still comes from the same loose final-error gate below."""
         goal = FrameTask.Goal()
         goal.frame_names = [frame]
         goal.frame_targets = [pose]
         goal.plan = do_plan
         goal.slow_mode = bool(slow_mode)
+        # Every log line for this move carries the caller's label so the
+        # purpose of the motion is visible next to its convergence stream.
+        tag = f'{frame} | {label}' if label else frame
         x, y, z = pose.position.x, pose.position.y, pose.position.z
         # Preserve fractional seconds (int() truncation silently shortened the
         # motion budget, e.g. 1.8s -> 1s).
@@ -899,8 +956,8 @@ class SkillsBase(Node):
             sec=whole, nanosec=int(round((float(duration_sec) - whole) * 1e9)))
 
         self.get_logger().info(
-            f'frame_task: {frame} -> ({x:.3f}, {y:.3f}, {z:.3f}) in {duration_sec}s'
-            + (' [SLOW]' if slow_mode else ''))
+            f'frame_task: {tag} -> ({x:.3f}, {y:.3f}, {z:.3f}) in {duration_sec}s'
+            + (' [SLOW]' if slow_mode else '') + (' [planned]' if do_plan else ''))
 
         # Log the frame_task server's streamed IK convergence (errors_linear /
         # errors_angular, one entry per driven frame) so a skill's approach/contact
@@ -908,20 +965,49 @@ class SkillsBase(Node):
         # final pass/fail. Throttled — the server publishes every control step.
         # `last` retains the most recent values for a one-line summary on resolve.
         last = {}
+        # Early-stop when the feedback stops changing (stable_stop_msgs): count
+        # consecutive identical (rounded) feedbacks and set the event at the
+        # threshold so the result wait bails and the goal is canceled.
+        stable_event = threading.Event() if stable_stop_msgs else None
+        stable = {'ref': None, 'n': 0}
 
         def _log_feedback(feedback_msg):
             fb = feedback_msg.feedback
             last['lin'] = max(fb.errors_linear) if fb.errors_linear else 0.0
             last['ang'] = max(fb.errors_angular) if fb.errors_angular else 0.0
             self.get_logger().info(
-                f'frame_task[{frame}] converging: '
+                f'frame_task[{tag}] converging: '
                 f'lin={last["lin"] * 1000:.1f}mm ang={last["ang"]:.3f}rad',
                 throttle_duration_sec=0.5)
+            if stable_event is not None and not stable_event.is_set():
+                # Stable = within a small band of the running reference (NOT
+                # exact equality — steady-state feedback jitters ~0.1 mm, which
+                # would reset an exact match every message). The reference is
+                # only re-anchored when a reading leaves the band, so real motion
+                # keeps resetting the count while a settled hold accrues it.
+                ref = stable['ref']
+                if (ref is not None
+                        and abs(last['lin'] - ref[0]) <= FRAME_TASK_STABLE_EPS_LIN
+                        and abs(last['ang'] - ref[1]) <= FRAME_TASK_STABLE_EPS_ANG):
+                    stable['n'] += 1
+                else:
+                    stable['ref'], stable['n'] = (last['lin'], last['ang']), 1
+                if stable['n'] >= stable_stop_msgs:
+                    self.get_logger().info(
+                        f'frame_task[{tag}] feedback stable (within '
+                        f'{FRAME_TASK_STABLE_EPS_LIN * 1000:.1f}mm/'
+                        f'{FRAME_TASK_STABLE_EPS_ANG:.3f}rad) for {stable_stop_msgs} '
+                        f'msgs (lin={last["lin"] * 1000:.1f}mm '
+                        f'ang={last["ang"]:.3f}rad) — stopping early')
+                    stable_event.set()
 
         response = self._send_action(
             self.frame_task_cli, goal, feedback_cb=_log_feedback,
-            result_timeout=float(duration_sec) + 10.0, outer_gh=outer_gh)
-        ok = response is not None and response.status == GoalStatus.STATUS_SUCCEEDED
+            result_timeout=float(duration_sec) + 10.0, outer_gh=outer_gh,
+            stop_event=stable_event)
+        stable_stopped = stable_event is not None and stable_event.is_set()
+        ok = stable_stopped or (
+            response is not None and response.status == GoalStatus.STATUS_SUCCEEDED)
         # The frame_task server reports success even when it times out before
         # converging, so its status alone can't tell a reached target from an
         # unreachable one. Gate on the last streamed pelvis-frame error instead
@@ -930,7 +1016,7 @@ class SkillsBase(Node):
             ok = last['lin'] < 0.01 and last['ang'] < 0.05
         if last:
             self.get_logger().info(
-                f'frame_task[{frame}] done: lin={last["lin"] * 1000:.1f}mm '
+                f'frame_task[{tag}] done: lin={last["lin"] * 1000:.1f}mm '
                 f'ang={last["ang"]:.3f}rad success={ok}')
         return ok
 
@@ -966,16 +1052,19 @@ class SkillsBase(Node):
         return lin, ang
 
     def goto_named_config(self, name, duration_sec=0.0, plan=False,
-                          result_timeout=60.0, outer_gh=None):
+                          slow_mode=False, result_timeout=60.0, outer_gh=None):
         """Drive the arms to the frame_task server's named configuration `name`
         (e.g. 't_pose', 'home') via the /named_config action. `duration_sec`
         0 = the server's default move timeout; `plan`=True requests the planned
-        move instead of the direct IK descent. Returns True when the server
-        reports success. Pass the outer skill goal handle as `outer_gh` so
-        canceling the skill also cancels the in-flight arm move."""
+        move instead of the direct IK descent. `slow_mode` runs the move at the
+        server's reduced (SLOW_MODE_SCALE) speed — pass a larger `duration_sec`
+        (and result_timeout) so the slow move has budget to arrive. Returns True
+        when the server reports success. Pass the outer skill goal handle as
+        `outer_gh` so canceling the skill also cancels the in-flight arm move."""
         goal = NamedConfig.Goal()
         goal.plan = bool(plan)
         goal.config_name = name
+        goal.slow_mode = bool(slow_mode)
         goal.duration.sec = int(duration_sec)
         goal.duration.nanosec = int((duration_sec - int(duration_sec)) * 1e9)
         response = self._send_action(self.named_config_cli, goal,
@@ -991,7 +1080,8 @@ class SkillsBase(Node):
     def servo_frame_to_world(self, frame, world_pose, fallback_pose, outer_gh=None,
                              duration_sec=10.0, max_iter=SERVO_ITER,
                              lin_tol=SERVO_LIN_TOL, ang_tol=SERVO_ANG_TOL,
-                             do_plan=True, slow_mode=False):
+                             do_plan=True, slow_mode=False, label='',
+                             stable_stop_msgs=None):
         """Drive `frame` to `world_pose` (a Pose in WORLD_FRAME), compensating for
         pelvis drift during the motion. Each iteration re-resolves the fixed world
         target into the LIVE pelvis frame, commands frame_task there, then MEASURES
@@ -1013,14 +1103,20 @@ class SkillsBase(Node):
         the drift-fix iterations and the no-world-anchor fallback, so the whole
         servo runs at one speed. The CALLER scales `duration_sec` by
         SLOW_MODE_TIME_SCALE; the short per-iteration drift-fix budget is scaled
-        here, since callers never see it."""
+        here, since callers never see it.
+
+        `label` names what this servo is for; it is forwarded into every
+        frame_task move (with the iteration appended) and used in the servo's
+        own log lines."""
+        tag = f'{frame} | {label}' if label else frame
         if world_pose is None:
             self.get_logger().warn(
-                f'servo[{frame}]: no {WORLD_FRAME} anchor; direct pelvis move '
+                f'servo[{tag}]: no {WORLD_FRAME} anchor; direct pelvis move '
                 '(pelvis-drift compensation OFF)')
             return self.move_frame_to(frame, fallback_pose, outer_gh=outer_gh,
                                       duration_sec=duration_sec, do_plan=do_plan,
-                                      slow_mode=slow_mode)
+                                      slow_mode=slow_mode, label=label,
+                                      stable_stop_msgs=stable_stop_msgs)
         tp = np.array([world_pose.position.x, world_pose.position.y,
                        world_pose.position.z])
         tq = (world_pose.orientation.x, world_pose.orientation.y,
@@ -1032,22 +1128,25 @@ class SkillsBase(Node):
             pelvis_pose = self._transform_pose(world_pose, WORLD_FRAME, 'pelvis')
             if pelvis_pose is None:            # lost world TF mid-servo -> fallback
                 self.get_logger().warn(
-                    f'servo[{frame}]: lost {WORLD_FRAME} TF; pelvis fallback')
+                    f'servo[{tag}]: lost {WORLD_FRAME} TF; pelvis fallback')
                 return self.move_frame_to(frame, fallback_pose, outer_gh=outer_gh,
                                           duration_sec=duration_sec, do_plan=do_plan,
-                                          slow_mode=slow_mode)
+                                          slow_mode=slow_mode, label=label,
+                                          stable_stop_msgs=stable_stop_msgs)
             # iter 0 = full approach (caller already scaled it for slow mode);
             # later = short drift fixes, scaled here so they too reach at 1/4 speed.
             dur = duration_sec if i == 0 else (
                 3.0 * (SLOW_MODE_TIME_SCALE if slow_mode else 1.0))
+            iter_label = (f'{label} (drift fix {i})' if label and i else label)
             ok = self.move_frame_to(frame, pelvis_pose, outer_gh=outer_gh,
                                     duration_sec=dur, do_plan=do_plan,
-                                    slow_mode=slow_mode)
+                                    slow_mode=slow_mode, label=iter_label,
+                                    stable_stop_msgs=stable_stop_msgs)
             lin, ang = self._world_frame_error(frame, tp, tq)
             if lin is None:                    # could not measure -> pelvis-frame result
                 return ok
             self.get_logger().info(
-                f'servo[{frame}] iter {i}: {WORLD_FRAME} err lin={lin * 1000:.1f}mm '
+                f'servo[{tag}] iter {i}: {WORLD_FRAME} err lin={lin * 1000:.1f}mm '
                 f'ang={ang:.3f}rad (tol {lin_tol * 1000:.0f}mm/{ang_tol:.3f}rad, '
                 f'reached={ok})')
             if lin <= lin_tol and ang <= ang_tol:
@@ -1056,14 +1155,14 @@ class SkillsBase(Node):
             # error => genuinely unreachable; bail so the caller tries the next grasp.
             if i == 0 and not ok and (lin > 0.05 or ang > 0.20):
                 self.get_logger().warn(
-                    f'servo[{frame}]: unreachable; caller tries next grasp')
+                    f'servo[{tag}]: unreachable; caller tries next grasp')
                 return False
         # Ran the full iteration budget without hitting tolerance. This is NOT a
         # failure: return best-effort success so the caller proceeds with the
         # near-converged pose rather than aborting on non-convergence. Genuine
         # unreachability is already caught by the iter-0 fast-fail above.
         self.get_logger().warn(
-            f'servo[{frame}]: tol not met in {max_iter} iters; proceeding '
+            f'servo[{tag}]: tol not met in {max_iter} iters; proceeding '
             f'best-effort (last lin={lin * 1000:.1f}mm ang={ang:.3f}rad)')
         return True
 

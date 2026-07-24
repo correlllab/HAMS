@@ -173,40 +173,20 @@ def generate_launch_description():
             )),
         ),
 
-        # DISABLED. Read-only sim-vs-real gap diagnostic for the RL controller
-        # above -- watches /safety/lowcmd_lower_in, /lowstate, /lowcmd for
-        # control-loop timing gaps, safety-layer clamp deltas, and tracking
-        # error. Waits for the operator's /lowerbody/confirm_engage arming step
-        # itself (see sim2real_gap_monitor's docstring), so it is safe to bring
-        # up alongside the controller rather than after it is armed.
-        # Purely diagnostic -- nothing in the control path reads it, so leaving
-        # it out changes no robot behaviour. Uncomment to get the gap report back.
-        # Node(
-        #     package='h12_lowerbody_rl',
-        #     executable='sim2real_gap_monitor',
-        #     name='sim2real_gap_monitor',
-        #     output='screen',
-        #     condition=IfCondition(AndSubstitution(
-        #         LaunchConfiguration('start_position_verified'),
-        #         PythonExpression(
-        #             ["'", LaunchConfiguration('lowerbody'), "' != 'mjpc'"]),
-        #     )),
-        # ),
 
+        Node(
+            package='h12_deploy_mjpc',
+            executable='estimator_node',
+            name='h12_deploy_mjpc_estimator',   # MUST match the yaml key
+            parameters=[
+                sim_time_param,
+                os.path.join(get_package_share_directory('h1_bringup'),
+                            'config', 'mjpc_real.yaml'),
+            ],
+            output='screen',
+            condition=IfCondition(LaunchConfiguration('start_position_verified')),
 
-        # Node(
-        #     package='h12_deploy_mjpc',
-        #     executable='estimator_node',
-        #     name='h12_deploy_mjpc_estimator',   # MUST match the yaml key
-        #     parameters=[
-        #         sim_time_param,
-        #         os.path.join(get_package_share_directory('h1_bringup'),
-        #                     'config', 'mjpc_real.yaml'),
-        #     ],
-        #     output='screen',
-        #     condition=IfCondition(LaunchConfiguration('start_position_verified')),
-
-        # ),
+        ),
 
         # # --- MJPC lower-body balance controller (spawns mjpc_lowerbody_core) ---
         # Node(

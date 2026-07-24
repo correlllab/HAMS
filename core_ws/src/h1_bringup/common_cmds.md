@@ -106,7 +106,7 @@ motions then follow whichever hand it chose.
 # auto arm, top-down + visual servo pick of a battery-workcell screw onto a plate.
 # No timeout -> runs to completion (see the budget note below); Ctrl-C cancels.
 ros2 action send_goal /skill/pick_place custom_ros_messages/action/SkillPickPlace \
-  "{target_object: 'Screw', place_target: 'plate', top_down: true, visual_servo: true}" \
+  "{target_object: 'Screw', place_target: 'plate', top_down: true, visual_servo: true, arm: 'right'}" \
   --feedback
 ```
 
