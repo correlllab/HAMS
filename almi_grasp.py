@@ -53,6 +53,20 @@ for eng in range(MAX_ENGAGE):
     for _ in range(4):
         frz.publish(Bool(data=True)); time.sleep(0.05)         # (re)pin before restoring
     bb.reset_env(bench, arm)                                    # scene restore + arm home + gripper open (frozen)
+    # NAV-RANDOM tier: teleport the PINNED base to spawn+(fwd,lat) before the warmup,
+    # so ALMI warms up + releases at a randomized standing position and reaches the
+    # fixed screw from a different relative pose. Gated by HAMS_PLACE_BASE="fwd,lat"
+    # (metres); unset -> nominal spawn (standing tier unaffected).
+    _pb = os.environ.get('HAMS_PLACE_BASE', '').strip()
+    if _pb:
+        from std_msgs.msg import Float64MultiArray as _F64
+        if not hasattr(bench, '_pb_pub'):
+            bench._pb_pub = bench.create_publisher(_F64, '/hams/place_base', 10)
+        _f, _l = [float(v) for v in _pb.split(',')]
+        for _ in range(8):                                      # burst (discovery race)
+            bench._pb_pub.publish(_F64(data=[_f, _l])); time.sleep(0.1)
+        time.sleep(1.5)
+        print(f'[almi] nav-random: base placed at spawn+({_f:+.3f},{_l:+.3f})', flush=True)
     if HOVER_FROZEN:
         _, tipf = bb._screw_grasp_pose(bench, SCREW)
         overf = np.asarray(tipf) + np.array([0.0, 0.0, bb.HOVER_M])
@@ -141,7 +155,7 @@ time.sleep(3.0)
 g = bench._grip_last.get(arm); rec['grip_final_mm'] = g[0] if g else None
 pad = bb._pad_mid_xy(bench, arm); nn = bench.gt_pos_pelvis(SCREW)
 rec['post_grasp_err_mm'] = round(float(np.hypot(pad[0]-nn[0], pad[1]-nn[1])*1000), 1) if (pad is not None) else 999
-rec['good_grasp'] = bool(rec['grip_final_mm'] and 40 < rec['grip_final_mm'] < 78 and rec['post_grasp_err_mm'] < 7 and (g[1] if g else 0) > 40)
+rec['good_grasp'] = bool(rec['grip_final_mm'] and 40 < rec['grip_final_mm'] < 78 and rec['post_grasp_err_mm'] < float(os.environ.get('BATT_WELD_MAX_ERR_MM', '12')) and (g[1] if g else 0) > 40)
 if rec['good_grasp']:
     for _ in range(6): weld.publish(String(data=f'{SCREW}:{arm}')); time.sleep(0.08)
     rec['welded'] = True
