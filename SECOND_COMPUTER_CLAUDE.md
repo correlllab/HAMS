@@ -28,8 +28,8 @@ git checkout grasp-2method-comparison
 # that error is EXPECTED and fine, the other submodules still init:
 git submodule update --init --recursive || true
 git lfs install && git lfs pull
-# put CL_Assets on the remote base, then overlay the battery-scene changes:
-cd CL_Assets && git fetch origin && git checkout origin/test/grasping && cd ..
+# put CL_Assets on the remote base, pull ITS lfs, then overlay the battery-scene changes:
+cd CL_Assets && git fetch origin && git checkout origin/test/grasping && git lfs pull && cd ..
 bash apply_cl_assets_overlay.sh      # copies the raised-nail scene + fingertip marker in
 # build the images:
 docker/scripts/docker_build.sh robocasa ros
