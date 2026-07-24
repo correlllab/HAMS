@@ -33,7 +33,7 @@ for it in range(4):
     if m is not None: cmd[:2] = cmd[:2] - (m - nail[:2])
 c = bb._contact_point(bench, frame)
 print(f'positioned: TCPz={c[2]*1000:.0f}mm  fingerMid={bb._finger_mid_xy(bench,"right")}  nail={nail[:2]}', flush=True)
-bench.close_gripper('right'); time.sleep(2.5)
+bench.close_gripper('right', force_n=6.0); time.sleep(2.5)
 g = bench._grip_last.get('right')
 print(f'CLOSED grip={g[0] if g else None}mm force={g[1] if g else None}N  screw_z={bench.gt_pos(SCREW)[2]:.4f}', flush=True)
 print(f'HOLDING {HOLD}s for capture...', flush=True)

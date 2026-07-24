@@ -511,6 +511,18 @@ def sim_loop(task, viewer=True, layout=None, style=None, seed=None, record_video
     # pin pose under the sim step, race-free). Initialized from HAMS_FREEZE_BODY.
     _frz_toggle = {'req': None, 'on': _freeze_body}
 
+    # Grasp weld (/hams/grasp_weld "<object>[:side]", /hams/grasp_release): once the
+    # CALLER confirms a grasp (object between the closed pads), rigidly attach the
+    # object to the gripper so it STICKS through the lift. The sim's rigid parallel-jaw
+    # contact otherwise slowly squeezes a small rigid object out under sustained force
+    # (holds during motion, creeps out when static). Kinematic hold: capture the
+    # object's pose relative to the gripper body ONCE, then re-impose it every step
+    # (like the freeze pin). Opt-in; a miss never welds (nothing confirms it), so a
+    # good grasp sticks and a bad grasp still drops — the clean pass/fail the study
+    # wants. Released on /hams/grasp_release, /hams/reset_scene, or a new weld.
+    _grasp_weld = {'req': None, 'active': False, 'obj_adr': -1, 'obj_dof': -1,
+                   'grip_bid': -1, 'rel_p': None, 'rel_q': None}
+
     init_ros()
 
     # Sensor bridge: /clock, RGBD cameras (head + both hands), livox lidar + IMU.
@@ -643,6 +655,15 @@ def sim_loop(task, viewer=True, layout=None, style=None, seed=None, record_video
     reset_node.create_subscription(
         _F64Arr, '/hams/place_base',
         lambda m: _place_base.__setitem__('req', [float(v) for v in m.data][:2]), 10)
+    # Grasp weld: "<object>[:side]" (side default 'right'); Empty release. Main-loop
+    # applied so the capture/hold is race-free against the sim step.
+    from std_msgs.msg import String as _StrMsg
+    reset_node.create_subscription(
+        _StrMsg, '/hams/grasp_weld',
+        lambda m: _grasp_weld.__setitem__('req', str(m.data)), 10)
+    reset_node.create_subscription(
+        _EmptyMsg, '/hams/grasp_release',
+        lambda _m: _grasp_weld.update(active=False, req=None), 10)
 
     # Background executor serves the gripper services/timers/action + the band
     # toggle service. ros_bridge.tick() is driven from the main loop instead (its
@@ -756,6 +777,7 @@ def sim_loop(task, viewer=True, layout=None, style=None, seed=None, record_video
                             print(f"[h12_mujoco] state save failed: {e}", flush=True)
                 if _scene_reset['req']:
                     _scene_reset['req'] = False
+                    _grasp_weld.update(active=False, req=None)   # drop any held object
                     data.qpos[:] = _scene_qpos0
                     data.qvel[:] = 0.0
                     if _frz_base_qadr >= 0:
@@ -834,7 +856,49 @@ def sim_loop(task, viewer=True, layout=None, style=None, seed=None, record_video
                     data.qvel[_frz_base_dof:_frz_base_dof + 6] = 0.0
                     data.qpos[_frz_lower_qidx] = _frz_lower_qpos
                     data.qvel[_frz_lower_vidx] = 0.0
-                if _frz_toggle['on'] or _arm_pinned:
+                # Grasp weld: capture on request, then re-impose the object's pose
+                # relative to the gripper body every step so it rides the gripper.
+                if _grasp_weld['req'] is not None:
+                    _spec = str(_grasp_weld['req']); _grasp_weld['req'] = None
+                    _wobj = _spec.split(':')[0].strip()
+                    _wside = _spec.split(':')[1].strip() if ':' in _spec else 'right'
+                    try:
+                        _wjid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, f'{_wobj}_free')
+                        _woadr = int(model.jnt_qposadr[_wjid]) if _wjid >= 0 else -1
+                        _wodof = int(model.jnt_dofadr[_wjid]) if _wjid >= 0 else -1
+                        _wgbid, _wname = -1, ''
+                        for _cand in (f'{_wside}_wrist_yaw_link', 'mount', 'base_top',
+                                      f'gripper0_{_wside}_mount'):
+                            _b = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, _cand)
+                            if _b >= 0:
+                                _wgbid, _wname = _b, _cand; break
+                        if _woadr >= 0 and _wgbid >= 0:
+                            _wgp = data.xpos[_wgbid].copy(); _wgq = data.xquat[_wgbid].copy()
+                            _wop = data.qpos[_woadr:_woadr + 3].copy()
+                            _woq = data.qpos[_woadr + 3:_woadr + 7].copy()
+                            _wgqi = np.zeros(4); mujoco.mju_negQuat(_wgqi, _wgq)
+                            _wrp = np.zeros(3); mujoco.mju_rotVecQuat(_wrp, _wop - _wgp, _wgqi)
+                            _wrq = np.zeros(4); mujoco.mju_mulQuat(_wrq, _wgqi, _woq)
+                            _grasp_weld.update(active=True, obj_adr=_woadr, obj_dof=_wodof,
+                                               grip_bid=_wgbid, rel_p=_wrp, rel_q=_wrq)
+                            print(f"[h12_mujoco] GRASP WELD: {_wobj} -> {_wname} "
+                                  f"at t={data.time:.2f}s", flush=True)
+                        else:
+                            print(f"[h12_mujoco] grasp_weld ignored "
+                                  f"(obj_adr={_woadr} grip_bid={_wgbid})", flush=True)
+                    except Exception as _e:
+                        print(f"[h12_mujoco] grasp_weld failed: {_e}", flush=True)
+                if _grasp_weld['active'] and _grasp_weld['obj_adr'] >= 0:
+                    _wgp = data.xpos[_grasp_weld['grip_bid']]
+                    _wgq = data.xquat[_grasp_weld['grip_bid']]
+                    _wp = np.zeros(3)
+                    mujoco.mju_rotVecQuat(_wp, _grasp_weld['rel_p'], _wgq); _wp += _wgp
+                    _wq = np.zeros(4); mujoco.mju_mulQuat(_wq, _wgq, _grasp_weld['rel_q'])
+                    _oa = _grasp_weld['obj_adr']; _od = _grasp_weld['obj_dof']
+                    data.qpos[_oa:_oa + 3] = _wp
+                    data.qpos[_oa + 3:_oa + 7] = _wq
+                    data.qvel[_od:_od + 6] = 0.0
+                if _frz_toggle['on'] or _arm_pinned or _grasp_weld['active']:
                     mujoco.mj_forward(model, data)
                 # --- fall logger ---
                 if band is not None and _band_prev_on and not band.enabled:

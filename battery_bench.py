@@ -148,6 +148,60 @@ def _finger_mid_xy(bench, arm='right'):
                      0.5 * (lf.position.y + rf.position.y)])
 
 
+_TIP_L = np.array([0.003, -0.02027, 0.0763, 1.0])   # tip_left  site in left finger frame (very end)
+_TIP_R = np.array([0.003,  0.02027, 0.0763, 1.0])   # tip_right site in right finger frame
+_PAD_L = np.array([0.003, -0.02227, 0.0413, 1.0])   # touch_left  = FLAT PAD center (the grip that holds)
+_PAD_R = np.array([0.003,  0.02227, 0.0413, 1.0])   # touch_right = flat pad center
+
+
+def _pad_mid_xy(bench, arm='right', off_l=None, off_r=None):
+    """Midpoint of the two flat PAD centers in pelvis XY — the flat gripping surface
+    that actually holds the object (not the finger roots, not the angled tips). Center
+    THIS on the nail so the nail is clamped by the flat pads and doesn't wedge out."""
+    from h12_skills.perception_utils import pose_to_matrix
+    from rclpy.time import Time as _Time
+    from rclpy.duration import Duration as _Dur
+    from geometry_msgs.msg import Pose as _Pose
+    ol = _PAD_L if off_l is None else off_l
+    orr = _PAD_R if off_r is None else off_r
+    pre = 'rg' if arm == 'right' else 'lg'
+    def _M(child):
+        t = bench.tf_buffer.lookup_transform('pelvis', child, _Time(), timeout=_Dur(seconds=1.0))
+        tr = t.transform.translation; q = t.transform.rotation
+        p = _Pose(); p.position.x, p.position.y, p.position.z = tr.x, tr.y, tr.z; p.orientation = q
+        return pose_to_matrix(p)
+    try:
+        Ml = _M(f'{pre}_left_finger'); Mr = _M(f'{pre}_right_finger')
+        tl = (Ml @ ol)[:3]; tr = (Mr @ orr)[:3]
+        return np.array([0.5 * (tl[0] + tr[0]), 0.5 * (tl[1] + tr[1])])
+    except Exception:
+        return None
+
+
+def _tip_mid_xy(bench, arm='right'):
+    """Midpoint of the two FINGERTIPS (the close-end, = the red marker) in pelvis XY.
+    Centering THIS on the nail — not the finger ROOTS (_finger_mid_xy) — makes the
+    object land FULLY inside the tips. The gripper is tilted ~15deg at 80deg, so the
+    tips sit ~20mm off the roots; centering the roots leaves the object half-off. This
+    is the 'magic offset' done geometrically instead of a hand-tuned constant."""
+    from h12_skills.perception_utils import pose_to_matrix
+    from rclpy.time import Time as _Time
+    from rclpy.duration import Duration as _Dur
+    from geometry_msgs.msg import Pose as _Pose
+    pre = 'rg' if arm == 'right' else 'lg'
+    def _M(child):
+        t = bench.tf_buffer.lookup_transform('pelvis', child, _Time(), timeout=_Dur(seconds=1.0))
+        tr = t.transform.translation; q = t.transform.rotation
+        p = _Pose(); p.position.x, p.position.y, p.position.z = tr.x, tr.y, tr.z; p.orientation = q
+        return pose_to_matrix(p)
+    try:
+        Ml = _M(f'{pre}_left_finger'); Mr = _M(f'{pre}_right_finger')
+        tl = (Ml @ _TIP_L)[:3]; tr = (Mr @ _TIP_R)[:3]
+        return np.array([0.5 * (tl[0] + tr[0]), 0.5 * (tl[1] + tr[1])])
+    except Exception:
+        return None
+
+
 def _contact_point(bench, frame):
     """The driven gripper CONTACT point in pelvis (frame origin + TCP_DEPTH along
     +Z). We know this EXACTLY from TF — it is where the fingers will close."""
@@ -247,7 +301,7 @@ def run(bench, method, screw, arm, success_dz):
     bench.move_frame_to(frame, _top_down_pose(cmd), duration_sec=SERVO_ITER_SEC, do_plan=False)
     for it in range(CORR_ITERS):
         nail_live = bench.gt_pos_pelvis(screw)                   # servo re-reads live GT (tracks drift)
-        m = _finger_mid_xy(bench, arm)
+        m = _pad_mid_xy(bench, arm)                               # center the flat PADS on the nail (the grip that holds)
         if m is None:
             break
         exy = m - nail_live[:2]
@@ -255,7 +309,7 @@ def run(bench, method, screw, arm, success_dz):
         bench.move_frame_to(frame, _top_down_pose(cmd), duration_sec=SERVO_ITER_SEC, do_plan=False)
         rec['traj'].append(dict(it=it, errXY_mm=round(float(np.linalg.norm(exy)) * 1000, 1)))
         bench.get_logger().info(f'[batt {method}] it{it}: errXY={np.linalg.norm(exy)*1000:.1f}mm')
-    _fm = _finger_mid_xy(bench, arm)
+    _fm = _pad_mid_xy(bench, arm)                                # pad-center vs nail = the real grasp error
     _n = bench.gt_pos_pelvis(screw)
     rec['final_err_mm'] = round(float(np.hypot(_fm[0] - _n[0], _fm[1] - _n[1])) * 1000, 1) \
         if (_fm is not None and _n is not None) else 999.0
@@ -285,6 +339,34 @@ def run(bench, method, screw, arm, success_dz):
                                    and OBJ_MIN_MM < rec['grip_final_mm'] < OBJ_MAX_MM)
     z_grasped = bench.gt_pos(screw)
     rec['screw_z_grasped'] = round(float(z_grasped[2]), 4) if z_grasped is not None else None
+    # STRICT grasp confirmation before welding. The weld teleports the object to follow
+    # the gripper, so it MUST NOT fire on a bad/edge grasp — that would show a miss as a
+    # success and corrupt the experiment. Require ALL of, measured AFTER the close:
+    #   1) grip in the object-contact band (closed_on_object) — not air, not stalled,
+    #   2) the object still CENTERED between the pads (post_grasp_err small) — a miss or
+    #      a knocked object sits off to the side,
+    #   3) FIRM contact force — a glancing touch is weak.
+    # A miss fails every check -> no weld -> it drops -> honest pass/fail. Especially
+    # important for the small nail, where an edge touch could otherwise look grasped.
+    WELD = os.environ.get('BATT_WELD', '1').strip().lower() not in ('0', 'off', 'false', 'no')
+    WELD_MAX_ERR = float(os.environ.get('BATT_WELD_MAX_ERR_MM', '12.0'))
+    WELD_MIN_FORCE = float(os.environ.get('BATT_WELD_MIN_FORCE_N', '40.0'))
+    _padxy = _pad_mid_xy(bench, arm)
+    _objxy = bench.gt_pos_pelvis(screw)
+    rec['post_grasp_err_mm'] = round(float(np.hypot(_padxy[0] - _objxy[0], _padxy[1] - _objxy[1]) * 1000), 1) \
+        if (_padxy is not None and _objxy is not None) else 999.0
+    rec['good_grasp'] = bool(rec['closed_on_object']
+                             and rec['post_grasp_err_mm'] < WELD_MAX_ERR
+                             and (rec['grip_force_n'] or 0.0) > WELD_MIN_FORCE)
+    rec['welded'] = False
+    if WELD and rec['good_grasp']:
+        from std_msgs.msg import String as _Str
+        if not hasattr(bench, '_weld_pub'):
+            bench._weld_pub = bench.create_publisher(_Str, '/hams/grasp_weld', 10)
+        for _ in range(6):                       # burst (discovery race)
+            bench._weld_pub.publish(_Str(data=f'{screw}:{arm}')); time.sleep(0.08)
+        time.sleep(0.5)
+        rec['welded'] = True
     # LIFT: one clean straight-up move, no plan, no re-servo.
     lp = bench.frame_pose_pelvis(frame)
     if lp is not None:
@@ -292,12 +374,18 @@ def run(bench, method, screw, arm, success_dz):
         bench.move_frame_to(frame, lp, duration_sec=max(LIFT_SEG_SEC, 6.0), do_plan=False)
         time.sleep(1.5)
     z1 = bench.gt_pos(screw)
-    rec['screw_z1'] = round(float(z1[2]), 4) if z1 is not None else None
-    dz = (float(z1[2]) - float(z0[2])) if (z0 is not None and z1 is not None) else 0.0
+    rec['screw_z1_immediate'] = round(float(z1[2]), 4) if z1 is not None else None
+    # HOLD and re-check: a good grasp must STICK, not lift-then-slip. Grade on the
+    # SUSTAINED height so a momentary lift that drops doesn't count as success.
+    time.sleep(float(os.environ.get('BATT_HOLD_SEC', '3.0')))
+    z1b = bench.gt_pos(screw)
+    rec['screw_z1'] = round(float(z1b[2]), 4) if z1b is not None else None
+    dz = (float(z1b[2]) - float(z0[2])) if (z0 is not None and z1b is not None) else 0.0
     rec['screw_lift_dz'] = round(dz, 4)
-    in_band = (rec['grip_final_mm'] is not None
-               and CONTACT_MIN_MM < rec['grip_final_mm'] < CONTACT_MAX_MM)
-    rec['success'] = bool(rec['executed'] and dz >= success_dz and in_band)
+    # Success = a STRICT good grasp (object genuinely between the pads) that then held
+    # through the lift. good_grasp gates the weld, so a miss can't teleport-lift into a
+    # false success; dz confirms it actually rose.
+    rec['success'] = bool(rec['executed'] and rec['good_grasp'] and dz >= success_dz)
     return rec
 
 
@@ -306,6 +394,9 @@ def reset_env(bench, arm):
     under the freeze pin) and home the arm, so a test never begins from where the
     previous grasp left the arm stuck or the screws displaced."""
     from std_msgs.msg import Empty
+    rel_pub = bench.create_publisher(Empty, '/hams/grasp_release', 10)   # drop any welded object first
+    for _ in range(3):
+        rel_pub.publish(Empty()); time.sleep(0.05)
     scene_pub = bench.create_publisher(Empty, '/hams/reset_scene', 10)
     for _ in range(8):                        # burst (discovery race)
         scene_pub.publish(Empty()); time.sleep(0.1)
