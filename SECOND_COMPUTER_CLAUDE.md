@@ -48,6 +48,17 @@ HAMS_SPAWN_LATERAL=0.10
 HAMS_SPAWN_LOWER=0.07
 HAMS_CAMERAS=0
 ```
+**CRITICAL — domain isolation (this cost the main box ~2h):** `ROS_DOMAIN_ID` here (27)
+MUST DIFFER from the main machine's (now **28**). CycloneDDS multicast merges same-domain
+traffic across machines on the same LAN, so if BOTH boxes use 27 you get two `/clock`
+publishers, a doubled node set, a fighting timebase, and a `TF_OLD_DATA` flood that makes
+the arm miss and the robot topple. Keep this box on 27, the main box on 28 (never 0 = real
+robot). After bringup, VERIFY isolation:
+```bash
+echo Unitreeh12 | sudo -S docker exec hams_ros bash -lc 'source /opt/ros/humble/setup.bash; source /home/code/core_ws/install/setup.bash; ros2 node list | sort | uniq -c'
+```
+Every count must be **1**. Any node showing `2` means a domain collision — stop and fix the
+domains before running trials. See memory `dds-domain-collision-two-machines`.
 
 ## Step 2 — bring up sim + ros + ALMI (one command)
 ```bash
