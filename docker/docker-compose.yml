@@ -78,6 +78,9 @@ services:
       # Slide the spawn along the robot's left(+)/right(-) so the grasp shoulder
       # lines up with the target, removing the cross-body reach. 0 = centred.
       - HAMS_SPAWN_LATERAL=${HAMS_SPAWN_LATERAL:-0}
+      # Drop the pinned base this many m so the arm reaches a LOW work surface
+      # (battery screw row); frozen-tier only. 0 = normal standing height.
+      - HAMS_SPAWN_LOWER=${HAMS_SPAWN_LOWER:-0}
       # 'almi' = spawn legs at the ALMI policy's nominal crouch (in-place engage).
       - HAMS_STANCE=${HAMS_STANCE:-}
       # ground-truth odom -> pelvis TF (sim stand-in for FAST-LIO odometry)
@@ -221,5 +224,8 @@ services:
       # un-backdate exactly the files that changed since the image's baked
       # build seed (otherwise a submodule ahead of MJPC_REF hydrates into a
       # silently STALE build tree).
-      - ../.git/modules/mujoco_mpc:/home/code/.git/modules/mujoco_mpc:ro
+      # Worktree fix: this repo's .git is a FILE (gitdir pointer), so the
+      # relative ../.git/modules/mujoco_mpc path can't resolve — point at the
+      # main repo's real submodule metadata (ro; unused by the battery task).
+      - /home/guest/Downloads/HAMS-test-grasping/.git/modules/mujoco_mpc:/home/code/.git/modules/mujoco_mpc:ro
     command: /home/code/h12_sim_scripts/launch_ros.sh

@@ -38,10 +38,12 @@ FREE_JOINT_NAME = 'floating_base_joint'
 
 
 class _ModelShim:
-    """mujoco-py-flavoured model accessor used by the place_robot_* helpers."""
+    """mujoco-py-flavoured model accessor used by the place_robot_* helpers.
+    Proxies every other attribute straight to the raw MjModel, so the bridges'
+    direct reads (jnt_*, body_*, etc.) work transparently."""
 
     def __init__(self, m):
-        self._model = m
+        object.__setattr__(self, '_model', m)
 
     def get_joint_qpos_addr(self, name):
         jid = mujoco.mj_name2id(self._model, mujoco.mjtObj.mjOBJ_JOINT, name)
@@ -52,14 +54,30 @@ class _ModelShim:
             return (adr, adr + 7)
         return adr
 
+    def __getattr__(self, name):        # only called when not found normally
+        return getattr(object.__getattribute__(self, '_model'), name)
+
 
 class _DataShim:
+    """Raw MjData wrapper. Proxies all reads (body_xpos/body_xquat/qvel/xpos/
+    site_xpos/...) to the real MjData; the runner still uses ._data explicitly."""
+
     def __init__(self, d):
-        self._data = d
+        object.__setattr__(self, '_data', d)
+
+    # mujoco-py / robosuite compat aliases the bridges expect on env.sim.data.
+    # Raw MjData names them xpos/xquat (indexed by body id); the wrapper the
+    # kitchen envs use exposes body_xpos/body_xquat.
+    @property
+    def body_xpos(self):
+        return self._data.xpos
 
     @property
-    def qpos(self):
-        return self._data.qpos
+    def body_xquat(self):
+        return self._data.xquat
+
+    def __getattr__(self, name):
+        return getattr(object.__getattribute__(self, '_data'), name)
 
 
 class _SimShim:

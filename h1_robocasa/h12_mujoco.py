@@ -327,6 +327,21 @@ def sim_loop(task, viewer=True, layout=None, style=None, seed=None, record_video
         if _arms_clear:
             print("[h12_mujoco] HAMS_SPAWN_ARMS_CLEAR=1: spawned close to the fixture "
                   "(arm/gripper spawn overlap ignored; torso/legs kept clear)")
+        # HAMS_SPAWN_LOWER: drop the pinned base this many metres so the arm can
+        # reach a LOW work surface (e.g. the battery screw row sits ~0.16 m below
+        # the standing pelvis, just past the down-reach). Frozen-only in practice:
+        # the freeze snapshot taken later captures the lowered pose; on a free
+        # base the legs would need to re-solve, so keep this for the pinned tier.
+        _spawn_lower = float(os.environ.get('HAMS_SPAWN_LOWER', '0') or 0)
+        if _spawn_lower:
+            _fjid = mujoco.mj_name2id(
+                model, mujoco.mjtObj.mjOBJ_JOINT,
+                f"{env.robots[0].robot_model.naming_prefix}{h1_2_robosuite.FREE_JOINT_NAME}")
+            _adr = int(model.jnt_qposadr[_fjid])
+            data.qpos[_adr + 2] -= _spawn_lower
+            mujoco.mj_forward(model, data)
+            print(f"[h12_mujoco] HAMS_SPAWN_LOWER={_spawn_lower}m: dropped base z "
+                  f"(low-surface reach)")
         print("[h12_mujoco] initial stance from baked-in sim defaults")
     except Exception as e:
         print(f"[h12_mujoco] clean reset skipped: {e}")
