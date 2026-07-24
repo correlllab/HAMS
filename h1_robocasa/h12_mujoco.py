@@ -465,6 +465,13 @@ def sim_loop(task, viewer=True, layout=None, style=None, seed=None, record_video
         print(f"[h12_mujoco] freeze setup failed, staying dynamic: {e}")
         _freeze_body = False
 
+    # Tethered tier: if we launched in BAND mode (not frozen), a runtime freeze
+    # RELEASE (/hams/freeze_body False) must RESTORE the soft band — otherwise the
+    # per-trial reset_scene (which force-pins) leaves the robot untethered and it
+    # collapses. On a frozen/ALMI launch the band starts disabled, so this stays
+    # False and a release still hands off to the standing policy (unchanged).
+    _band_wanted = (band is not None and not _freeze_body)
+
     # Full-scene snapshot for the in-place trial reset (/hams/reset_scene):
     # restoring qpos/qvel to the spawn state puts the door, objects, AND robot
     # back exactly where a fresh env would — without a container rebuild or a
@@ -759,6 +766,8 @@ def sim_loop(task, viewer=True, layout=None, style=None, seed=None, record_video
                         print(f"[h12_mujoco] body FROZEN at t={data.time:.2f}s "
                               "(runtime toggle)", flush=True)
                     elif not _rq and _frz_toggle['on']:
+                        if band is not None and _band_wanted:
+                            band.enabled = True   # tethered: restore the soft band the pin replaced
                         print(f"[h12_mujoco] body RELEASED at t={data.time:.2f}s "
                               "(runtime toggle)", flush=True)
                     _frz_toggle['on'] = _rq

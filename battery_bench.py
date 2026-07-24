@@ -405,6 +405,17 @@ def reset_env(bench, arm):
     time.sleep(3.0)
     bench.set_gripper(arm, OPEN_MM)
     time.sleep(1.0)
+    # TETHERED tier: reset_scene force-pins the robot; release the pin so the soft
+    # elastic band re-engages (the sim restores it on release when band-launched)
+    # and the base SWAYS during the grasp. Off by default -> frozen tier stays pinned.
+    if os.environ.get('BATT_RELEASE_AFTER_RESET', '0').strip().lower() not in ('0', 'off', 'false', 'no', ''):
+        from std_msgs.msg import Bool as _Bool
+        if not hasattr(bench, '_frz_pub'):
+            bench._frz_pub = bench.create_publisher(_Bool, '/hams/freeze_body', 10)
+        for _ in range(6):
+            bench._frz_pub.publish(_Bool(data=False)); time.sleep(0.1)
+        time.sleep(2.5)                        # let the band re-engage + the base settle
+        bench.get_logger().info('[batt] tethered: freeze released, soft band re-engaged')
     bench.get_logger().info('[batt] env reset: scene restored + arm homed + gripper open')
 
 
