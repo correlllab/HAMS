@@ -19,7 +19,7 @@
 # VALIDATE 1-2 trials visually before the full run.
 # ==========================================================================
 set -u
-ROOT=/home/guest/HAMS-grasp-2method
+ROOT="$(cd "$(dirname "$0")" && pwd)"
 N=${SWEEP_N:-30}
 SCREW=${SWEEP_SCREW:-screw_27}
 SIG_FWD=${RAND_SIG_FWD:-0.1143}
@@ -27,7 +27,7 @@ SIG_LAT=${RAND_SIG_LAT:-0.0683}
 OUTC=/home/code/core_ws/benchmark_results/sweep_battery_random
 LOG=$ROOT/sweep_random.log
 POSFILE=$ROOT/RANDOM_POSITIONS.json
-PW=Unitreeh12
+PW="${SUDO_PW:-Unitreeh12}"
 # EXACT validated grasp config (same as the standing tier that gave clean grasps)
 AENV="ALMI_HOVER_FROZEN=0 ALMI_ENGAGE_RETRY=10 STAB_SIM=30 ALMI_RELEASE_SETTLE=6 ALMI_PELVIS_MIN=0.92 ALMI_REACH_SETTLE=6 ALMI_DESCEND_STEPS=6 ALMI_MOVE_SEC=8 ALMI_DESCEND_SETTLE=3 ALMI_SERVO_ITER=4 ALMI_CONV_MM=6 BATT_WELD_MAX_ERR_MM=12 BATT_GRIP_FORCE_N=6 BATT_TOPDOWN_PITCH=80 BATT_HOVER_M=0.10 BATT_FINGER_SINK=-0.002 BATT_HOLD_SEC=1.5"
 

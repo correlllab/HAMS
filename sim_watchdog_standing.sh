@@ -2,7 +2,7 @@
 # Standing-tier watchdog: every 5 min check sim + /clock + frame_task + ALMI node.
 # Restart the whole standing stack on 2 consecutive failures.
 set -u
-ROOT=/home/guest/HAMS-grasp-2method; PW=Unitreeh12
+ROOT="$(cd "$(dirname "$0")" && pwd)"; PW="${SUDO_PW:-Unitreeh12}"
 SUDO(){ echo "$PW" | sudo -S "$@" 2>/dev/null; }
 say(){ echo "[$(date '+%m-%d %H:%M:%S')] $*" >> "$ROOT/sim_watchdog_standing.log"; }
 fails=0; say "=== standing watchdog started ==="
