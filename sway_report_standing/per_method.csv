@@ -1,3 +1,3 @@
-method,n,success_rate,good_rate,closed_rate,errored,final_err_mm_mean,post_grasp_err_mm_mean,lift_dz_m_mean,dur_s_mean,max_disp_mm_mean,path_len_mm_mean,mean_speed_mms_mean,rms_radial_mm_mean,sway_area_mm2_mean,rms_long_mm_mean,rms_lat_mm_mean,ellipse_ratio_mean,yaw_rms_deg_mean,yaw_range_deg_mean,z_rms_mm_mean,mpf_hz_mean
-centroid,24,91.7,95.8,0.0,0,,8.55,0.058,336.445,21.055,169.0,0.503,13.756,1057.65,9.602,9.835,0.33,2.955,7.526,3.535,0.026
-centroid_vs,30,100.0,100.0,0.0,0,,2.46,0.061,346.82,20.657,172.39,0.497,13.609,1049.567,9.601,9.643,0.335,2.813,7.155,3.523,0.022
+method,n,success_rate,good_rate,closed_rate,errored,final_err_mm_mean,post_grasp_err_mm_mean,lift_dz_m_mean,dur_s_mean,max_disp_mm_mean,path_len_mm_mean,mean_speed_mms_mean,rms_radial_mm_mean,sway_area_mm2_mean,rms_long_mm_mean,rms_lat_mm_mean,ellipse_ratio_mean,yaw_rms_deg_mean,yaw_range_deg_mean,z_rms_mm_mean,mpf_hz_mean,mvelo_mms_mean,rms_ap_mm_mean,rms_ml_mm_mean,a95_mm2_mean,peak_r_mm_mean,drift_mm_mean,min_mos_mm_mean
+centroid,24,91.7,95.8,0.0,0,,8.55,0.058,336.445,21.055,169.0,0.503,13.756,1057.65,9.602,9.835,0.33,2.955,7.526,3.535,0.026,0.51,9.662,9.597,1050.743,20.878,3.865,136.174
+centroid_vs,30,100.0,100.0,0.0,0,,2.46,0.061,346.82,20.657,172.39,0.497,13.609,1049.567,9.601,9.643,0.335,2.813,7.155,3.523,0.022,0.507,9.785,9.456,1048.167,20.61,1.937,133.783
