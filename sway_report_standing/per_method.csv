@@ -1,3 +1,3 @@
 method,n,success_rate,good_rate,closed_rate,errored,final_err_mm_mean,post_grasp_err_mm_mean,lift_dz_m_mean,dur_s_mean,max_disp_mm_mean,path_len_mm_mean,mean_speed_mms_mean,rms_radial_mm_mean,sway_area_mm2_mean,rms_long_mm_mean,rms_lat_mm_mean,ellipse_ratio_mean,yaw_rms_deg_mean,yaw_range_deg_mean,z_rms_mm_mean,mpf_hz_mean
 centroid,24,91.7,95.8,0.0,0,,8.55,0.058,336.445,21.055,169.0,0.503,13.756,1057.65,9.602,9.835,0.33,2.955,7.526,3.535,0.026
-centroid_vs,10,100.0,100.0,0.0,0,,2.43,0.061,339.6,20.62,172.21,0.509,13.531,1042.94,9.541,9.593,0.337,2.801,7.124,3.514,0.022
+centroid_vs,30,100.0,100.0,0.0,0,,2.46,0.061,346.82,20.657,172.39,0.497,13.609,1049.567,9.601,9.643,0.335,2.813,7.155,3.523,0.022

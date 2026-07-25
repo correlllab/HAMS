@@ -30,4 +30,4 @@ Sway is measured on the pelvis (`__pelvis__`) trace at ~10 Hz, about the traject
 | method | n | success% | good% | closed% | err | rms_radial | sway_area | rms_long | rms_lat | yaw_rms | z_rms |
 |---|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|
 | centroid | 24 | 91.7 | 95.8 | 0.0 | 0 | 13.756 | 1057.65 | 9.602 | 9.835 | 2.955 | 3.535 |
-| centroid_vs | 10 | 100.0 | 100.0 | 0.0 | 0 | 13.531 | 1042.94 | 9.541 | 9.593 | 2.801 | 3.514 |
+| centroid_vs | 30 | 100.0 | 100.0 | 0.0 | 0 | 13.609 | 1049.567 | 9.601 | 9.643 | 2.813 | 3.523 |
