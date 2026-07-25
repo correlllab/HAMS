@@ -52,6 +52,15 @@ def generate_launch_description():
             LaunchConfiguration('model_clear_logs'), value_type=bool),
     }
 
+    # h12_skills-only: per-run base-sway telemetry (run_telemetry.py). Each
+    # grasp / pick_place run writes its own logs/runs/<skill>/<stamp>/ with a
+    # 10 Hz telemetry.csv + result.json (pelvis-from-odometry sway, mirroring
+    # the fridge study). On by default; disable with `record_runs:=false`.
+    skills_params = {
+        'record_runs': ParameterValue(
+            LaunchConfiguration('record_runs'), value_type=bool),
+    }
+
     nav_launch = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
             os.path.join(bringup_share, 'launch', 'h1_navigation.launch.py')
@@ -65,6 +74,7 @@ def generate_launch_description():
         DeclareLaunchArgument('use_sliders', default_value='true'),
         DeclareLaunchArgument('use_nav', default_value='true'),
         DeclareLaunchArgument('use_skills', default_value='true'),
+        DeclareLaunchArgument('record_runs', default_value='true'),
         # Debug-only: renders the measured robot + a blue ghost of the MJPC plan to an
         # mp4 (written on shutdown). Reads rt/lowstate + the estimator + rt/mjpc/plan;
         # commands nothing. use_mjpc_viz:=false for a clean bringup.
@@ -258,7 +268,7 @@ def generate_launch_description():
             package='h12_skills',
             executable='skills',
             name='h12_skills',
-            parameters=[sim_time_param, model_log_params],
+            parameters=[sim_time_param, model_log_params, skills_params],
             output='screen',
             condition=IfCondition(LaunchConfiguration('use_skills')),
         ),

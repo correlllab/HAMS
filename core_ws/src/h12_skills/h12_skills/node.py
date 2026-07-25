@@ -97,10 +97,17 @@ class SkillsNode(SkillsBase, OpenDoorSkill, CloseDoorSkill, OpenLidSkill,
             rec = self.logger.start()
             rec.set(skill=label, request=_describe_msg(goal_handle.request))
             self._log_head_frame(rec, f'{label}_start')
+            # Per-run base-sway telemetry (run_telemetry.py): its own directory
+            # of 10 Hz pelvis/gripper/target samples, mirroring the fridge sway
+            # study. None unless recording is on and this is a RECORDED_SKILLS
+            # run with no recorder already active (pick_place's inner grasp).
+            run_rec = self._start_run_telemetry(label, goal_handle)
             try:
                 result = fn(goal_handle)
-                rec.finish(success=bool(getattr(result, 'success', False)),
-                           message=getattr(result, 'message', ''))
+                success = bool(getattr(result, 'success', False))
+                message = getattr(result, 'message', '')
+                rec.finish(success=success, message=message)
+                self._finish_run_telemetry(run_rec, success=success, message=message)
                 return result
             except Exception as e:
                 self.get_logger().error(f'[{label}] internal error: {e}')
@@ -109,6 +116,8 @@ class SkillsNode(SkillsBase, OpenDoorSkill, CloseDoorSkill, OpenLidSkill,
                 result.message = f'internal error: {e}'
                 goal_handle.abort()
                 rec.finish(success=False, message=result.message)
+                self._finish_run_telemetry(run_rec, success=False,
+                                           message=result.message)
                 return result
         return _cb
 

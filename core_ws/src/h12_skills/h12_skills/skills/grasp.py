@@ -213,25 +213,30 @@ APPROACH_IMAGE_WAIT_SEC = 3.0
 # camera". The finger contact point sits 0.0706 m in front of the camera.
 #
 # Target camera->object depth [m] — a REAL drive target near where the fingers
-# should sit (~95-100 mm; the finger contact point is 70.6 mm ahead of the
-# camera, so the object ends ~25-30 mm beyond the fingertips). The servo drives
+# should sit (~100 mm; the finger contact point is 70.6 mm ahead of the
+# camera, so the object ends ~29 mm beyond the fingertips). The servo drives
 # depth TO this, so it must be a sensible value, not a band-center trick: an
 # earlier (0,105) one-sided band centered the setpoint at 52.5 mm and made the
 # servo plunge toward it whenever the object started beyond 105 mm, overshooting
 # into the part and disturbing X/Y. Paired with VISUAL_SERVO_RANGE_TOL_M for the
-# accepted band (98, 102) mm.
+# accepted band (99, 101) mm.
 VISUAL_SERVO_DEPTH_M = 0.10
 # Per-axis convergence tolerances [m], set from real runs (2026-07-21), not
-# theory. The binding limit is the ARM: frame_task settles to ~1.2 mm residual,
-# so corrections under ~2 mm don't execute and <4 mm lateral is unreachable.
-#   X (across the jaws) — what a grasp depends on; at the arm's resolution.
-#     If runs stall naming X, 2 mm is the honest value.
-#   Y (along the jaw span) — pre-opened to 106 mm, so far more forgiving.
+# theory — these are the values the robust screw picking runs converged with
+# (b714d40). The binding limit is the ARM: frame_task settles to ~1.2 mm
+# residual, so corrections under ~2 mm don't execute and <4 mm lateral is
+# unreachable.
+#   X (across the jaws) — what a grasp depends on. BELOW the arm's own ~1.2 mm
+#     resolution, so the loop cannot deliberately place within this band; it
+#     converges when it happens to land there. b714d40 ran 1 mm; if runs stall
+#     naming X, loosen it back to that (2 mm is the honest value).
+#   Y (along the jaw span) — pre-opened to 106 mm, so far more forgiving; 5 mm
+#     still holds the part near the middle of the grip rather than out at a jaw.
 #   range — decides whether the jaws close around the part or above it.
 # Keep X <= Y: inverting them is backwards for a parallel gripper.
-VISUAL_SERVO_X_TOL_M = 0.001
-VISUAL_SERVO_Y_TOL_M = 0.010
-VISUAL_SERVO_RANGE_TOL_M = 0.002
+VISUAL_SERVO_X_TOL_M = 0.00025  # +/-0.25 mm -> X band (11.75, 12.25) at 12 mm target
+VISUAL_SERVO_Y_TOL_M = 0.005
+VISUAL_SERVO_RANGE_TOL_M = 0.001
 # Wall-clock budget for the whole loop [s] (~VISUAL_SERVO_MOVE_SEC per
 # iteration). The goal's own timeout still wins.
 VISUAL_SERVO_TIMEOUT_SEC = 90.0
@@ -278,10 +283,6 @@ VISUAL_SERVO_STALL_EPS_M = 0.001
 VISUAL_SERVO_GAIN = 0.6
 # Largest single correction [m] — bounds what one mis-detection can do.
 VISUAL_SERVO_MAX_STEP_M = 0.05
-# If depth is already in range but X/Y are NOT aligned, back off this far along
-# the approach axis (increasing camera->object depth) to regain lateral room,
-# instead of nudging X/Y while parked close to the part.
-VISUAL_SERVO_ZBACK_M = 0.02
 # Per-iteration frame_task move duration [s]. Sized to INCLUDE the server's
 # steady-state hold — cutting the hold short bakes in gravity droop
 # (~5 mm/iteration observed).
@@ -314,7 +315,7 @@ SERVO_DURATION_SEC = 15   # primary (iter-0) contact IK move budget [s]
 # Timeout (not trajectory time) per approach move: generous so a long transit
 # is never cut off; rejected plans return in well under a second.
 APPROACH_DURATION_SEC = 180.0
-SERVO_MAX_ITER = 3
+SERVO_MAX_ITER = 12       # world-frame servo refinement passes per pose
 # Stop a frame_task move early once the server's streamed feedback repeats
 # UNCHANGED for this many messages — the arm has settled and the server is only
 # holding steady state (which otherwise runs to its ~5 s hold timeout). Passed
@@ -323,14 +324,14 @@ FRAME_TASK_STABLE_STOP_MSGS = 20
 # Convergence tolerances, relaxed from base.py's 5 mm / ~1.15 deg: real-robot
 # IK + pelvis drift rarely settle a 6-DOF grasp pose that tight. These gate the
 # CONTACT move.
-SERVO_LIN_TOL = 0.025
-SERVO_ANG_TOL = 0.10
+SERVO_LIN_TOL = 0.0125
+SERVO_ANG_TOL = 0.05
 # Looser tolerances for the PRE-GRASP approach only (move_to_candidate_approach).
 # The pre-grasp is just a standoff the visual servo then refines from, so a
 # loosely-reached approach is fine — and a tight approach tolerance was
 # rejecting reachable candidates as "unreachable" and burning through the pool.
-APPROACH_LIN_TOL = 0.05
-APPROACH_ANG_TOL = 0.20
+APPROACH_LIN_TOL = 0.025
+APPROACH_ANG_TOL = 0.10
 # The pre-grasp approach (move_to_candidate_approach) is executed as a series of
 # straight-line, UNPLANNED, SLOW-mode Cartesian segments of at most this length
 # (from the staging pose to the pre-grasp), rather than one planned/world-servo
@@ -448,6 +449,12 @@ class GraspSkill:
         rest_height = float(centroid_p[2] - np.percentile(obj_cloud[:, 2], 5))
         if arm is None:   # auto-select: the arm currently closest to the object
             arm = self._closest_arm(centroid_p)
+        self._note_run_arm(arm)    # point the sway recorder's gripper column at it
+
+        # Pre-open the gripper here — after 'prep', before staging — so the arm
+        # travels to the staging pose (and everything after) already open.
+        if not self.open_gripper(arm, OPEN_PERCENT):
+            return fail('gripper pre-open failed')
 
         # --- staging: named config for the arm we are actually going to use.
         # Joint-space (recorded on the robot), so it needs no IK/reach solve and
@@ -474,10 +481,11 @@ class GraspSkill:
             for g in cands.grasps:
                 g.pose.orientation = self._level_grasp_orientation(g.pose).orientation
 
-        # --- approach: pre-open, then servo to the first reachable pre-grasp --
-        if not self.open_gripper(arm, OPEN_PERCENT):
-            return fail('gripper pre-open failed')
+        # --- approach: servo to the first reachable pre-grasp -----------------
+        # (the gripper was already pre-opened after 'prep', before staging)
         targets = self._snapshot_targets(cands, centroid_p)
+        if targets.centroid_w is not None:   # sway target = object centroid in world
+            self._note_run_target(targets.centroid_w)
         idx, err = self.move_to_candidate_approach(run, gh, obj, arm, cands,
                                                    targets)
         if err:
@@ -1122,24 +1130,12 @@ class GraspSkill:
             err = p_cam - target
             ex, ey = float(abs(err[0])), float(abs(err[1]))
             rng = float(abs(err[2]))
-            # If depth is already in range but X/Y are NOT aligned, back straight
-            # off along the approach axis (increase depth by ZBACK) to regain
-            # lateral room instead of nudging X/Y while parked close to the part.
-            # Moving the camera -ZBACK along its optical +Z pushes the object
-            # deeper by +ZBACK.
-            if (rng <= VISUAL_SERVO_RANGE_TOL_M
-                    and (ex > VISUAL_SERVO_X_TOL_M or ey > VISUAL_SERVO_Y_TOL_M)):
-                step = np.array([0.0, 0.0, -VISUAL_SERVO_ZBACK_M])
-                self.get_logger().info(
-                    f'grasp: depth in range but X/Y off (X {err[0] * 1000:+.1f}, '
-                    f'Y {err[1] * 1000:+.1f} mm) — backing off '
-                    f'{VISUAL_SERVO_ZBACK_M * 100:.0f}cm along the approach to '
-                    'regain lateral room')
-            else:
-                # Move the camera BY the error (translating the camera by d shifts
-                # the object's camera coordinates by -d), gain-scaled and capped.
-                # All three axes (X, Y, Z) corrected together.
-                step = VISUAL_SERVO_GAIN * err
+            # Move the camera BY the error (translating the camera by d shifts
+            # the object's camera coordinates by -d), gain-scaled and capped.
+            # All three axes (X, Y, Z) corrected together — including when depth
+            # is already in band and only X/Y are off, which is the ordinary way
+            # this loop finishes.
+            step = VISUAL_SERVO_GAIN * err
             norm = float(np.linalg.norm(step))
             if norm > VISUAL_SERVO_MAX_STEP_M:
                 step *= VISUAL_SERVO_MAX_STEP_M / norm

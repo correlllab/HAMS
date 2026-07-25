@@ -1,9 +1,9 @@
 """SkillPickPlace: prep -> detect the place target -> grasp the pick object
-(in-process /skill/grasp) -> park the graspgenx frame top-down above the place
-target -> open the gripper.
+(in-process /skill/grasp) -> lift it clear -> park the graspgenx frame
+top-down above the place target -> open the gripper.
 
-The place is deliberately simple: no carry ladder, orientation fan, or
-rest-height descent. The place pose reuses the grasp skill's top-down
+The place is deliberately simple: no orientation fan or rest-height
+descent. The place pose reuses the grasp skill's top-down
 orientation (_top_down_pose — forward azimuth, level wrist, pitched
 TOP_DOWN_PITCH_DEG down) with the finger CONTACT point PLACE_HEIGHT above the
 place target's top face, and the object is dropped from there.
@@ -14,6 +14,12 @@ time it is re-resolved into the live pelvis frame and the commanded pose is
 driven with servo_frame_to_world's drift compensation. Without a world TF the
 skill falls back to the detect-time pelvis point, uncompensated — the same
 degradation as the grasp skill without odometry.
+
+The post-grasp lift is world-anchored the same way (see the LIFT_* constants):
+its rungs are absolute offsets from the executed grasp pose along world +Z,
+each re-servoed against the measured world pose, and they drive the PINCH-POINT
+frame rather than the GraspGenX gripper-base frame — so the pull stays vertical
+and straight where the object actually sits, not 11.5 cm behind it.
 """
 
 import copy
@@ -22,13 +28,18 @@ import numpy as np
 
 from action_msgs.msg import GoalStatus
 from builtin_interfaces.msg import Duration
+from rclpy.duration import Duration as RclpyDuration
+from rclpy.time import Time
+from tf2_ros import TransformException
 
 from custom_ros_messages.action import SkillGrasp, SkillPickPlace
 
 from ..base import _Run, GRASP_FRAMES, WORLD_FRAME
+from ..perception_utils import (matrix_to_pose, pose_to_matrix,
+                                transform_to_matrix)
 from .grasp import (_approach_target_tf, _pose_at, _top_down_pose,
                     SERVO_MAX_ITER, SERVO_LIN_TOL, SERVO_ANG_TOL,
-                    APPROACH_DURATION_SEC)
+                    APPROACH_DURATION_SEC, FRAME_TASK_STABLE_STOP_MSGS)
 
 
 # [m] height of the released object's CONTACT point above the place target's
@@ -41,12 +52,30 @@ TOP_FACE_BAND = 0.015
 # timeout is the remaining budget minus this, so a slow Gemini detect can't
 # starve the placement half of the skill.
 PLACE_RESERVE_SEC = 60.0
-# Straight-up retract along pelvis +Z right after the grasp, to lift the object
-# clear of the surface before the carry. Planned (collision-aware) and run in
-# SLOW mode so it doesn't jerk the just-grasped object; the duration is the
-# slow-mode-scaled budget (~4x, so a slow move still reaches over RETRACT_HEIGHT).
-RETRACT_HEIGHT = 0.03
-RETRACT_SEC = 20.0
+LIFT_HEIGHT = 0.10       # [m] total straight-up lift after the grasp closes
+# [m] per-waypoint increment of that lift: the rise is commanded as a ladder of
+# LIFT_STEP moves instead of one LIFT_HEIGHT move, so the arm clears the pick
+# site in short committed hops that stay interruptible. The line is anchored
+# ONCE at the executed grasp (outcome.pose) and each waypoint is an ABSOLUTE
+# offset from that anchor, so per-rung error cannot accumulate into the next —
+# and every rung also pulls the hand back onto the grasp's own vertical instead
+# of inheriting whatever residual and sag the close left behind.
+#
+# The anchor is in WORLD_FRAME whenever the grasp had a world TF, so "+Z" is
+# GRAVITY up and each rung is re-servoed against the measured world pose
+# (_servo_pose). Commanding pelvis +Z instead makes the pull follow the torso:
+# under a balancing lower body the pelvis pitches and sways during a rung, and
+# an uncompensated pelvis-frame command drags the held object sideways.
+LIFT_STEP = 0.05
+# [s] commanded motion time per lift increment.
+LIFT_STEP_DURATION_SEC = 4.0
+# The lift drives the PINCH-POINT frame, not the GraspGenX gripper-base frame
+# the grasp targets are computed for: the two sit GRIPPER_BASE_TO_CONTACT_M
+# (0.1146 m) apart along the approach, so nulling the error at the base lets a
+# wrist-orientation residual swing the fingertips through ~0.1146 x ang_tol
+# without the move ever noticing. On a small part held in the fingertips that
+# arc is the difference between lifting it and rolling it out of the jaws.
+PINCH_FRAMES = {'left': 'left_grasp_frame', 'right': 'right_grasp_frame'}
 # Debug TF (RViz): the detected place point / commanded place pose.
 PLACE_TARGET_FRAME = 'pick_place_target_frame'
 
@@ -107,22 +136,45 @@ class PickPlaceSkill:
             return fail(err)
         arm = outcome.arm    # the hand that actually grasped drives the place
 
-        # --- retract: lift the grasped object STRAIGHT UP along pelvis +Z,
-        # planned, to clear it off the surface before the carry ---------------
-        frame = GRASP_FRAMES[arm]
-        cur = self._frame_pose_in_pelvis(frame)
-        if cur is None:
-            return fail('TF for the post-grasp retract unavailable')
-        up = copy.deepcopy(cur)
-        up.position.z += RETRACT_HEIGHT
+        # --- lift: rise LIFT_HEIGHT straight up as a ladder of LIFT_STEP hops,
+        # anchored ONCE at the grasp that was just executed (outcome.pose — in
+        # WORLD_FRAME when the grasp had a world TF, so the rungs climb GRAVITY
+        # +Z and each is drift-compensated). Targets are computed for the
+        # GraspGenX frame the grasp pose is expressed in, then re-expressed for
+        # the PINCH-POINT frame that actually holds the object (to_pinch). See
+        # the LIFT_* constants -------------------------------------------------
+        lift_frame = PINCH_FRAMES[arm]
+        T_off = self._pinch_frame_offset(arm)
+        if T_off is None:
+            return fail(f'TF {GRASP_FRAMES[arm]} -> {lift_frame} unavailable, '
+                        'so the post-grasp lift target is unknown')
+
+        def to_pinch(pose_gx):
+            """A target computed FOR the GraspGenX gripper-base frame, restated
+            as the equivalent target for the pinch-point frame (a body-fixed
+            offset, so this holds in the world and pelvis frames alike)."""
+            return matrix_to_pose(pose_to_matrix(pose_gx) @ T_off)
+
+        world_ok = outcome.frame == WORLD_FRAME
+        n_rungs = max(1, int(round(LIFT_HEIGHT / LIFT_STEP)))
         self.get_logger().info(
-            f'pick_place: retracting {frame} {RETRACT_HEIGHT * 100:.0f}cm up '
-            '(pelvis +Z), planned, after the grasp')
-        if not self.move_frame_to(frame, up, outer_gh=gh,
-                                  duration_sec=RETRACT_SEC, do_plan=True,
-                                  slow_mode=True,
-                                  label='retract up after grasp'):
-            return fail('post-grasp retract (pelvis +Z) failed')
+            f'pick_place: lifting {lift_frame} {LIFT_HEIGHT * 100:.0f}cm up '
+            f'({"gravity" if world_ok else "pelvis"} +Z) in {n_rungs} x '
+            f'{LIFT_STEP * 100:.0f}cm rungs from the executed grasp pose'
+            + ('' if world_ok else ' — NO world anchor, drift compensation OFF'))
+        for k in range(1, n_rungs + 1):
+            if gh.is_cancel_requested or run.remaining() <= 0.0:
+                return fail('canceled or timed out during post-grasp lift')
+            dz = min(k * LIFT_STEP, LIFT_HEIGHT)
+            rung = copy.deepcopy(outcome.pose)
+            rung.position.z += dz
+            if not self._servo_pose(
+                    lift_frame, to_pinch(rung), world_ok, gh, do_plan=False,
+                    duration_sec=LIFT_STEP_DURATION_SEC,
+                    stable_stop_msgs=FRAME_TASK_STABLE_STOP_MSGS,
+                    label=f'lift rung {k}/{n_rungs} (+{dz * 100:.0f}cm Z)'):
+                return fail(f'post-grasp lift failed at {dz * 100:.0f}cm of '
+                            f'{LIFT_HEIGHT * 100:.0f}cm')
 
         # --- place: park the graspgenx frame top-down above the target --------
         if not run.phase('place', 0.7):
@@ -210,6 +262,46 @@ class PickPlaceSkill:
         if outcome is None:
             return None, f'grasp of {obj!r} returned no outcome for placement'
         return outcome, None
+
+    def _pinch_frame_offset(self, arm):
+        """Fixed rigid transform (4x4) of the arm's pinch-point frame
+        (PINCH_FRAMES) expressed in its GraspGenX gripper-base frame — both are
+        fixed URDF children of the wrist yaw link, so the offset is constant;
+        read once per goal from TF. A target pose computed FOR the graspgenx
+        frame becomes the equivalent pinch-frame target as T_target @ offset.
+        None when TF can't resolve it (robot description not up)."""
+        try:
+            tf = self.tf_buffer.lookup_transform(
+                GRASP_FRAMES[arm], PINCH_FRAMES[arm], Time(),
+                timeout=RclpyDuration(seconds=1.0))
+        except TransformException:
+            return None
+        return transform_to_matrix(tf.transform)
+
+    def _servo_pose(self, frame, pose, world_ok, gh, do_plan,
+                    duration_sec=LIFT_STEP_DURATION_SEC, slow_mode=False,
+                    label='', stable_stop_msgs=None):
+        """Drive URDF frame `frame` to `pose` — a Pose in WORLD_FRAME when
+        `world_ok` (servo_frame_to_world's drift compensation: the fixed world
+        target is re-resolved into the LIVE pelvis frame every pass and the
+        frame's actual world pose is measured back), else a pelvis-frame Pose
+        driven directly with no compensation. Same relaxed tolerances as the
+        grasp skill's servo."""
+        if world_ok:
+            world_pose = pose
+            fallback = self._transform_pose(pose, WORLD_FRAME, 'pelvis')
+            if fallback is None:
+                self.get_logger().warn(
+                    f'pick_place: {WORLD_FRAME} -> pelvis TF unavailable')
+                return False
+        else:
+            world_pose, fallback = None, pose
+        return self.servo_frame_to_world(
+            frame, world_pose, fallback, outer_gh=gh,
+            duration_sec=duration_sec, max_iter=SERVO_MAX_ITER,
+            lin_tol=SERVO_LIN_TOL, ang_tol=SERVO_ANG_TOL, do_plan=do_plan,
+            slow_mode=slow_mode, label=label,
+            stable_stop_msgs=stable_stop_msgs)
 
 
 def _top_face_point(cloud):

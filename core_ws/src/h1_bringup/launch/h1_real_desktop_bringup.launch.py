@@ -49,6 +49,15 @@ def generate_launch_description():
             LaunchConfiguration('model_clear_logs'), value_type=bool),
     }
 
+    # h12_skills-only: per-run base-sway telemetry (run_telemetry.py). Each
+    # grasp / pick_place run writes its own logs/runs/<skill>/<stamp>/ with a
+    # 10 Hz telemetry.csv + result.json (pelvis-from-odometry sway, mirroring
+    # the fridge study). On by default; disable with `record_runs:=false`.
+    skills_params = {
+        'record_runs': ParameterValue(
+            LaunchConfiguration('record_runs'), value_type=bool),
+    }
+
     return LaunchDescription([
         
         # Engage the FAME lower-body standing policy only once the operator has
@@ -69,6 +78,7 @@ def generate_launch_description():
         DeclareLaunchArgument('model_logging', default_value='true'),
         DeclareLaunchArgument('model_visualization', default_value='true'),
         DeclareLaunchArgument('model_clear_logs', default_value='true'),
+        DeclareLaunchArgument('record_runs', default_value='true'),
 
         # Both hand/wrist RealSense cameras and their camera->link static TFs.
         # These live on the companion desktop (the wrists' USB runs here), while
@@ -133,7 +143,7 @@ def generate_launch_description():
             package='h12_skills',
             executable='skills',
             name='h12_skills',
-            parameters=[sim_time_param, model_log_params],
+            parameters=[sim_time_param, model_log_params, skills_params],
             output='screen',
             condition=IfCondition(LaunchConfiguration('use_skills')),
         ),

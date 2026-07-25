@@ -54,6 +54,8 @@ from .perception_utils import (
     transform_to_matrix, pose_to_matrix, matrix_to_pose, quat_geodesic,
     extract_json,
 )
+from .model_logging import _log_root
+from .run_telemetry import RunRecorder, describe_goal, run_dir
 
 
 CAMERA_NS = '/realsense/head'
@@ -196,6 +198,13 @@ SLOW_MODE_TIME_SCALE = 4.0
 # real motion so an actually-converging move never trips it.
 FRAME_TASK_STABLE_EPS_LIN = 0.0005    # 0.5 mm
 FRAME_TASK_STABLE_EPS_ANG = 0.002     # 2 mrad
+
+# Skills whose runs get a per-run base-sway telemetry directory (see
+# run_telemetry.py). Only the implemented, base-MOVING manipulation skills are
+# worth recording — the stubs abort instantly and frontier_explore is a
+# different (navigation) regime. pick_place's in-process grasp does NOT open a
+# second recorder; the outer pick_place recorder already spans the episode.
+RECORDED_SKILLS = frozenset({'grasp', 'pick_place'})
 
 # Skill action clients: name -> (action type, action server name). The same
 # table drives the action servers SkillsNode provides.
@@ -455,6 +464,17 @@ class SkillsBase(Node):
                 cli.wait_for_service(timeout_sec=10.0)
         self.frame_task_cli.wait_for_server(timeout_sec=10.0)
         self.named_config_cli.wait_for_server(timeout_sec=10.0)
+
+        # --- per-run base-sway telemetry (run_telemetry.py) -------------------
+        # `record_runs` (default true): each RECORDED_SKILLS run writes its own
+        # telemetry.csv + result.json under <package>/logs/runs/<skill>/. Only
+        # ONE recorder is active at a time (`_active_run`), so pick_place's
+        # in-process grasp shares the outer recorder instead of double-writing.
+        self._record_runs = bool(
+            self.declare_parameter('record_runs', True).value)
+        self._run_log_root = _log_root('h12_skills', __file__)
+        self._run_lock = threading.Lock()
+        self._active_run = None
 
     # ----------------------------------------------------------- camera caches
     def _on_color_image(self, msg: CompressedImage):
@@ -1343,3 +1363,58 @@ class SkillsBase(Node):
         if arm not in GRASP_FRAMES:
             return None
         return arm
+
+    # ------------------------------------------------ per-run sway telemetry
+    def _start_run_telemetry(self, skill, goal_handle):
+        """Start a per-run base-sway telemetry recorder for `skill`
+        (run_telemetry.py). Returns the RunRecorder, or None when recording is
+        off, the skill is not in RECORDED_SKILLS, or one is ALREADY active — a
+        pick_place's in-process grasp shares the outer recorder rather than
+        opening a second directory. The caller MUST hand what this returns to
+        _finish_run_telemetry() in a finally-block."""
+        if not self._record_runs or skill not in RECORDED_SKILLS:
+            return None
+        goal = getattr(goal_handle, 'request', None)
+        with self._run_lock:
+            if self._active_run is not None:
+                return None
+            arm = (getattr(goal, 'arm', '') or '').strip().lower()
+            out_dir = run_dir(self._run_log_root, skill,
+                              getattr(goal, 'target_object', ''))
+            try:
+                rec = RunRecorder(
+                    self, skill, out_dir, WORLD_FRAME, GRASP_FRAMES,
+                    arm=arm if arm in GRASP_FRAMES else None,
+                    request=describe_goal(goal)).start()
+            except Exception as e:      # recording must never break a skill
+                self.get_logger().warn(f'run telemetry: start failed: {e}')
+                return None
+            self._active_run = rec
+            return rec
+
+    def _note_run_arm(self, arm):
+        """Tell the active run recorder (if any) which hand the skill resolved,
+        so the gripper column tracks the right GraspGenX frame."""
+        rec = self._active_run
+        if rec is not None:
+            rec.note_arm(arm)
+
+    def _note_run_target(self, xyz):
+        """Tell the active run recorder (if any) the task target — a fixed
+        world point (Pose or (x, y, z)); the sway AP/ML frame is built from it."""
+        rec = self._active_run
+        if rec is not None:
+            rec.note_target(xyz)
+
+    def _finish_run_telemetry(self, rec, success=None, message=None):
+        """Stop `rec` (the value _start_run_telemetry returned; None = nothing
+        started here) and write its result.json. Only the starter clears the
+        active slot, so a nested no-op call never stops the outer recorder."""
+        if rec is None:
+            return
+        try:
+            rec.finish(success=success, message=message)
+        finally:
+            with self._run_lock:
+                if self._active_run is rec:
+                    self._active_run = None
