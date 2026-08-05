@@ -172,7 +172,7 @@ def generate_launch_description():
                          # Negative pitch = anti-lean bias (policy believes it
                          # pitches further forward and fights harder); the
                          # hanging-plumb static calibration would be +0.264.
-                         'imu_offset_roll_deg': 0.0,
+                         'imu_offset_roll_deg': 0.50,
                          'imu_offset_pitch_deg': -2.5,
                          'imu_offset_yaw_deg': 0.0}],
             output='screen',
