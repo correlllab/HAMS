@@ -220,6 +220,42 @@ sim-to-real transfer.
   robot-stack code *depend* on any of these, and don't add new ungated
   ground-truth publishers.
 
+### Do NOT bump the `livox_ros_driver2` submodule
+
+Pinned at **`13eb05e`** ("support Mid-360s Lidar, Ubuntu 24.04 and ROS2 Jazzy").
+Leave it there. A bump to `4a1def9` on 2026-08-05 broke both sim images and was
+reverted; the same trap is still armed.
+
+Why it breaks: the driver and Livox-SDK2 are **separate upstream repos that ship
+paired halves of the same feature**, but only the driver is pinned here — both
+Dockerfiles install the SDK with an unpinned `git clone --depth 1 …master`
+(`RosDockerfile` §2, `RobocasaDockerfile` near the end). That clone sits in a
+layer *above* the driver's `COPY`/build, and Docker invalidates downward only,
+so bumping the driver rebuilds it against whatever SDK headers your cache
+happens to hold. `4a1def9` (Avia2) calls `kLivoxLidarDoubleEchoData` /
+`LivoxLidarDoubleEchoRawPoint`, added in SDK commit `08f523c` — against an
+older cached SDK it fails with "was not declared in this scope".
+
+The failure is silent. Upstream's `build.sh` ends in `popd`, so it exits 0 even
+when its colcon build fails, and `launch_ros.sh` doesn't check either. The image
+builds "successfully" with `/opt/livox_ws/install/livox_ros_driver2/` holding
+only `package.*` stubs — no `local_setup.bash`, no Python module — and you find
+out at runtime:
+
+```
+ModuleNotFoundError: No module named 'livox_ros_driver2'   # mujoco_ros_bridge.py:36
+```
+
+Whether it reproduces depends on how old your Docker cache is, so "it built on
+my machine" proves nothing.
+
+If you genuinely need a newer driver (Avia2/Mid-360s hardware), do it in one
+change: add `ARG LIVOX_SDK2_REF=<matching SDK sha>` to **both** Dockerfiles with
+a pinned `git fetch --depth 1 origin "$LIVOX_SDK2_REF"`, keep the two SHAs
+identical (the images must agree on the `CustomMsg` wire format), and assert the
+build worked — `python3 -c 'from livox_ros_driver2.msg import CustomMsg'` — so a
+mismatch fails the image build instead of shipping broken.
+
 ### Other invariants
 
 - MuJoCo versions are pinned per image (`3.2.3` in `ros` to match the MJPC ABI,
