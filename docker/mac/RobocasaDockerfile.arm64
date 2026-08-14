@@ -1,13 +1,13 @@
 # ==============================
 # Apple-Silicon (arm64) / CPU-only fork of RobocasaDockerfile.
-# MuJoCo 3.3.1 sim on hams_base (arm64). Identical to the stock Dockerfile
+# MuJoCo 3.3.1 sim on golem_base (arm64). Identical to the stock Dockerfile
 # except the default render backend is OSMesa (pure-software, CPU) instead of
 # EGL, since there is no NVIDIA GPU under Colima. Source tree bind-mounted at
 # runtime (docker/mac/docker-compose.yml -> /home/code/h1_robocasa).
 #
-# Build:  docker build -t hams_sim_robocasa:latest -f docker/mac/RobocasaDockerfile.arm64 .
+# Build:  docker build -t golem_sim_robocasa:latest -f docker/mac/RobocasaDockerfile.arm64 .
 # ==============================
-FROM hams_base:latest
+FROM golem_base:latest
 
 ARG http_proxy
 ARG https_proxy
@@ -131,8 +131,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # never leaves the container, so XQuartz's GLX limits are irrelevant. Proven to
 # give MuJoCo a full OpenGL 4.5 context.
 #
-# Enabled at runtime via HAMS_DISPLAY=vnc (see launch_robocasa_mac.sh); with the
-# default HAMS_DISPLAY=headless none of these run and the image behaves exactly
+# Enabled at runtime via GOLEM_DISPLAY=vnc (see launch_robocasa_mac.sh); with the
+# default GOLEM_DISPLAY=headless none of these run and the image behaves exactly
 # as before (OSMesa offscreen). Appended last so it never busts the heavy
 # mujoco/robocasa/asset layers above.
 #   xvfb            virtual framebuffer X server

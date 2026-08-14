@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="UTF-8" ?>
 <!--
-  CycloneDDS runtime tuning for the HAMS ROS 2 stack.
+  CycloneDDS runtime tuning for the GOLEM ROS 2 stack.
 
   Wired into the `ros` docker-compose profile: this file is bind-mounted to
   /home/code/cyclonedds.xml and pointed at by CYCLONEDDS_URI. Edit here and

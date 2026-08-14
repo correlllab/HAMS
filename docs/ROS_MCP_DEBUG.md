@@ -19,19 +19,19 @@ answer instantly instead of paying node-startup + DDS-discovery on every query.
 
 ## Enable it
 
-Add `HAMS_ROS_MCP=1` when you launch (it starts on `localhost:6082` inside the VM):
+Add `GOLEM_ROS_MCP=1` when you launch (it starts on `localhost:6082` inside the VM):
 
 ```bash
-HAMS_DISPLAY=vnc HAMS_RVIZ=vnc HAMS_CAMERAS=0 \
-HAMS_LOWERBODY=switch HAMS_SLAM=1 HAMS_NAV2=1 HAMS_SPAWN_BACKOFF=1.5 \
-HAMS_ROS_MCP=1 \
+GOLEM_DISPLAY=vnc GOLEM_RVIZ=vnc GOLEM_CAMERAS=0 \
+GOLEM_LOWERBODY=switch GOLEM_SLAM=1 GOLEM_NAV2=1 GOLEM_SPAWN_BACKOFF=1.5 \
+GOLEM_ROS_MCP=1 \
   docker compose -f docker/mac/docker-compose.yml up -d
 
 ./docker/mac/scripts/mac_vnc_tunnel.sh        # forwards 6082 alongside the viewer ports
 ```
 
 The first launch `pip install`s the `mcp` package inside the container (logged to
-`/tmp/ros_mcp.log`). `HAMS_ROS_MCP` is baked at container-create — set it on a
+`/tmp/ros_mcp.log`). `GOLEM_ROS_MCP` is baked at container-create — set it on a
 `compose up` (recreate), not a bare `docker restart`.
 
 ## Register it with Claude Code (one-time, on the Mac)
@@ -78,5 +78,5 @@ The first seven are the warm/fast path; the generic passthroughs shell out to th
 - **Headless runs.** An unauthenticated localhost HTTP MCP server works in
   non-interactive Claude Code runs as long as the tunnel and server are up; there's
   no OAuth to complete.
-- **Port.** Override with `HAMS_ROS_MCP_PORT` (compose passes it through); update the
+- **Port.** Override with `GOLEM_ROS_MCP_PORT` (compose passes it through); update the
   `claude mcp add` URL and `mac_vnc_tunnel.sh` `PORTS` to match.

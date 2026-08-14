@@ -1,5 +1,5 @@
 # ==============================
-# Apple-Silicon (arm64) / CPU-only SLIM ROS 2 workspace image on hams_base.
+# Apple-Silicon (arm64) / CPU-only SLIM ROS 2 workspace image on golem_base.
 #
 # Deliberately NOT a port of the full RosDockerfile: it omits the x86-tuned,
 # exact-pinned vision / grasp ML stack (transformers, SAM3, CLIP, GraspGenX,
@@ -8,9 +8,9 @@
 # publisher, joint_state_publisher, the Pink IK frame_task_server, and the
 # safety_node — plus the message packages and IK/QP backends they depend on.
 #
-# Build:  docker build -t hams_ros:latest -f docker/mac/RosDockerfile.slim.arm64 .
+# Build:  docker build -t golem_ros:latest -f docker/mac/RosDockerfile.slim.arm64 .
 # ==============================
-FROM hams_base:latest
+FROM golem_base:latest
 
 ARG http_proxy
 ARG https_proxy
@@ -104,8 +104,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # pixels out over VNC/noVNC on its OWN port (5901 / 6081), separate from the
 # robocasa MuJoCo viewer (5900 / 6080), so both can run at once.
 #
-# Enabled at runtime via HAMS_RVIZ=vnc (see launch_ros_mac.sh); with the default
-# HAMS_RVIZ=0 none of this runs and the image behaves exactly as before.
+# Enabled at runtime via GOLEM_RVIZ=vnc (see launch_ros_mac.sh); with the default
+# GOLEM_RVIZ=0 none of this runs and the image behaves exactly as before.
 # Appended late so it does not bust the colcon/message layers above.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ros-humble-rviz2 \
@@ -125,12 +125,12 @@ RUN printf '#!/bin/sh\nexec fbsetroot -solid "#2b2b2b"\n' > /usr/bin/fbsetbg \
 # package the lower-body walk/FAME controllers depend on). unitree_hg ships from
 # unitree_ros2/cyclonedds_ws and its CMake generates DDS IDL, which this
 # FastDDS-only slim image otherwise lacks. Only pulled in for the optional
-# lower-body stack (HAMS_LOWERBODY); torch is already present in the base image.
+# lower-body stack (GOLEM_LOWERBODY); torch is already present in the base image.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ros-humble-rosidl-generator-dds-idl \
     && rm -rf /var/lib/apt/lists/*
 
-# 2D SLAM (optional, HAMS_SLAM=1): slam_toolbox builds an occupancy map from a
+# 2D SLAM (optional, GOLEM_SLAM=1): slam_toolbox builds an occupancy map from a
 # laserscan; pointcloud_to_laserscan flattens the Livox cloud into that scan.
 # Sim ground-truth /odom (from the mujoco bridge) is the odometry source, so no
 # FAST-LIO is needed.
@@ -139,7 +139,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         ros-humble-pointcloud-to-laserscan \
     && rm -rf /var/lib/apt/lists/*
 
-# Optional autonomous navigation (HAMS_NAV2=1): the nav2 stack plans a
+# Optional autonomous navigation (GOLEM_NAV2=1): the nav2 stack plans a
 # collision-free path on the SLAM map + lidar costmap and drives /cmd_vel (which
 # the walk policy follows). See nav2_config_mac.yaml.
 RUN apt-get update && apt-get install -y --no-install-recommends \

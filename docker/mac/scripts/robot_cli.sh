@@ -1,9 +1,9 @@
 #!/bin/bash
-# Convenience helpers for driving the H1 from inside the hams_ros container.
+# Convenience helpers for driving the H1 from inside the golem_ros container.
 # This dir is live-mounted (docker/mac/docker-compose.yml: ./scripts -> /home/code/h12_sim_scripts),
 # so edits on the Mac appear here immediately — no rebuild.
 #
-# Usage (inside hams_ros):
+# Usage (inside golem_ros):
 #   source /home/code/h12_sim_scripts/robot_cli.sh
 #   rob_poses                       # list named postures
 #   rob_pose t_pose                 # move to a named posture (default 3s)
@@ -74,7 +74,7 @@ rob_reach() {
     return 1
 }
 
-# --- Lower-body locomotion (needs HAMS_LOWERBODY=switch) ------------------------
+# --- Lower-body locomotion (needs GOLEM_LOWERBODY=switch) ------------------------
 # The switchable controller starts in FAME (stand) and auto-switches stand<->walk
 # from ||/cmd_vel||: any velocity command makes it walk; zero makes it stand. There
 # are no start services — rob_go drives /cmd_vel, rob_stop zeroes it (back to FAME).
@@ -101,7 +101,7 @@ rob_stop() {
 # rob_odom — current base position in the odom (world) frame.
 rob_odom() { timeout 5 ros2 topic echo /odom --field pose.pose.position --once; }
 
-# rob_explore — autonomous frontier-based exploration (needs HAMS_SLAM=1 HAMS_NAV2=1).
+# rob_explore — autonomous frontier-based exploration (needs GOLEM_SLAM=1 GOLEM_NAV2=1).
 # Sends the /skill/frontier_explore action, which repeatedly navigates to the nearest
 # unexplored frontier on the SLAM map until it's fully mapped. The controller
 # auto-switches to walk as soon as nav2 publishes /cmd_vel (no manual walk step) and
@@ -115,5 +115,5 @@ rob_explore() {
 
 echo "robot_cli loaded."
 echo "  postures : rob_pose t_pose | rob_grip right close"
-echo "  locomote : rob_go 0.4 0 0.3 (fwd+turn) -> rob_stop   (auto stand<->walk; needs HAMS_LOWERBODY=switch)"
-echo "  explore  : rob_explore   (autonomous frontier mapping; needs HAMS_SLAM=1 HAMS_NAV2=1)"
+echo "  locomote : rob_go 0.4 0 0.3 (fwd+turn) -> rob_stop   (auto stand<->walk; needs GOLEM_LOWERBODY=switch)"
+echo "  explore  : rob_explore   (autonomous frontier mapping; needs GOLEM_SLAM=1 GOLEM_NAV2=1)"

@@ -1,7 +1,7 @@
-# HAMS build system
+# GOLEM build system
 
-HAMS (Humanoid Agent Modular Stack) builds into **four Docker images** driven by
-two independent build systems that meet at runtime:
+GOLEM (Generalized Open Layered Embodied Modules) builds into **four Docker
+images** driven by two independent build systems that meet at runtime:
 
 1. **Docker** builds the images (system deps, Python envs, C++ libraries baked at
    image-build time).
@@ -53,21 +53,21 @@ Large binary assets (meshes, XML, USD) are tracked with **Git-LFS**; run
 nvidia/cuda:12.2.0-devel-ubuntu22.04
         │
         ▼
-   hams_base  ────────────┬───────────────┐
+   golem_base  ───────────┬───────────────┐
    (ROS 2 Humble,         │               │
     Python 3.10, torch    ▼               ▼
-    cu130, CycloneDDS   hams_ros      hams_sim_robocasa
+    cu130, CycloneDDS   golem_ros     golem_sim_robocasa
     0.10, unitree SDK)  (workspace)   (MuJoCo + RoboCasa)
 
 nvidia/cuda:12.2.0-runtime-ubuntu22.04
-        │  (two-stage builder → runtime; NO hams_base)
+        │  (two-stage builder → runtime; NO golem_base)
         ▼
-   hams_sim_isaac  (Isaac Sim 5.1 / IsaacLab 2.3.2, conda Python 3.11)
+   golem_sim_isaac  (Isaac Sim 5.1 / IsaacLab 2.3.2, conda Python 3.11)
 ```
 
-- `hams_ros` and `hams_sim_robocasa` inherit from `hams_base`.
-- `hams_sim_isaac` is **self-contained** — Isaac Sim 5.x needs Python 3.11, but
-  `hams_base` pins 3.10 for the ROS 2 Humble apt packages, so Isaac cannot share
+- `golem_ros` and `golem_sim_robocasa` inherit from `golem_base`.
+- `golem_sim_isaac` is **self-contained** — Isaac Sim 5.x needs Python 3.11, but
+  `golem_base` pins 3.10 for the ROS 2 Humble apt packages, so Isaac cannot share
   the base. It gets its Python from a Miniconda env instead.
 
 All containers interoperate over **CycloneDDS on one ROS domain** (default
@@ -75,7 +75,7 @@ All containers interoperate over **CycloneDDS on one ROS domain** (default
 
 ---
 
-## 3. `hams_base` (`docker/BaseDockerfile`)
+## 3. `golem_base` (`docker/BaseDockerfile`)
 
 The shared foundation for the ROS and RoboCasa images.
 
@@ -100,10 +100,10 @@ The shared foundation for the ROS and RoboCasa images.
 
 ---
 
-## 4. `hams_ros` (`docker/RosDockerfile`)
+## 4. `golem_ros` (`docker/RosDockerfile`)
 
 The workspace image. Layers are ordered **most-stable → least-stable** so that
-iterating on volatile pins doesn't bust the heavy layers above. `FROM hams_base`.
+iterating on volatile pins doesn't bust the heavy layers above. `FROM golem_base`.
 
 1. **apt build/workspace deps:** `colcon`, `rosdep`, `vcstool`; apt
    numpy/scipy/yaml/transforms3d (must match system C-extension ABIs); C++ libs
@@ -136,9 +136,9 @@ Python deps; the ROS packages themselves are compiled from the bind-mounted sour
 
 ---
 
-## 5. `hams_sim_robocasa` (`docker/RobocasaDockerfile`)
+## 5. `golem_sim_robocasa` (`docker/RobocasaDockerfile`)
 
-Single-stage, `FROM hams_base`. Provides the MuJoCo + RoboCasa kitchen simulator.
+Single-stage, `FROM golem_base`. Provides the MuJoCo + RoboCasa kitchen simulator.
 
 - `MUJOCO_GL=egl` baked as default; `launch_robocasa.sh` forces `glfw` for a
   windowed viewer unless `--headless` (then `egl` for offscreen GPU rendering).
@@ -162,7 +162,7 @@ Single-stage, `FROM hams_base`. Provides the MuJoCo + RoboCasa kitchen simulator
 
 ---
 
-## 6. `hams_sim_isaac` (`docker/IsaacDockerfile`)
+## 6. `golem_sim_isaac` (`docker/IsaacDockerfile`)
 
 **Two-stage** (builder → runtime), self-contained, from
 `nvidia/cuda:12.2.0-runtime-ubuntu22.04`.
@@ -229,7 +229,7 @@ into `dist-packages` (the path `from mujoco_mpc import agent` auto-spawns).
 ## 8. Build & run orchestration
 
 **Build** — `docker/scripts/docker_build.sh [isaac|robocasa|ros]…` (all three if no
-args). Builds `hams_base` first whenever `ros` or `robocasa` is selected, then
+args). Builds `golem_base` first whenever `ros` or `robocasa` is selected, then
 `docker compose … build` for the requested profiles.
 
 **Run** — `docker/scripts/docker_run.sh <profile> [cmd…]`:
@@ -238,7 +238,7 @@ args). Builds `hams_base` first whenever `ros` or `robocasa` is selected, then
   `container_cache/mjpc_build`, the nested `mujoco_mpc/build`) so dockerd doesn't
   create them root-owned.
 - Normalizes `ROS_DOMAIN_ID` (empty→1; `0` rejected for sims, confirmed for `ros`).
-- `xhost +local:docker`, stable container names (`hams_ros`, `hams_sim_*`), `--rm`.
+- `xhost +local:docker`, stable container names (`golem_ros`, `golem_sim_*`), `--rm`.
 
 The Apple-Silicon port mirrors these as `docker/mac/scripts/docker_build_mac.sh` and
 `docker/mac/scripts/docker_run_mac.sh` (against `docker/mac/docker-compose.yml`):
@@ -328,7 +328,7 @@ docker/scripts/docker_run.sh isaac
 ros2 launch h1_bringup h1_sim_bringup.launch.py
 colcon build --symlink-install                   # force a rebuild
 
-# MJPC iteration (inside hams_ros)
-docker exec -it hams_ros /home/code/h12_sim_scripts/rebuild_mjpc.sh            # C++ edit
-docker exec -it hams_ros /home/code/h12_sim_scripts/rebuild_mjpc.sh --install  # + assets/proto
+# MJPC iteration (inside golem_ros)
+docker exec -it golem_ros /home/code/h12_sim_scripts/rebuild_mjpc.sh            # C++ edit
+docker exec -it golem_ros /home/code/h12_sim_scripts/rebuild_mjpc.sh --install  # + assets/proto
 ```

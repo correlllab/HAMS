@@ -13,7 +13,7 @@ Colima/Docker setup, image builds, and the noVNC tunnel.
 - **2D SLAM** — the Livox lidar cloud is flattened to a laser scan
   (`pointcloud_to_laserscan`) and fed to `slam_toolbox`, which builds an
   occupancy `/map` against the sim's ground-truth `/odom` (published only when
-  the sim is started with `HAMS_SIM_ODOM=1` — off by default).
+  the sim is started with `GOLEM_SIM_ODOM=1` — off by default).
 - **nav2** — a Smac/RegulatedPurePursuit stack plans a collision-free path on
   the map **and** a live costmap (2D scan + the full 3D Livox cloud, so it sees
   counters and appliances the flat slice misses), then drives `/cmd_vel`.
@@ -30,8 +30,8 @@ is publishing before the ROS nodes latch onto sim time):
 
 ```bash
 # from the repo root
-HAMS_DISPLAY=vnc HAMS_RVIZ=vnc HAMS_CAMERAS=0 HAMS_SIM_ODOM=1 \
-HAMS_LOWERBODY=switch HAMS_SLAM=1 HAMS_NAV2=1 HAMS_SPAWN_BACKOFF=1.5 \
+GOLEM_DISPLAY=vnc GOLEM_RVIZ=vnc GOLEM_CAMERAS=0 GOLEM_SIM_ODOM=1 \
+GOLEM_LOWERBODY=switch GOLEM_SLAM=1 GOLEM_NAV2=1 GOLEM_SPAWN_BACKOFF=1.5 \
   docker compose -f docker/mac/docker-compose.yml up -d
 
 # open the noVNC tunnel (Colima doesn't forward container ports)
@@ -41,7 +41,7 @@ HAMS_LOWERBODY=switch HAMS_SLAM=1 HAMS_NAV2=1 HAMS_SPAWN_BACKOFF=1.5 \
 Then drive it:
 
 ```bash
-docker exec -it hams_ros bash        # host docker CLI flaky? use: colima ssh -- docker exec -it hams_ros bash
+docker exec -it golem_ros bash        # host docker CLI flaky? use: colima ssh -- docker exec -it golem_ros bash
 source /home/code/h12_sim_scripts/robot_cli.sh
 
 # The robot comes up already standing in FAME (auto-activated) — wait ~15 s of sim
@@ -63,13 +63,13 @@ blacklisted after a timeout and the explorer moves on; the action succeeds with
 
 | Variable | For the nav demo | Notes |
 |---|---|---|
-| `HAMS_LOWERBODY` | `switch` | Switchable controller: starts in FAME and auto-switches stand↔walk from `‖/cmd_vel‖`. `fame` stands only; `walk` launches the raw policy (use `switch`). |
-| `HAMS_SIM_ODOM` | `1` | Publishes the sim's ground-truth base odom (`/odom` + `odom→pelvis` TF) that SLAM needs. Off by default; **required** for this demo. |
-| `HAMS_SLAM` | `1` | Adds `pointcloud_to_laserscan` + `slam_toolbox` → `/map`. |
-| `HAMS_NAV2` | `1` | Adds the nav2 stack (implies SLAM). Send goals via RViz "2D Nav Goal", `/navigate_to_pose`, or `rob_explore`. |
-| `HAMS_SPAWN_BACKOFF` | `~1.5` | Metres to back the robot into open floor at spawn so nav2 has room. **Baked at container create — change it with `--force-recreate`, not `docker restart`** (see gotchas). |
-| `HAMS_CAMERAS` | `0` | Drops the 3 RGBD renders — the heaviest per-step CPU cost. Roughly doubles sim rate; the nav demo doesn't need them. |
-| `HAMS_DISPLAY` / `HAMS_RVIZ` | `vnc` | MuJoCo viewer on 6080, RViz on 6081. |
+| `GOLEM_LOWERBODY` | `switch` | Switchable controller: starts in FAME and auto-switches stand↔walk from `‖/cmd_vel‖`. `fame` stands only; `walk` launches the raw policy (use `switch`). |
+| `GOLEM_SIM_ODOM` | `1` | Publishes the sim's ground-truth base odom (`/odom` + `odom→pelvis` TF) that SLAM needs. Off by default; **required** for this demo. |
+| `GOLEM_SLAM` | `1` | Adds `pointcloud_to_laserscan` + `slam_toolbox` → `/map`. |
+| `GOLEM_NAV2` | `1` | Adds the nav2 stack (implies SLAM). Send goals via RViz "2D Nav Goal", `/navigate_to_pose`, or `rob_explore`. |
+| `GOLEM_SPAWN_BACKOFF` | `~1.5` | Metres to back the robot into open floor at spawn so nav2 has room. **Baked at container create — change it with `--force-recreate`, not `docker restart`** (see gotchas). |
+| `GOLEM_CAMERAS` | `0` | Drops the 3 RGBD renders — the heaviest per-step CPU cost. Roughly doubles sim rate; the nav demo doesn't need them. |
+| `GOLEM_DISPLAY` / `GOLEM_RVIZ` | `vnc` | MuJoCo viewer on 6080, RViz on 6081. |
 
 ## Manual driving (without exploration)
 
@@ -84,7 +84,7 @@ Or set a single goal in RViz with the **2D Nav Goal** tool and let nav2 drive.
 ## How the pipeline fits together
 
 ```
-MuJoCo (robocasa)                         ROS (hams_ros)
+MuJoCo (robocasa)                        ROS (golem_ros)
   Livox cloud ─/livox/pointcloud──►  pointcloud_to_laserscan ─/converted_scan─► slam_toolbox ─/map─┐
   free-joint pose ─/odom, TF──────►  ...............................................................│
                                      nav2 (global+local costmap: /map + scan + 3D cloud) ◄─────────┘
@@ -94,11 +94,11 @@ MuJoCo (robocasa)                         ROS (hams_ros)
 
 ## Gotchas specific to the nav demo
 
-- **`HAMS_SPAWN_BACKOFF` needs a recreate, not a restart.** It's an environment
+- **`GOLEM_SPAWN_BACKOFF` needs a recreate, not a restart.** It's an environment
   variable baked into the container at create time. `docker restart` reuses the
   old value; to change it, recreate the sim service:
   ```bash
-  HAMS_DISPLAY=vnc HAMS_CAMERAS=0 HAMS_SPAWN_BACKOFF=1.5 \
+  GOLEM_DISPLAY=vnc GOLEM_CAMERAS=0 GOLEM_SPAWN_BACKOFF=1.5 \
     docker compose -f docker/mac/docker-compose.yml up -d --force-recreate --no-deps robocasa
   ```
   The layout is randomized each launch, so a recreate also re-rolls the kitchen —
@@ -107,7 +107,7 @@ MuJoCo (robocasa)                         ROS (hams_ros)
 - **Restart the two containers coherently.** The sim owns `/clock`; if you restart
   it, its sim time resets to 0 and the still-running ROS side sees the clock jump
   backward (TF extrapolation errors, a frozen `0x0` SLAM map). After recreating or
-  restarting `robocasa`, restart `hams_ros` too so it resyncs.
+  restarting `robocasa`, restart `golem_ros` too so it resyncs.
 - **Let FAME settle before commanding motion.** The controller boots into FAME and
   the walk policy is stable only when handed over from a settled stance — give it
   ~15 s of sim time after launch (tether release + settle) before `rob_go`/`rob_explore`.

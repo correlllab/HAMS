@@ -1,4 +1,4 @@
-# CLAUDE.md — HAMS developer guide for coding agents
+# CLAUDE.md — GOLEM developer guide for coding agents
 
 Everything below was verified against the code on 2026-07-12. Where older docs or
 script comments disagree with the code, the code wins (known stale spots are
@@ -6,8 +6,9 @@ flagged inline).
 
 ## 1. Project overview
 
-HAMS (Humanoid Agent Modular Stack) is the software stack for a Unitree H1-2
-humanoid: MuJoCo/RoboCasa and Isaac Lab simulators, a ROS 2 Humble workspace
+GOLEM (Generalized Open Layered Embodied Modules) is the software stack for a
+Unitree H1-2 humanoid: MuJoCo/RoboCasa and Isaac Lab simulators, a ROS 2 Humble
+workspace
 (drivers, upper-body IK control, lower-body MPC/RL locomotion, safety layer,
 perception model servers, and an LLM-callable skills layer), all running in
 separate Docker containers that share one DDS domain. The same `rt/lowcmd` /
@@ -43,8 +44,8 @@ They can be invoked from any directory.
 
 | Script | Verified arguments | Notes |
 |---|---|---|
-| `docker/scripts/docker_build.sh [profile ...]` | `isaac`, `robocasa`, `ros` (no args = all three) | `hams_base` is built first automatically for `robocasa`/`ros`; `isaac` is self-contained. Pins the MJPC build to the `mujoco_mpc` submodule SHA (`MJPC_REF`). |
-| `docker/scripts/docker_run.sh <profile> [cmd...]` | `isaac`, `robocasa`, `ros`; then optionally `bash` (shell instead of default launcher) or any command; a leading `-flag` (e.g. `--headless`) is forwarded to the default launcher | Container names: `hams_ros`, `hams_sim_robocasa`, `hams_sim_isaac`. |
+| `docker/scripts/docker_build.sh [profile ...]` | `isaac`, `robocasa`, `ros` (no args = all three) | `golem_base` is built first automatically for `robocasa`/`ros`; `isaac` is self-contained. Pins the MJPC build to the `mujoco_mpc` submodule SHA (`MJPC_REF`). |
+| `docker/scripts/docker_run.sh <profile> [cmd...]` | `isaac`, `robocasa`, `ros`; then optionally `bash` (shell instead of default launcher) or any command; a leading `-flag` (e.g. `--headless`) is forwarded to the default launcher | Container names: `golem_ros`, `golem_sim_robocasa`, `golem_sim_isaac`. |
 
 Default launchers (compose `command`): `docker/scripts/launch_isaac.sh`,
 `launch_robocasa.sh`, `launch_ros.sh`. The `ros` launcher colcon-builds
@@ -57,10 +58,10 @@ Default launchers (compose `command`): `docker/scripts/launch_isaac.sh`,
 | `docker/mac/scripts/docker_build_mac.sh [service ...]` | `robocasa`, `ros` (no args = both) | **No `isaac`** — Isaac Sim needs an NVIDIA GPU. arm64 base built from `docker/mac/BaseDockerfile.arm64`. |
 | `docker/mac/scripts/docker_run_mac.sh <service> [cmd...]` | `robocasa`, `ros` | Starts ONE service. For the paired sim prefer `docker compose -f docker/mac/docker-compose.yml up` so both start together (RoboCasa running alone for a few seconds lets the robot collapse — motor command timeout). |
 
-Mac feature toggles are env vars read by the compose file: `HAMS_DISPLAY=vnc`
-(MuJoCo viewer → noVNC :6080), `HAMS_RVIZ=vnc` (RViz → :6081), `HAMS_LOWERBODY=fame|walk|switch`,
-`HAMS_SLAM=1`, `HAMS_NAV2=1`, `HAMS_SIM_ODOM=1`, `HAMS_CAMERAS=0`,
-`HAMS_SPAWN_BACKOFF=<m>`, `HAMS_CMD_TIMEOUT=<sim-s>`, `HAMS_ROS_MCP=1`.
+Mac feature toggles are env vars read by the compose file: `GOLEM_DISPLAY=vnc`
+(MuJoCo viewer → noVNC :6080), `GOLEM_RVIZ=vnc` (RViz → :6081), `GOLEM_LOWERBODY=fame|walk|switch`,
+`GOLEM_SLAM=1`, `GOLEM_NAV2=1`, `GOLEM_SIM_ODOM=1`, `GOLEM_CAMERAS=0`,
+`GOLEM_SPAWN_BACKOFF=<m>`, `GOLEM_CMD_TIMEOUT=<sim-s>`, `GOLEM_ROS_MCP=1`.
 GUIs stream over noVNC via `docker/mac/scripts/mac_vnc_tunnel.sh` (no XQuartz).
 
 ### DDS domain safety (both platforms)
@@ -121,7 +122,7 @@ no `sim:=true` arg):
 | Launch file | Scenario |
 |---|---|
 | `h1_sim_bringup.launch.py` | **x86 sim** — full stack: nav (via include), robot/joint state publishers, `frame_task_server`, `safety_node`, gemini/sam servers, MJPC estimator + lowerbody controller, graspgen + skills (`use_skills`, default true), rviz (`use_rviz`) |
-| `h1_sim_bringup_mac.launch.py` | **mac sim** — trimmed: state publishers, `frame_task_server`, `safety_node`; lower body/SLAM/nav2 gated by `HAMS_*` env vars, not launch args |
+| `h1_sim_bringup_mac.launch.py` | **mac sim** — trimmed: state publishers, `frame_task_server`, `safety_node`; lower body/SLAM/nav2 gated by `GOLEM_*` env vars, not launch args |
 | `h1_real_robot_bringup.launch.py` | **real robot, onboard PC** (native, `ROS_DOMAIN_ID=0`) — aggregates the three below-listed real files |
 | `h1_real_drivers.launch.py` | real: Livox MID360, RealSense cams, left+right `gripper_node` |
 | `h1_real_controller.launch.py` | real: estop, state publishers, staggered `safety_node` + `frame_task_server` |
@@ -157,7 +158,7 @@ this is why the `ros` container needs `GEMINI_API_KEY`). There is currently no
 autonomous LLM orchestrator in-repo that calls them; they are invoked over ROS
 (by a human, an external agent, or the `tools/ros_mcp_server.py` debug MCP).
 
-Verified invocation examples (from a shell inside `hams_ros`):
+Verified invocation examples (from a shell inside `golem_ros`):
 
 ```bash
 ros2 action send_goal /skill/grasp custom_ros_messages/action/SkillGrasp \
@@ -209,7 +210,7 @@ exists. Keeping it off by default keeps the sim honest and protects
 sim-to-real transfer.
 
 - **RoboCasa complies:** ground-truth `/odom` + `odom→pelvis` TF is gated by
-  `HAMS_SIM_ODOM` (default `'0'` = off, `h12_mujoco.py:184`). Only the mac nav
+  `GOLEM_SIM_ODOM` (default `'0'` = off, `h12_mujoco.py:184`). Only the mac nav
   demo opts in. Keep it that way.
 - **Known deviations (do not make worse):** Isaac publishes full scene ground
   truth (`rt/sim_state`, robot + object poses as JSON) unconditionally every
@@ -245,7 +246,7 @@ ros2 launch h1_bringup h1_sim_bringup.launch.py   # manual step — the containe
 # variants: use_skills:=false use_rviz:=false use_nav:=false
 
 # Terminal 3 — drive skills: attach to the running ROS container
-docker exec -it hams_ros /bin/bash
+docker exec -it golem_ros /bin/bash
 source /opt/ros/humble/setup.bash
 source /home/code/core_ws/install/setup.bash
 ros2 action send_goal /skill/grasp custom_ros_messages/action/SkillGrasp \
@@ -261,14 +262,14 @@ docker compose -f docker/mac/docker-compose.yml up
 # (start ros within seconds of robocasa or the robot collapses)
 
 # Terminal 3
-docker exec -it hams_ros bash                    # fallback: colima ssh -- docker exec -it hams_ros bash
+docker exec -it golem_ros bash                    # fallback: colima ssh -- docker exec -it golem_ros bash
 source /home/code/h12_sim_scripts/robot_cli.sh   # rob_pose, rob_grip, rob_stand, rob_explore, ...
 ```
 
 The mac `ros` container auto-runs
 `ros2 launch /home/code/core_ws/src/h1_bringup/launch/h1_sim_bringup_mac.launch.py`
 (launched by path; only skills built on mac are available — no `h12_skills`,
-`model_server`, or nav unless `HAMS_SLAM/HAMS_NAV2` are set).
+`model_server`, or nav unless `GOLEM_SLAM/GOLEM_NAV2` are set).
 
 ### Real robot (for awareness — coordinate before touching)
 
@@ -289,7 +290,7 @@ pose — it gates leg commands).
    (gated HF download — see root `README.md`).
 4. `docker/scripts/docker_build.sh robocasa ros` (add `isaac` if needed).
 5. Run the three-terminal flow in §9; confirm with `ros2 topic hz /lowstate`
-   and `ros2 action list | grep skill` inside `hams_ros`.
+   and `ros2 action list | grep skill` inside `golem_ros`.
 6. Trigger `/skill/grasp` or the frontier explorer (§7).
 7. Read first: root `README.md` (run flows, DDS tuning, mac port),
    `docker/BUILD.md` (build system), your target package's source.
@@ -297,13 +298,13 @@ pose — it gates leg commands).
 ### Common pitfalls
 
 - **Start RoboCasa before bringup** — ROS nodes latch onto sim `/clock`; and if
-  you restart the `robocasa` container, restart `hams_ros` too (sim time resets
+  you restart the `robocasa` container, restart `golem_ros` too (sim time resets
   to 0 → TF extrapolation errors, frozen SLAM map).
 - **x86 `ros` container ≠ bringup.** It only builds and gives you a shell.
 - Rebuild is incremental across container restarts (build/install are
   host-mounted); `colcon build --symlink-install` inside the container forces
   it; wipe `container_cache/msgs_ws/` for a clean message rebuild.
-- MJPC C++ iteration: `docker exec -it hams_ros /home/code/h12_sim_scripts/rebuild_mjpc.sh`
+- MJPC C++ iteration: `docker exec -it golem_ros /home/code/h12_sim_scripts/rebuild_mjpc.sh`
   (`--install` to also refresh assets/proto) — not colcon.
 - 9 of the 12 `/skill/*` actions are stubs (§7) — a goal that immediately
   aborts with "not implemented" is expected, not a regression.

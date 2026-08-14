@@ -2,9 +2,9 @@
 # Apple-Silicon / CPU launcher for the MuJoCo (RoboCasa) sim.
 # Same as launch_robocasa.sh but CPU/software rendering, no NVIDIA EGL.
 #
-# Two display modes, selected by the HAMS_DISPLAY env var (default: headless):
-#   HAMS_DISPLAY=headless  OSMesa offscreen, no viewer window (original behaviour)
-#   HAMS_DISPLAY=vnc       render the interactive MuJoCo viewer with software GL
+# Two display modes, selected by the GOLEM_DISPLAY env var (default: headless):
+#   GOLEM_DISPLAY=headless  OSMesa offscreen, no viewer window (original behaviour)
+#   GOLEM_DISPLAY=vnc       render the interactive MuJoCo viewer with software GL
 #                          (llvmpipe) into an in-container Xvfb and stream it out
 #                          over VNC/noVNC. MuJoCo's GL window cannot be forwarded
 #                          to macOS XQuartz on Apple Silicon (broken indirect
@@ -15,9 +15,9 @@
 # Extra args pass through to h12_mujoco.py.
 set -e
 
-HAMS_DISPLAY="${HAMS_DISPLAY:-headless}"
+GOLEM_DISPLAY="${GOLEM_DISPLAY:-headless}"
 
-# VNC/noVNC ports (only used when HAMS_DISPLAY=vnc). Bound to localhost inside the
+# VNC/noVNC ports (only used when GOLEM_DISPLAY=vnc). Bound to localhost inside the
 # Colima VM; reachable from the Mac only through the SSH tunnel (Colima does not
 # forward host-network container ports, so a tunnel is required — see
 # mac_vnc_tunnel.sh).
@@ -94,7 +94,7 @@ source "$MSGS_INSTALL/setup.bash"
 
 export ROS_DOMAIN_ID="${ROS_DOMAIN_ID:-1}"
 
-if [ "$HAMS_DISPLAY" = "vnc" ]; then
+if [ "$GOLEM_DISPLAY" = "vnc" ]; then
     # Interactive viewer via software GL into Xvfb, streamed over VNC/noVNC.
     trap cleanup_vnc_stack EXIT
     start_vnc_stack
@@ -112,5 +112,5 @@ else
 fi
 
 cd /home/code/h1_robocasa
-echo "[launch_robocasa_mac] HAMS_DISPLAY=$HAMS_DISPLAY MUJOCO_GL=$MUJOCO_GL ROS_DOMAIN_ID=$ROS_DOMAIN_ID args: $*"
+echo "[launch_robocasa_mac] GOLEM_DISPLAY=$GOLEM_DISPLAY MUJOCO_GL=$MUJOCO_GL ROS_DOMAIN_ID=$ROS_DOMAIN_ID args: $*"
 python h12_mujoco.py "$@"

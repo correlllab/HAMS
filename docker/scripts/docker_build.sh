@@ -9,9 +9,9 @@
 #     docker_build.sh isaac            # build isaac only
 #     docker_build.sh robocasa ros     # build robocasa + ros
 #
-# RoboCasa and Ros inherit from hams_base; the base image is built first
+# RoboCasa and Ros inherit from golem_base; the base image is built first
 # whenever either of those profiles is selected. Isaac is self-contained
-# (Sim 5.1 / Lab v2.3.2 / Python 3.11) and does not use hams_base.
+# (Sim 5.1 / Lab v2.3.2 / Python 3.11) and does not use golem_base.
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 
@@ -55,7 +55,7 @@ done
 
 if [ "$needs_base" -eq 1 ]; then
     echo "Building base..."
-    docker build -t hams_base:latest -f docker/BaseDockerfile .
+    docker build -t golem_base:latest -f docker/BaseDockerfile .
 fi
 
 PROFILE_ARGS=()

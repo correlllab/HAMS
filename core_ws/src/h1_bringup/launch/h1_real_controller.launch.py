@@ -11,7 +11,12 @@ from launch_ros.actions import Node
 # is unset), while the controller-side rclpy nodes pick up the env directly.
 # If the variable is missing, the DDS half and the rclpy half can end up on
 # different domains and the safety layer will see no commands.
-ASSETS_DIR = '/home/unitree/HAMS/CL_Assets'
+# Absolute path to the checkout on the robot's onboard PC (renamed HAMS ->
+# GOLEM). This URDF is read at launch-description build time, so a wrong path
+# aborts the entire controller launch -- estop, state publishers, safety layer
+# and frame_task all fail to start. GOLEM_ASSETS_DIR overrides it without a code
+# edit if the onboard checkout has not been renamed yet.
+ASSETS_DIR = os.environ.get('GOLEM_ASSETS_DIR', '/home/unitree/GOLEM/CL_Assets')
 
 
 def generate_launch_description():

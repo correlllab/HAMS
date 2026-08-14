@@ -81,7 +81,7 @@ class SimInterface:
         # the motors and dropped the robot ~0.7s after the band released. In sim
         # time the threshold is independent of how fast the sim actually runs.
         self.last_cmd_time = 0.0  # sim seconds of the last received /lowcmd
-        self.timeout = float(os.environ.get('HAMS_CMD_TIMEOUT', '0.5'))  # sim seconds
+        self.timeout = float(os.environ.get('GOLEM_CMD_TIMEOUT', '0.5'))  # sim seconds
         self.timeout_detected = False
         self.timeout_thread = RecurrentThread(
             interval=0.01, target=self.check_cmd_timeout, name='cmd_watchdog'

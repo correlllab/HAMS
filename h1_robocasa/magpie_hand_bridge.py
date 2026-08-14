@@ -40,7 +40,7 @@ except ModuleNotFoundError as exc:
             "magpie_msgs is not available in this shell. Source the workspace "
             "before launching the sim, e.g. "
             "`source /opt/ros/humble/setup.bash && "
-            "source ~/HAMS/core_ws/install/setup.bash`."
+            "source ~/GOLEM/core_ws/install/setup.bash`."
         ) from exc
     raise
 

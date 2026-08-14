@@ -10,7 +10,7 @@
 #     docker_build_mac.sh robocasa         # base + robocasa
 #     docker_build_mac.sh ros              # base + ros
 #
-# Both arm64 images are `FROM hams_base:latest`, so the base is always built
+# Both arm64 images are `FROM golem_base:latest`, so the base is always built
 # first -- from docker/mac/BaseDockerfile.arm64 (ubuntu:22.04, CPU-only), NOT the
 # x86 docker/BaseDockerfile (nvidia/cuda, won't build without the NVIDIA runtime).
 #
@@ -40,10 +40,10 @@ else
     done
 fi
 
-# hams_base for arm64. Context is the repo root (matches the compose build
+# golem_base for arm64. Context is the repo root (matches the compose build
 # contexts, which are ../.. relative to docker/mac/).
 echo "Building base (docker/mac/BaseDockerfile.arm64)..."
-docker build -t hams_base:latest -f docker/mac/BaseDockerfile.arm64 .
+docker build -t golem_base:latest -f docker/mac/BaseDockerfile.arm64 .
 
 echo "Building services: ${SERVICES[*]}"
 docker compose -f "$COMPOSE" build "${SERVICES[@]}"

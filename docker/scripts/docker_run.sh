@@ -12,6 +12,17 @@ SIM=${1:?Usage: ./docker_run.sh [isaac|robocasa|ros] [override command/args...]}
 shift
 cd "$(dirname "$0")/../.."
 
+# HAMS -> GOLEM rename guard. Every feature toggle defaults to off/on without
+# erroring, so a stale HAMS_* export would be silently ignored rather than
+# failing loudly. Reject it instead of second-guessing what the caller meant.
+legacy=$(env | sed -n 's/^\(HAMS_[A-Z0-9_]*\)=.*/\1/p' | tr '\n' ' ')
+if [ -n "$legacy" ]; then
+    echo "ERROR: legacy HAMS_* env vars set: $legacy" >&2
+    echo "       The project is now GOLEM; these were renamed to GOLEM_*." >&2
+    echo "       Update your shell exports / scripts and re-run." >&2
+    exit 1
+fi
+
 # Load local secrets / overrides (GEMINI_API_KEY, ROS_DOMAIN_ID, ...). compose
 # also auto-loads docker/.env, but sourcing here makes the values available to
 # this script too (e.g. the ROS_DOMAIN_ID normalization below). set -a exports
@@ -66,6 +77,6 @@ fi
 # copy-pasting a generated UUID. The ros profile is the real-robot workspace and
 # drops the "sim" infix; the sims (isaac, robocasa) keep it. --rm cleans it up on
 # exit; if a previous run was killed without cleanup, force-remove the stale name.
-if [ "$SIM" = "ros" ]; then NAME="hams_ros"; else NAME="hams_sim_${SIM}"; fi
+if [ "$SIM" = "ros" ]; then NAME="golem_ros"; else NAME="golem_sim_${SIM}"; fi
 docker rm -f "$NAME" >/dev/null 2>&1 || true
 docker compose -f docker/docker-compose.yml --profile "$SIM" run --rm --remove-orphans --name "$NAME" "$SIM" "$@"

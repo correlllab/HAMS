@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """ROS debugging MCP server for the H1 Mac sim.
 
-Runs INSIDE the hams_ros container (where the FastDDS graph is reachable) and
+Runs INSIDE the golem_ros container (where the FastDDS graph is reachable) and
 exposes an HTTP MCP endpoint. Colima doesn't forward container ports to the Mac,
 so it binds localhost inside the VM and you reach it over the same SSH tunnel as
 the noVNC viewers (see mac_vnc_tunnel.sh). Register it on the Mac with:
@@ -17,7 +17,7 @@ call for arbitrary topics) shell out to the ros2 CLI, which is robust for the
 rarely-used cold path. rclpy spins in a background thread; tool handlers read the
 thread-safe cache.
 
-Env: HAMS_ROS_MCP_PORT (default 6082), ROS_DOMAIN_ID, RMW_IMPLEMENTATION.
+Env: GOLEM_ROS_MCP_PORT (default 6082), ROS_DOMAIN_ID, RMW_IMPLEMENTATION.
 """
 import asyncio
 import math
@@ -39,7 +39,7 @@ from std_srvs.srv import Trigger
 
 from mcp.server.fastmcp import FastMCP
 
-PORT = int(os.environ.get("HAMS_ROS_MCP_PORT", "6082"))
+PORT = int(os.environ.get("GOLEM_ROS_MCP_PORT", "6082"))
 _LATCHED = QoSProfile(reliability=ReliabilityPolicy.RELIABLE,
                       durability=DurabilityPolicy.TRANSIENT_LOCAL,
                       history=HistoryPolicy.KEEP_LAST, depth=1)
@@ -198,7 +198,7 @@ def scan_status() -> dict:
 def set_lowerbody(mode: str) -> dict:
     """Switch the lower-body controller. mode='fame' -> stand free (FAME);
     mode='walk' -> hand over to the walk policy (call after fame). Needs the sim
-    launched with HAMS_LOWERBODY=switch."""
+    launched with GOLEM_LOWERBODY=switch."""
     if mode not in ("fame", "walk"):
         return {"ok": False, "error": "mode must be 'fame' or 'walk'"}
     return NODE.call_trigger(mode)

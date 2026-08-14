@@ -3,8 +3,8 @@
 # source using the persistent (seeded) CMake build tree, then refresh the binary
 # that `from mujoco_mpc import agent` auto-spawns. Run INSIDE the ros container:
 #
-#   docker exec -it hams_ros /home/code/h12_sim_scripts/rebuild_mjpc.sh            # C++ edit
-#   docker exec -it hams_ros /home/code/h12_sim_scripts/rebuild_mjpc.sh --install  # + assets/proto/libmujoco
+#   docker exec -it golem_ros /home/code/h12_sim_scripts/rebuild_mjpc.sh            # C++ edit
+#   docker exec -it golem_ros /home/code/h12_sim_scripts/rebuild_mjpc.sh --install  # + assets/proto/libmujoco
 #
 # The default path is fast (seconds for a single-file edit) because the build tree
 # was seeded warm at image build and hydrated by launch_ros.sh. --install is the

@@ -89,20 +89,20 @@ def generate_launch_description():
         ),
     ]
 
-    # Optional lower-body locomotion controller (HAMS_LOWERBODY). Off by default:
+    # Optional lower-body locomotion controller (GOLEM_LOWERBODY). Off by default:
     # the elastic-band tether then holds the robot upright. The node self-sequences
     # its band release (waits for the IK to finish) and publishes leg setpoints on
     # /safety/lowcmd_lower_in for the safety_node to merge.
-    #   HAMS_LOWERBODY=fame   RMA standing/squatting policy — balances the robot
+    #   GOLEM_LOWERBODY=fame   RMA standing/squatting policy — balances the robot
     #                         standing UNSUPPORTED (verified). Does not locomote.
-    #   HAMS_LOWERBODY=walk   TorchScript walk policy on its own (marches in place;
+    #   GOLEM_LOWERBODY=walk   TorchScript walk policy on its own (marches in place;
     #                         topples in the cluttered kitchen).
-    #   HAMS_LOWERBODY=switch switchable controller: starts in FAME (stand) and
+    #   GOLEM_LOWERBODY=switch switchable controller: starts in FAME (stand) and
     #                         auto-switches stand<->walk from ||/cmd_vel|| (no start
     #                         services). This is the one to use for stand<->walk and
     #                         the nav demo — nav2's /cmd_vel makes it walk; it stands
     #                         again when the command drops to ~0.
-    lowerbody = os.environ.get('HAMS_LOWERBODY', '').strip().lower()
+    lowerbody = os.environ.get('GOLEM_LOWERBODY', '').strip().lower()
     _lowerbody_exec = {'fame': 'fame_node', 'walk': 'walking_node',
                        'switch': 'lowerbody_controller_node'}.get(lowerbody)
     if _lowerbody_exec:
@@ -118,14 +118,14 @@ def generate_launch_description():
             output='screen',
         ))
 
-    # Optional 2D SLAM (HAMS_SLAM=1): pointcloud_to_laserscan flattens the Livox
+    # Optional 2D SLAM (GOLEM_SLAM=1): pointcloud_to_laserscan flattens the Livox
     # hemisphere cloud into a horizontal scan, and slam_toolbox builds an occupancy
     # /map from it against the sim's ground-truth /odom (odom -> pelvis). No
     # FAST-LIO needed. REQUIRES the robocasa/sim container started with
-    # HAMS_SIM_ODOM=1 (off by default) to publish that /odom; without it slam_toolbox
+    # GOLEM_SIM_ODOM=1 (off by default) to publish that /odom; without it slam_toolbox
     # has no odom and the map stays empty. p2l params match h1_navigation.launch.py
     # but are fed from the raw /livox/pointcloud instead of FAST-LIO's registered cloud.
-    if os.environ.get('HAMS_SLAM', '').strip().lower() in ('1', 'true', 'on'):
+    if os.environ.get('GOLEM_SLAM', '').strip().lower() in ('1', 'true', 'on'):
         nodes.append(Node(
             package='pointcloud_to_laserscan',
             executable='pointcloud_to_laserscan_node',
@@ -138,7 +138,7 @@ def generate_launch_description():
                 # at ~0.4 m; mapping those puts a phantom obstacle under the robot and
                 # nav2 rejects the start as "lethal space". 0.65 clears the body while
                 # still catching the counter (the robot spawns ~1 m off it via
-                # HAMS_SPAWN_BACKOFF). Lower it only if you also see real obstacles
+                # GOLEM_SPAWN_BACKOFF). Lower it only if you also see real obstacles
                 # missed at close range.
                 'min_height': -0.85, 'max_height': 1.2,
                 'angle_min': -3.14159, 'angle_max': 3.14159,
@@ -163,17 +163,17 @@ def generate_launch_description():
             output='screen',
         ))
 
-    # Optional autonomous navigation (HAMS_NAV2=1, implies SLAM for the map): the
+    # Optional autonomous navigation (GOLEM_NAV2=1, implies SLAM for the map): the
     # nav2 stack plans a collision-free path on the SLAM map + lidar costmap and
     # drives it via /cmd_vel, which the walk policy consumes (nav2's
     # velocity_smoother publishes /cmd_vel). Send goals with the RViz "2D Nav Goal"
-    # tool or the /navigate_to_pose action. With HAMS_LOWERBODY=switch the controller
+    # tool or the /navigate_to_pose action. With GOLEM_LOWERBODY=switch the controller
     # auto-switches to walk as soon as nav2 publishes /cmd_vel (no manual step). The
     # robot must be standing in open floor — nav2 rejects a goal if the robot's start
     # cell is occupied (e.g. pressed against a counter).
     # nav2_config_mac.yaml is nav2_config.yaml with the odom frame swapped from
     # FAST-LIO's camera_init to the sim's odom.
-    if os.environ.get('HAMS_NAV2', '').strip().lower() in ('1', 'true', 'on'):
+    if os.environ.get('GOLEM_NAV2', '').strip().lower() in ('1', 'true', 'on'):
         nav2_launch = os.path.join(
             get_package_share_directory('nav2_bringup'), 'launch', 'navigation_launch.py')
         nav2_cfg = os.path.join(

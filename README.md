@@ -1,7 +1,25 @@
-# HAMS
+# GOLEM
 
-HAMS (Humanoid Agent Modular Stack) for the Correll Lab H1 robot: MuJoCo, ROS 2,
-and Isaac Sim running in separate containers and sharing a CycloneDDS ROS domain.
+GOLEM (Generalized Open Layered Embodied Modules) for the Correll Lab H1 robot:
+MuJoCo, ROS 2, and Isaac Sim running in separate containers and sharing a
+CycloneDDS ROS domain.
+
+## Migrating from HAMS
+
+The project was renamed HAMS → GOLEM. This is a clean break — there are no
+compatibility fallbacks, so update your local setup:
+
+- **Env vars:** every `HAMS_*` toggle is now `GOLEM_*` (`HAMS_SLAM` →
+  `GOLEM_SLAM`, and so on). The run scripts abort with an error if they see a
+  stale `HAMS_*` export, since these toggles default to off and would otherwise
+  be ignored silently. Note the guard cannot fire if you bypass the scripts with
+  `docker compose ... up` directly — the stale var is simply dropped.
+- **Containers/images:** `hams_base`/`hams_ros`/`hams_sim_*` are now
+  `golem_base`/`golem_ros`/`golem_sim_*`. Retag rather than rebuild:
+  `for i in base ros sim_robocasa; do docker tag hams_$i:latest golem_$i:latest; done`
+- **Checkouts:** the robot PC's checkout is now `/home/unitree/GOLEM`. Set
+  `GOLEM_ASSETS_DIR` to override it if you have not renamed it yet.
+- **Remote:** `git remote set-url origin git@github.com:correlllab/GOLEM.git`.
 
 ## Layout
 
@@ -75,7 +93,7 @@ docker/scripts/docker_build.sh robocasa ros  # subset
 docker/scripts/docker_build.sh isaac       # isaac only
 ```
 
-The RoboCasa and ROS images both inherit from `hams_base`, which is
+The RoboCasa and ROS images both inherit from `golem_base`, which is
 built first automatically when either profile is selected. Isaac is
 self-contained and does not use the base.
 
@@ -199,7 +217,7 @@ Three settings fix this and **all are required**:
 Verify under load — `RcvbufErrors` should stop climbing:
 
 ```bash
-docker exec hams_ros grep '^Udp:' /proc/net/snmp   # watch the RcvbufErrors column
+docker exec golem_ros grep '^Udp:' /proc/net/snmp   # watch the RcvbufErrors column
 ```
 
 ## Troubleshooting
@@ -227,7 +245,7 @@ docker/scripts/docker_run.sh ros
 ros2 launch h1_bringup h1_sim_bringup.launch.py
 
 # terminal C — exec into the running ROS container and run the demo
-docker exec -it hams_ros bash
+docker exec -it golem_ros bash
 source /opt/ros/humble/setup.bash
 source /home/code/core_ws/install/setup.bash
 
@@ -256,8 +274,8 @@ instructions above apply — use this section instead.
   toolkit, and no XQuartz (see the GUI note below).
 - Git LFS and submodules, exactly as in [Prerequisites](#prerequisites) above.
 - No `docker/.env` is needed; the Mac compose reads `ROS_DOMAIN_ID` (optional,
-  defaults to `1`) plus the `HAMS_*` feature toggles (`HAMS_DISPLAY`,
-  `HAMS_RVIZ`, `HAMS_LOWERBODY`, `HAMS_SLAM`, `HAMS_NAV2`, …) documented below.
+  defaults to `1`) plus the `GOLEM_*` feature toggles (`GOLEM_DISPLAY`,
+  `GOLEM_RVIZ`, `GOLEM_LOWERBODY`, `GOLEM_SLAM`, `GOLEM_NAV2`, …) documented below.
 - Start the VM with enough resources — one software-GL viewer alone uses ~5
   cores, and running both the MuJoCo viewer and RViz wants headroom:
 
@@ -277,8 +295,8 @@ docker compose -f docker/mac/docker-compose.yml up
 
 `docker/mac/scripts/docker_run_mac.sh [robocasa|ros]` is the Mac counterpart of the
 x86 `docker/scripts/docker_run.sh` — it starts one service with a stable name
-(`hams_sim_robocasa` / `hams_ros`), a `bash`/`<cmd>` override, and the same
-`HAMS_DISPLAY`/`HAMS_RVIZ` env passthrough. Because it runs a single service, use
+(`golem_sim_robocasa` / `golem_ros`), a `bash`/`<cmd>` override, and the same
+`GOLEM_DISPLAY`/`GOLEM_RVIZ` env passthrough. Because it runs a single service, use
 it in two terminals (start `ros` promptly) or for one-off shells; prefer
 `docker compose … up` for the everyday paired sim so RoboCasa never runs alone
 (see the collapse warning below).
@@ -303,7 +321,7 @@ over noVNC. Enable them per-viewer:
 
 ```bash
 # MuJoCo viewer on :6080, RViz on :6081 (set either or both)
-HAMS_DISPLAY=vnc HAMS_RVIZ=vnc docker compose -f docker/mac/docker-compose.yml up -d
+GOLEM_DISPLAY=vnc GOLEM_RVIZ=vnc docker compose -f docker/mac/docker-compose.yml up -d
 
 # open the SSH tunnel to both noVNC ports (Colima does not forward container ports)
 ./docker/mac/scripts/mac_vnc_tunnel.sh     # --open also opens the browser; --stop closes the tunnel
@@ -314,7 +332,7 @@ Then open:
 - **MuJoCo viewer** → <http://localhost:6080/vnc.html>
 - **RViz** (RobotModel + TF) → <http://localhost:6081/vnc.html>
 
-`HAMS_DISPLAY` (RoboCasa/MuJoCo) and `HAMS_RVIZ` (ROS/RViz) are independent — set
+`GOLEM_DISPLAY` (RoboCasa/MuJoCo) and `GOLEM_RVIZ` (ROS/RViz) are independent — set
 either or both; the defaults are headless.
 
 ### Driving the robot
@@ -325,7 +343,7 @@ command the H1, source the helper and send joint-space postures or gripper
 commands:
 
 ```bash
-docker exec -it hams_ros bash          # if the host docker CLI is flaky: colima ssh, then docker exec …
+docker exec -it golem_ros bash          # if the host docker CLI is flaky: colima ssh, then docker exec …
 source /home/code/h12_sim_scripts/robot_cli.sh
 
 rob_poses                # list postures
@@ -340,20 +358,20 @@ Watch the motion in either viewer. (`rob_pose` takes a name and moves the robot;
 ### Lower-body controller (standing free)
 
 By default an elastic-band tether holds the robot upright and only the upper body
-is controlled. Set `HAMS_LOWERBODY=fame` to run the RMA lower-body policy, which
+is controlled. Set `GOLEM_LOWERBODY=fame` to run the RMA lower-body policy, which
 releases the tether and **balances the robot standing unsupported**:
 
 ```bash
-HAMS_DISPLAY=vnc HAMS_RVIZ=vnc HAMS_LOWERBODY=fame \
+GOLEM_DISPLAY=vnc GOLEM_RVIZ=vnc GOLEM_LOWERBODY=fame \
   docker compose -f docker/mac/docker-compose.yml up
 ```
 
-`HAMS_LOWERBODY=fame` **stands** (and squats via `/lowerbody/squat_cmd`) but holds
+`GOLEM_LOWERBODY=fame` **stands** (and squats via `/lowerbody/squat_cmd`) but holds
 position — it does not locomote. For **stand *and* walk**, use the switchable
 controller instead:
 
 ```bash
-HAMS_DISPLAY=vnc HAMS_RVIZ=vnc HAMS_LOWERBODY=switch \
+GOLEM_DISPLAY=vnc GOLEM_RVIZ=vnc GOLEM_LOWERBODY=switch \
   docker compose -f docker/mac/docker-compose.yml up
 ```
 
@@ -364,7 +382,7 @@ there is no manual `rob_walk` handover step (`rob_walk` just prints a reminder).
 walk policy **does stay upright** now, handed over from a settled FAME stance — the
 earlier "falls a few seconds after the tether releases" was a too-tight motor
 watchdog on the slow sim (see gotchas). Launching the raw policy directly
-(`HAMS_LOWERBODY=walk`) still just marches in place; use `switch`. (`torch` is
+(`GOLEM_LOWERBODY=walk`) still just marches in place; use `switch`. (`torch` is
 already in the ros image; building `unitree_hg` needs `rosidl-generator-dds-idl`,
 which the image now includes.)
 
@@ -376,10 +394,10 @@ the lidar, nav2 planning collision-free paths on a costmap that includes the ful
 **[docs/NAVIGATION_DEMO.md](docs/NAVIGATION_DEMO.md)**. In short:
 
 ```bash
-HAMS_DISPLAY=vnc HAMS_RVIZ=vnc HAMS_CAMERAS=0 HAMS_SIM_ODOM=1 \
-HAMS_LOWERBODY=switch HAMS_SLAM=1 HAMS_NAV2=1 HAMS_SPAWN_BACKOFF=1.5 \
+GOLEM_DISPLAY=vnc GOLEM_RVIZ=vnc GOLEM_CAMERAS=0 GOLEM_SIM_ODOM=1 \
+GOLEM_LOWERBODY=switch GOLEM_SLAM=1 GOLEM_NAV2=1 GOLEM_SPAWN_BACKOFF=1.5 \
   docker compose -f docker/mac/docker-compose.yml up -d
-# then, inside hams_ros:
+# then, inside golem_ros:
 #   source /home/code/h12_sim_scripts/robot_cli.sh
 #   rob_stand    # FAME stand (wait ~15 s sim time for the tether to release)
 #   rob_explore  # walk handover + the /skill/frontier_explore action (autonomous mapping)
@@ -402,7 +420,7 @@ ros2 action send_goal /skill/frontier_explore custom_ros_messages/action/SkillFr
 # success / message / goals_reached. Ctrl-C cancels the goal.
 ```
 
-`HAMS_SIM_ODOM=1` publishes the sim's ground-truth base odometry (`/odom` +
+`GOLEM_SIM_ODOM=1` publishes the sim's ground-truth base odometry (`/odom` +
 `odom→pelvis` TF) that SLAM consumes; it is off by default so the shared sim
 bridge stays silent on the real/x86 stack, and the nav demo opts in.
 
@@ -410,7 +428,7 @@ Watch the map, costmap, and green plan build in RViz (<http://localhost:6081/vnc
 
 ### ROS debugging MCP server (optional)
 
-`HAMS_ROS_MCP=1` starts an in-container MCP server that exposes ROS-inspection and
+`GOLEM_ROS_MCP=1` starts an in-container MCP server that exposes ROS-inspection and
 robot-driving tools (`robot_status`, `wait_for`, `costmap_summary`, `drive`, …) to
 Claude Code over the same SSH tunnel as the viewers. Setup and tool list:
 **[docs/ROS_MCP_DEBUG.md](docs/ROS_MCP_DEBUG.md)**.
@@ -430,12 +448,12 @@ Claude Code over the same SSH tunnel as the viewers. Setup and tool list:
 - **Restart the two containers coherently.** The RoboCasa container owns `/clock`.
   Restarting it alone resets sim time to 0 while the ROS side keeps its old clock →
   TF extrapolation errors and a frozen `0×0` SLAM map. After restarting/recreating
-  `robocasa`, restart `hams_ros` too so it resyncs to the fresh clock.
-- **`HAMS_SPAWN_BACKOFF` is baked at container-create.** `docker restart` reuses the
+  `robocasa`, restart `golem_ros` too so it resyncs to the fresh clock.
+- **`GOLEM_SPAWN_BACKOFF` is baked at container-create.** `docker restart` reuses the
   old value; use `docker compose up --force-recreate --no-deps robocasa` (with the
   env set) to change it. For nav, `1.5`–`2.0` keeps the robot off the counters.
 - **The sim motor watchdog is sim-time based.** The low-level interface zeroes the
-  motors if no `rt/lowcmd` arrives within `HAMS_CMD_TIMEOUT` (default `0.5`) seconds
+  motors if no `rt/lowcmd` arrives within `GOLEM_CMD_TIMEOUT` (default `0.5`) seconds
   **of sim time** — measured in sim time on purpose, because a wall-clock timeout is
   far too tight on a sim running ~0.2× real-time (it used to drop the robot ~0.7 s
-  after the tether released). Bump `HAMS_CMD_TIMEOUT` if a heavier scene still trips it.
+  after the tether released). Bump `GOLEM_CMD_TIMEOUT` if a heavier scene still trips it.

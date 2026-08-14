@@ -28,7 +28,7 @@ Locomotion and Motion Imitation for Humanoid Policy Learning",
 - 12 leg actions: `target_q = action * 0.25 + default_angles[:12]`.
 
 Upper body: during ALMI-X collection the torso+arms were PD-driven externally
-(replayed AMASS motions) — the lower policy only *observes* them. In HAMS the
+(replayed AMASS motions) — the lower policy only *observes* them. In GOLEM the
 frame_task IK plays that role through the safety layer.
 
 ## Usage

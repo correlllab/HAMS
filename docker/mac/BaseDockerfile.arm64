@@ -10,7 +10,7 @@
 # Everything else is identical: Python 3.10 + ROS 2 Humble via apt,
 # CycloneDDS 0.10.x from source, uv, unitree_sdk2_python, pin/pink/mink.
 #
-# Build:  docker build -t hams_base:latest -f docker/mac/BaseDockerfile.arm64 .
+# Build:  docker build -t golem_base:latest -f docker/mac/BaseDockerfile.arm64 .
 # ==============================
 FROM ubuntu:22.04
 

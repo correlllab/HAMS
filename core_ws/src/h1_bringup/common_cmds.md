@@ -1,10 +1,10 @@
 # Common commands
 
 Handy `ros2 action send_goal` snippets for driving the H1-2 stack. Run these
-from a shell **inside `hams_ros`** with the workspace sourced:
+from a shell **inside `golem_ros`** with the workspace sourced:
 
 ```bash
-docker exec -it hams_ros /bin/bash
+docker exec -it golem_ros /bin/bash
 source /opt/ros/humble/setup.bash
 source /home/code/core_ws/install/setup.bash
 ```

@@ -1,11 +1,11 @@
 services:
   isaac:
     profiles: [isaac]
-    container_name: hams_sim_isaac
+    container_name: golem_sim_isaac
     build:
       context: ..
       dockerfile: docker/IsaacDockerfile
-    image: hams_sim_isaac:latest
+    image: golem_sim_isaac:latest
     runtime: nvidia
     privileged: true
     shm_size: 16g
@@ -35,11 +35,11 @@ services:
 
   robocasa:
     profiles: [robocasa]
-    container_name: hams_sim_robocasa
+    container_name: golem_sim_robocasa
     build:
       context: ..
       dockerfile: docker/RobocasaDockerfile
-    image: hams_sim_robocasa:latest
+    image: golem_sim_robocasa:latest
     runtime: nvidia
     privileged: true
     shm_size: 16g
@@ -78,7 +78,7 @@ services:
 
   ros:
     profiles: [ros]
-    container_name: hams_ros
+    container_name: golem_ros
     build:
       context: ..
       dockerfile: docker/RosDockerfile
@@ -87,7 +87,7 @@ services:
       # applies. This keeps the baked MJPC in lockstep with the gitlink.
       args:
         - MJPC_REF
-    image: hams_ros:latest
+    image: golem_ros:latest
     runtime: nvidia
     privileged: true
     shm_size: 16g
